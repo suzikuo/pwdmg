@@ -635,6 +635,14 @@ final class AndroidVaultStore {
         return host.equals(domain) || host.endsWith("." + domain);
     }
 
+    private static boolean relaxedAutofillDomainMatches(String hostname, String savedDomain) {
+        String host = normalizeDomain(hostname);
+        String domain = normalizeDomain(savedDomain);
+        if (host.isEmpty() || domain.isEmpty() || domain.indexOf('*') >= 0) return false;
+        if (host.indexOf('.') < 0 || domain.indexOf('.') < 0) return false;
+        return domain.equals(host) || domain.endsWith("." + host);
+    }
+
     private static boolean wildcardDomainMatches(String host, String domain) {
         StringBuilder pattern = new StringBuilder("^");
         for (int index = 0; index < domain.length(); index += 1) {
@@ -682,7 +690,8 @@ final class AndroidVaultStore {
         for (JSONObject entry : indexedLoginEntries(sourcePayload)) {
             JSONArray domains = entry.optJSONArray("domains");
             for (int index = 0; domains != null && index < domains.length(); index += 1) {
-                if (domainMatches(host, domains.optString(index))) {
+                String domain = domains.optString(index);
+                if (domainMatches(host, domain) || relaxedAutofillDomainMatches(host, domain)) {
                     matches.add(entry);
                     break;
                 }
@@ -785,6 +794,10 @@ final class AndroidVaultStore {
                 }
             }
 
+            if (candidateIds.isEmpty()) {
+                addRelaxedParentDomainMatches(host, candidateIds);
+            }
+
             List<JSONObject> matches = new ArrayList<>();
             if (candidateIds.isEmpty()) return matches;
             for (JSONObject entry : loginEntries) {
@@ -825,6 +838,19 @@ final class AndroidVaultStore {
                     }
                 }
                 if (hasWildcard) wildcardEntries.add(entry);
+            }
+        }
+
+        private void addRelaxedParentDomainMatches(String host, Set<String> candidateIds) {
+            for (JSONObject entry : loginEntries) {
+                JSONArray domains = entry.optJSONArray("domains");
+                for (int index = 0; domains != null && index < domains.length(); index += 1) {
+                    if (relaxedAutofillDomainMatches(host, domains.optString(index))) {
+                        String id = entry.optString("id");
+                        if (!id.isEmpty()) candidateIds.add(id);
+                        break;
+                    }
+                }
             }
         }
 

@@ -26,12 +26,20 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public final class AndroidPasswordBridge {
     private static final String TAG = "PwdAutofillBridge";
     private final Activity activity;
     private final AndroidVaultStore store;
     private final AndroidUpdateManager updater;
+    private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
+    private final Map<String, UpdateTask> updateTasks = new ConcurrentHashMap<>();
 
     AndroidPasswordBridge(Activity activity) {
         this.activity = activity;
@@ -294,6 +302,7 @@ public final class AndroidPasswordBridge {
         return autofillType == View.AUTOFILL_TYPE_TEXT
             || klass == InputType.TYPE_CLASS_TEXT
             || klass == InputType.TYPE_CLASS_NUMBER
+            || klass == InputType.TYPE_CLASS_PHONE
             || inputType == 0;
     }
 
@@ -505,6 +514,33 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
+    public String startUpdateTask(String action, String value) {
+        return result(() -> {
+            String normalizedAction = action == null ? "" : action.trim().toLowerCase(Locale.ROOT);
+            if (!normalizedAction.equals("check") && !normalizedAction.equals("download")) {
+                throw new IllegalArgumentException("Unsupported update task: " + action);
+            }
+
+            UpdateTask task = new UpdateTask(normalizedAction);
+            updateTasks.put(task.id, task);
+            Future<?> future = updateExecutor.submit(() -> runUpdateTask(task, value));
+            task.setFuture(future);
+            return task.toJson();
+        });
+    }
+
+    @JavascriptInterface
+    public String getUpdateTaskState(String taskId) {
+        return result(() -> {
+            UpdateTask task = updateTasks.get(taskId);
+            if (task == null) throw new IllegalArgumentException("Update task was not found");
+            JSONObject state = task.toJson();
+            if (task.isFinished()) updateTasks.remove(taskId);
+            return state;
+        });
+    }
+
+    @JavascriptInterface
     public String applyAppUpdate(String packagePath) {
         return result(() -> updater.apply(packagePath));
     }
@@ -572,5 +608,91 @@ public final class AndroidPasswordBridge {
 
     private interface BridgeCall {
         Object run() throws Exception;
+    }
+
+    private void runUpdateTask(UpdateTask task, String value) {
+        try {
+            task.progress("check", 0, 0, task.action.equals("download") ? "正在检查更新" : "正在获取版本信息");
+            JSONObject result;
+            if (task.action.equals("download")) {
+                result = updater.download(value, task::progress);
+            } else {
+                result = updater.check(value);
+            }
+            task.complete(result);
+        } catch (Exception error) {
+            task.fail("ERROR", error.getMessage());
+        }
+    }
+
+    private static final class UpdateTask {
+        final String id = UUID.randomUUID().toString();
+        final String action;
+        private Future<?> future;
+        private String status = "running";
+        private String phase = "check";
+        private long downloaded = 0;
+        private long total = 0;
+        private int progress = 0;
+        private String message = "";
+        private JSONObject result = null;
+        private String errorCode = "";
+        private String errorMessage = "";
+
+        UpdateTask(String action) {
+            this.action = action;
+        }
+
+        synchronized void setFuture(Future<?> future) {
+            this.future = future;
+        }
+
+        synchronized void progress(String phase, long downloaded, long total, String message) {
+            if (!"running".equals(status)) return;
+            this.phase = phase == null ? "" : phase;
+            this.downloaded = Math.max(0, downloaded);
+            this.total = Math.max(0, total);
+            if (this.total > 0 && this.downloaded > 0) {
+                this.progress = Math.max(1, Math.min(99, (int) ((this.downloaded * 100) / this.total)));
+            } else if ("check".equals(this.phase)) {
+                this.progress = 8;
+            } else if ("verify".equals(this.phase)) {
+                this.progress = 96;
+            }
+            this.message = message == null ? "" : message;
+        }
+
+        synchronized void complete(JSONObject result) {
+            this.status = "done";
+            this.result = result;
+            this.progress = 100;
+            this.message = "完成";
+        }
+
+        synchronized void fail(String code, String message) {
+            this.status = "error";
+            this.errorCode = code == null ? "ERROR" : code;
+            this.errorMessage = message == null ? "" : message;
+        }
+
+        synchronized boolean isFinished() {
+            return !"running".equals(status) || (future != null && future.isDone());
+        }
+
+        synchronized JSONObject toJson() throws Exception {
+            JSONObject data = new JSONObject()
+                .put("id", id)
+                .put("action", action)
+                .put("status", status)
+                .put("phase", phase)
+                .put("downloaded", downloaded)
+                .put("total", total)
+                .put("progress", progress)
+                .put("message", message);
+            if (result != null) data.put("result", result);
+            if (!errorCode.isEmpty()) data.put("errorCode", errorCode);
+            if (!errorMessage.isEmpty()) data.put("errorMessage", errorMessage);
+            return data;
+        }
     }
 }

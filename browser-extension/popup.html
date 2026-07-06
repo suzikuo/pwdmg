@@ -9,22 +9,26 @@
   <body>
     <main class="popup-shell">
       <header class="popup-header">
-        <div>
+        <div class="brand-mark" aria-hidden="true">MP</div>
+        <div class="header-copy">
           <h1>My Password</h1>
-          <p id="siteHost">正在读取当前页面</p>
+          <p id="siteHost">读取当前页面中</p>
         </div>
         <span id="stateBadge" class="state-badge" data-state="checking">检测中</span>
       </header>
 
       <section class="status-panel" aria-live="polite">
-        <p id="status">正在连接本地保险库...</p>
+        <div class="status-line">
+          <span class="status-dot" aria-hidden="true"></span>
+          <p id="status">正在连接本地保险库...</p>
+        </div>
         <p id="matchInfo" class="match-info"></p>
       </section>
 
       <form id="unlockForm" class="unlock-form">
         <label for="password">主密码</label>
         <div class="password-row">
-          <input id="password" type="password" placeholder="可留空" autocomplete="current-password" />
+          <input id="password" type="password" placeholder="输入主密码" autocomplete="current-password" />
           <button id="unlockButton" type="submit">解锁</button>
         </div>
       </form>
@@ -32,7 +36,7 @@
       <div id="matchList" class="match-list" aria-label="当前网站匹配账号"></div>
 
       <footer class="popup-actions">
-        <button id="refreshButton" class="secondary" type="button">刷新页面</button>
+        <button id="refreshButton" class="secondary" type="button">刷新</button>
         <button id="lockButton" class="secondary danger" type="button">锁定</button>
       </footer>
     </main>

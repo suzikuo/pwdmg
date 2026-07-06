@@ -21,6 +21,7 @@ MAX_PACKAGE_BYTES = 500 * 1024 * 1024
 HTTP_TIMEOUT_SECONDS = 20
 WINDOWS_ASSET_KEYS = ("windows", "win64", "win")
 HEX_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
+DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json"
 
 
 class UpdateError(Exception):
@@ -86,9 +87,7 @@ class DesktopUpdateService:
         }
 
     def _normalize_manifest_url(self, manifest_url: str) -> str:
-        value = (manifest_url or "").strip()
-        if not value:
-            raise UpdateError("Update manifest URL is required")
+        value = (manifest_url or "").strip() or DEFAULT_UPDATE_MANIFEST_URL
         parsed = urllib.parse.urlparse(value)
         host = (parsed.hostname or "").lower()
         if parsed.scheme == "https":

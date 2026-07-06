@@ -1,6 +1,6 @@
 import type { ApiResult, AppState, PluginListenerState, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types'
 import { androidStorageAdapter } from './androidStorageAdapter'
-import { fail, ok, type CreateVaultResult, type PasswordManagerApiAdapter } from './apiTypes'
+import { fail, ok, type CreateVaultResult, type PasswordManagerApiAdapter, type StartupData } from './apiTypes'
 import { callDesktopApi, desktopStorageAdapter } from './desktopStorageAdapter'
 import { migrateLegacyStorageText } from './legacyWeb'
 import type { VaultStorageAdapter } from './storageTypes'
@@ -12,9 +12,11 @@ const SESSION_SECONDS = 10 * 60
 
 let payload: VaultPayload | null = null
 let vaultKey: VaultKey | null = null
+let passwordless = false
 let expiresAt = 0
 
 export const api: PasswordManagerApiAdapter = {
+  getStartupData: () => getStartupData(),
   getState: () => nativeVaultCall('getState', () => guard(getState)),
   createVault: (password, importLegacy) => nativeVaultCall('createVault', () => guard(() => createVault(password, importLegacy)), password, importLegacy),
   unlock: (password) => nativeVaultCall('unlock', () => guard(() => unlock(password)), password),
@@ -29,15 +31,32 @@ export const api: PasswordManagerApiAdapter = {
   disablePluginListener: () => selectedStorage().disablePluginListener(),
   getAndroidAutofillState: () => selectedStorage().getAndroidAutofillState(),
   openAndroidAutofillSettings: () => selectedStorage().openAndroidAutofillSettings(),
-  checkAppUpdate: (manifestUrl) => selectedStorage().checkAppUpdate(manifestUrl),
-  downloadAppUpdate: (manifestUrl) => selectedStorage().downloadAppUpdate(manifestUrl),
+  checkAppUpdate: (manifestUrl, onProgress) => selectedStorage().checkAppUpdate(manifestUrl, onProgress),
+  downloadAppUpdate: (manifestUrl, onProgress) => selectedStorage().downloadAppUpdate(manifestUrl, onProgress),
   applyAppUpdate: (packagePath) => selectedStorage().applyAppUpdate(packagePath),
   safeExit: () => selectedStorage().safeExit()
 }
 
+async function getStartupData(): Promise<ApiResult<StartupData>> {
+  if (useAndroidNativeApi()) {
+    const response = await callAndroidApi<AppState>('getState')
+    if (!response.ok || !response.data) return fail(response.code || 'ERROR', response.message || '读取启动状态失败')
+    return ok({ state: response.data })
+  }
+  return guard(async () => {
+    const state = await getState()
+    if (state.hasVault && state.locked && state.passwordless) {
+      return {
+        state,
+        vault: await unlock('')
+      }
+    }
+    return { state }
+  })
+}
+
 function nativeVaultCall<T>(method: string, webFallback: () => Promise<ApiResult<T>>, ...args: unknown[]): Promise<ApiResult<T>> {
   if (useAndroidNativeApi()) return callAndroidApi(method, ...androidArgs(method, args))
-  if (useDesktopStorage()) return callDesktopApi(method, ...args)
   return webFallback()
 }
 
@@ -53,7 +72,8 @@ async function getState(): Promise<AppState> {
     locked: !isUnlocked(),
     expiresAt: isUnlocked() ? Math.floor(expiresAt / 1000) : 0,
     legacyAvailable: storageState.legacyAvailable,
-    vaultPath: storageState.vaultPath
+    vaultPath: storageState.vaultPath,
+    passwordless: storageState.passwordless === true
   }
 }
 
@@ -76,6 +96,7 @@ async function createVault(password: string, importLegacy: boolean): Promise<Cre
   unwrap(await storage.writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false))
   payload = normalized
   vaultKey = encrypted.vaultKey
+  passwordless = (password || '') === ''
   refreshSession()
   await cacheNativeSession(password || '')
   return { vault: cloneVaultPayload(normalized), migrated }
@@ -86,6 +107,11 @@ async function unlock(password: string): Promise<VaultPayload> {
   const decrypted = await decryptPayload(password || '', validateEnvelope(envelope))
   payload = normalizeVaultPayload(decrypted.payload)
   vaultKey = decrypted.vaultKey
+  passwordless = (password || '') === ''
+  if (passwordless && envelope.passwordless !== true) {
+    envelope.passwordless = true
+    unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(envelope, null, 2), false))
+  }
   refreshSession()
   await cacheNativeSession(password || '')
   return cloneVaultPayload(payload)
@@ -94,6 +120,7 @@ async function unlock(password: string): Promise<VaultPayload> {
 async function lock(): Promise<AppState> {
   payload = null
   vaultKey = null
+  passwordless = false
   expiresAt = 0
   await clearNativeSession()
   return getState()
@@ -109,6 +136,7 @@ async function saveVault(nextPayload: VaultPayload): Promise<VaultPayload> {
 
   payload = normalizeVaultPayload({ ...nextPayload, updatedAt: nowSeconds() })
   const envelope = await encryptPayloadWithKey(vaultKey, payload)
+  envelope.passwordless = passwordless
   unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(envelope, null, 2), false))
   refreshSession()
   return cloneVaultPayload(payload)
@@ -120,6 +148,7 @@ async function changePassword(newPassword: string): Promise<AppState> {
   unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false))
   payload = current
   vaultKey = encrypted.vaultKey
+  passwordless = (newPassword || '') === ''
   refreshSession()
   await cacheNativeSession(newPassword || '')
   return getState()

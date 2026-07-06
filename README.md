@@ -26,11 +26,12 @@ Running `npm run build` in `front/` builds all three frontend targets:
 
 ## Desktop Packaging
 
-The packaged Windows desktop release defaults to one executable:
+The packaged Windows desktop release is a multi-file windowed app:
 
-- `My Password.exe`: the desktop GUI app, and the Chrome/Edge Native Messaging host when launched with `--native-host`.
+- `My Password.exe`: the desktop GUI app.
+- `_internal/`: Python runtime, dependencies, and built frontend assets.
 
-The app is built with the console subsystem so Native Messaging has working stdio. During normal GUI startup the console window is hidden by the app; when Chrome/Edge launches `My Password.exe --native-host`, stdio stays available for Native Messaging.
+The GUI build does not use the console subsystem, so double-clicking `My Password.exe` should not flash a black console window. It is also built as an onedir package instead of a onefile package, so Windows can start it without PyInstaller extracting the full app into a temporary directory on every launch.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1
@@ -41,9 +42,11 @@ Useful options:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1 -Clean
 powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1 -SkipFrontend
-powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1 -WithSeparateHost
+powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1 -NoNativeHost
 powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1 -NoZip
 ```
+
+The desktop package includes `My Password Host.exe` by default, built from `native_host.spec` and staged next to `My Password.exe`. Use `-NoNativeHost` only when you intentionally want a GUI-only package.
 
 ## Desktop Updates
 
@@ -112,9 +115,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\write_update_manifest.ps1 `
   -AssetUrl "https://github.com/OWNER/REPO/releases/download/v2.0.1/MyPasswordDesktop-windows.zip"
 ```
 
-In the desktop app, open `更新`, paste the HTTPS URL of `update-manifest.json`, then check/download/install. The app verifies the desktop zip SHA256 from the manifest before it can be installed. Auto install is only enabled in packaged Windows builds; development mode can still check/download.
+In the desktop app, open `更新` and check/download/install. The manifest URL defaults to `https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json`, so a published release can be discovered without typing a version-specific URL. The app verifies the desktop zip SHA256 from the manifest before it can be installed. Auto install is only enabled in packaged Windows builds; development mode can still check/download.
 
-In the Android app, use the same `update-manifest.json` URL. The app verifies the APK SHA256 before opening the Android package installer.
+For Windows desktop, the update zip contains the multi-file app contents. During install, the app exits, the updater expands the zip, copies the unpacked files over the current install directory, and restarts `My Password.exe`.
+
+In the Android app, use the same default `update-manifest.json` URL. The app verifies the APK SHA256 before opening the Android package installer.
 
 ## Browser Extension
 
@@ -125,7 +130,7 @@ In the Android app, use the same `update-manifest.json` URL. The app verifies th
 The desktop app writes the Native Messaging manifest under `~/mypwdmg/native-host/` and registers it for the current Windows user. Chrome/Edge will start the host on demand; you do not need to manually run a background script.
 Turning plugin listening off removes the browser registration and writes a local disabled flag. Already-running native host connections check that flag before every request, so they stop returning fill data immediately.
 
-For packaged releases, the Native Messaging launcher runs `My Password.exe --native-host`. A separate `My Password Host.exe` can still be built with `-WithSeparateHost` if you ever want a fallback host binary, but it is not required by default.
+For packaged releases, Native Messaging uses a separate `My Password Host.exe` next to `My Password.exe`. The default desktop package includes it automatically, while the desktop GUI no longer handles `--native-host`.
 
 The old PowerShell registration script is still available as a development fallback:
 

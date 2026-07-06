@@ -47,6 +47,7 @@ def encrypt_payload(
     salt = os.urandom(16)
     key = derive_key(password, salt, iterations)
     envelope = encrypt_payload_with_key(VaultKey(key=key, salt=salt, iterations=iterations), payload)
+    envelope["passwordless"] = password == ""
     return envelope, VaultKey(key=key, salt=salt, iterations=iterations)
 
 

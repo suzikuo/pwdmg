@@ -9,6 +9,7 @@ let nextId = 1
 const pending = new Map()
 const pendingCaptures = new Map()
 const pendingPromptsByTab = new Map()
+const pendingLockedCapturesByTab = new Map()
 const queryCache = new Map()
 const inflightQueryMatches = new Map()
 let queryCacheVersion = 0
@@ -70,6 +71,9 @@ function prunePendingCaptures() {
   for (const [tabId, item] of pendingPromptsByTab) {
     if (item.expiresAt <= now) pendingPromptsByTab.delete(tabId)
   }
+  for (const [tabId, item] of pendingLockedCapturesByTab) {
+    if (item.expiresAt <= now) pendingLockedCapturesByTab.delete(tabId)
+  }
 }
 
 function pruneQueryCache() {
@@ -121,6 +125,16 @@ function hostLooksRelated(left, right) {
   return Boolean(a && b && (a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`)))
 }
 
+async function activeTabId() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  return tab?.id || 0
+}
+
+function notifyTabCaptureReady(tabId) {
+  if (!tabId) return
+  chrome.tabs.sendMessage(tabId, { type: 'MYPWDMG_CAPTURE_READY' }).catch(() => {})
+}
+
 function queryCacheKey(hostname = '') {
   return normalizeHost(hostname)
 }
@@ -164,9 +178,45 @@ function forgetPromptToken(token) {
   }
 }
 
+function cleanText(value = '') {
+  return String(value ?? '').replace(/\0/g, '').trim()
+}
+
+function applyCaptureOverrides(capture = {}, overrides = {}) {
+  const next = { ...capture }
+  const title = cleanText(overrides.title)
+  const account = cleanText(overrides.account)
+  const accountKind = ['email', 'phone', 'username'].includes(overrides.accountKind) ? overrides.accountKind : 'username'
+
+  if (overrides.titleEdited && title) {
+    next.title = title
+    next.titleEdited = true
+  }
+  if (overrides.accountEdited && account) {
+    next.account = account
+    next.accountKind = accountKind
+    next.username = accountKind === 'username' ? account : ''
+    next.email = accountKind === 'email' ? account : ''
+    next.phone = accountKind === 'phone' ? account : ''
+    next.accountEdited = true
+  }
+  return next
+}
+
 async function prepareCapturedLogin(capture, tabId = 0) {
   prunePendingCaptures()
   const previewResponse = await nativeCall('previewCapturedLogin', { capture })
+  if (!previewResponse?.ok && tabId && (previewResponse?.code === 'LOCKED' || previewResponse?.code === 'BAD_PASSWORD')) {
+    pendingLockedCapturesByTab.set(tabId, {
+      capture,
+      expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
+    })
+    return {
+      ok: false,
+      code: 'LOCKED_CAPTURE_PENDING',
+      message: 'My Password 插件已锁定。请点击浏览器右上角 My Password 解锁，解锁后会继续弹出保存。'
+    }
+  }
   if (!previewResponse?.ok || !previewResponse.data) return previewResponse
   const nativePreview = previewResponse.data
   if (!nativePreview.shouldPrompt) {
@@ -187,6 +237,7 @@ async function prepareCapturedLogin(capture, tabId = 0) {
       preview,
       expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
     })
+    notifyTabCaptureReady(tabId)
   }
   return {
     ok: true,
@@ -194,7 +245,15 @@ async function prepareCapturedLogin(capture, tabId = 0) {
   }
 }
 
-async function savePreparedCapture(token, parentId = '', updateEntryId = '') {
+async function prepareLockedCaptureForTab(tabId = 0) {
+  prunePendingCaptures()
+  const item = pendingLockedCapturesByTab.get(tabId)
+  if (!item) return
+  pendingLockedCapturesByTab.delete(tabId)
+  await prepareCapturedLogin(item.capture, tabId)
+}
+
+async function savePreparedCapture(token, parentId = '', updateEntryId = '', overrides = {}) {
   prunePendingCaptures()
   const item = pendingCaptures.get(token)
   if (!item) {
@@ -202,8 +261,9 @@ async function savePreparedCapture(token, parentId = '', updateEntryId = '') {
   }
   pendingCaptures.delete(token)
   forgetPromptToken(token)
+  const capture = applyCaptureOverrides(item.capture, overrides)
   const response = await nativeCall('saveCapturedLogin', {
-    capture: item.capture,
+    capture,
     parentId: parentId || '',
     updateEntryId: updateEntryId || ''
   })
@@ -239,6 +299,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const response = await nativeCall('unlock', { password: message.password || '' })
       if (response?.ok) {
         clearQueryCache()
+        await prepareLockedCaptureForTab(await activeTabId())
         refreshActiveTab()
       }
       sendResponse(response)
@@ -259,7 +320,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return
     }
     if (message?.type === 'MYPWDMG_SAVE_CAPTURE') {
-      sendResponse(await savePreparedCapture(message.token, message.parentId, message.updateEntryId))
+      sendResponse(await savePreparedCapture(message.token, message.parentId, message.updateEntryId, message.overrides || {}))
       return
     }
     if (message?.type === 'MYPWDMG_TAKE_SAVE_PROMPT') {

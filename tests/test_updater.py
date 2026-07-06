@@ -1,6 +1,6 @@
 import unittest
 
-from pwdmg_core.updater import DesktopUpdateService, UpdateError, compare_versions
+from pwdmg_core.updater import DEFAULT_UPDATE_MANIFEST_URL, DesktopUpdateService, UpdateError, compare_versions
 
 
 class UpdaterTest(unittest.TestCase):
@@ -8,6 +8,11 @@ class UpdaterTest(unittest.TestCase):
         self.assertGreater(compare_versions("2.0.1", "2.0.0"), 0)
         self.assertEqual(compare_versions("v2.0.0", "2.0.0"), 0)
         self.assertLess(compare_versions("1.9.9", "2.0.0"), 0)
+
+    def test_empty_manifest_url_uses_default_release_manifest(self):
+        service = DesktopUpdateService(current_version="2.0.0")
+
+        self.assertEqual(service._normalize_manifest_url(""), DEFAULT_UPDATE_MANIFEST_URL)
 
     def test_parse_manifest_accepts_windows_asset(self):
         service = DesktopUpdateService(current_version="2.0.0")

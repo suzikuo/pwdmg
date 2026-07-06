@@ -12,10 +12,10 @@ from .paths import NATIVE_HOST_DIR, PLUGIN_CONFIG_FILE, ensure_app_dir
 
 
 HOST_NAME = "com.suzikuo.mypwdmg"
-PACKAGED_HOST_ARG = "--native-host"
 CHROME_REG_PATH = rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}"
 EDGE_REG_PATH = rf"Software\Microsoft\Edge\NativeMessagingHosts\{HOST_NAME}"
 EXTENSION_ID_RE = re.compile(r"^[a-p]{32}$")
+PACKAGED_HOST_EXE = "My Password Host.exe"
 
 
 def plugin_listener_state() -> Dict[str, Any]:
@@ -100,30 +100,33 @@ def _write_launcher() -> Path:
     log_path = _log_path()
     command = _host_command()
     cwd = _host_working_dir()
-    content = "\n".join(
+    lines = [
+        "@echo off",
+        "setlocal",
+        f'set "LOG_DIR={NATIVE_HOST_DIR}"',
+        f'set "LOG_FILE={log_path}"',
+        'if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul',
+    ]
+    if _is_packaged():
+        host_executable = _host_executable_path()
+        lines.append(f'if not exist "{host_executable}" exit /b 1')
+    lines.extend(
         [
-            "@echo off",
-            "setlocal",
-            f'set "LOG_DIR={NATIVE_HOST_DIR}"',
-            f'set "LOG_FILE={log_path}"',
-            'if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul',
             f'cd /d "{cwd}" >nul 2>nul',
             f'{command} 2>>"%LOG_FILE%"',
             'exit /b %ERRORLEVEL%',
             "",
         ]
     )
+    content = "\n".join(lines)
     launcher_path.write_text(content, encoding="utf-8")
     return launcher_path
 
 
 def _host_command() -> str:
-    if _is_packaged():
-        executable = Path(sys.executable).resolve()
-        if not executable.exists():
-            raise FileNotFoundError(f"Packaged executable does not exist: {executable}")
-        return f'"{executable}" {PACKAGED_HOST_ARG}'
     executable = _host_executable_path()
+    if _is_packaged():
+        return f'"{executable}"'
     return f'"{executable}" -m pwdmg_core.native_host'
 
 
@@ -134,7 +137,10 @@ def _host_working_dir() -> Path:
 
 
 def _host_executable_path() -> Path:
-    return Path(sys.executable).resolve()
+    executable = Path(sys.executable).resolve()
+    if _is_packaged():
+        return executable.parent / PACKAGED_HOST_EXE
+    return executable
 
 
 def _write_manifest(extension_id: str) -> Path:
@@ -197,11 +203,25 @@ def _delete_registry(path: str) -> None:
 def _stop_packaged_host_processes() -> None:
     if not _is_packaged():
         return
-    # Packaged mode uses the same exe for GUI and Native Messaging
-    # (`My Password.exe --native-host`). Killing by image name would close the
-    # desktop app too, so disabling the listener relies on the local flag that
-    # is checked before each native-host request.
+    host_executable = _host_executable_path()
+    if host_executable.exists():
+        _stop_processes_by_image_name(host_executable.name)
     return
+
+
+def _stop_processes_by_image_name(image_name: str) -> None:
+    if os.name != "nt" or not image_name:
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/IM", image_name, "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
+        pass
 
 
 def _is_process_running(image_name: str) -> bool:

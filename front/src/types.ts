@@ -37,6 +37,7 @@ export interface AppState {
   expiresAt: number
   legacyAvailable: boolean
   vaultPath: string
+  passwordless?: boolean
 }
 
 export interface PluginListenerState {
@@ -94,6 +95,17 @@ export interface AppUpdateDownload {
   sha256: string
   size: number
 }
+
+export interface AppUpdateProgress {
+  action?: string
+  phase?: string
+  progress?: number
+  downloaded?: number
+  total?: number
+  message?: string
+}
+
+export type AppUpdateProgressHandler = (progress: AppUpdateProgress) => void
 
 export interface AppUpdateApply {
   packagePath: string

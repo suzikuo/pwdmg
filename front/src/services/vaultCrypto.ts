@@ -4,6 +4,7 @@ export type VaultEnvelope = {
   format: 'mypwdmg-vault'
   version: 1
   cipher: 'AES-256-GCM'
+  passwordless?: boolean
   kdf: {
     name: 'PBKDF2-HMAC-SHA256'
     iterations: number
@@ -26,8 +27,10 @@ export async function encryptPayload(password: string, payload: VaultPayload) {
   const salt = randomBytes(16)
   const key = await deriveVaultKey(password, salt, DEFAULT_ITERATIONS)
   const vaultKey = { key, salt, iterations: DEFAULT_ITERATIONS }
+  const envelope = await encryptPayloadWithKey(vaultKey, payload)
+  envelope.passwordless = (password || '') === ''
   return {
-    envelope: await encryptPayloadWithKey(vaultKey, payload),
+    envelope,
     vaultKey
   }
 }

@@ -63,6 +63,7 @@ class VaultService:
         self._payload: Dict[str, Any] | None = None
         self._key: VaultKey | None = None
         self._index: VaultIndex | None = None
+        self._passwordless = False
         self._expires_at = 0.0
         self._vault_mtime_ns = 0
 
@@ -73,6 +74,7 @@ class VaultService:
             "expiresAt": int(self._expires_at) if self._is_unlocked() else 0,
             "legacyAvailable": self.legacy_path.exists(),
             "vaultPath": str(self.vault_path),
+            "passwordless": self._is_passwordless_vault(),
         }
 
     def storage_state(self) -> Dict[str, Any]:
@@ -80,6 +82,7 @@ class VaultService:
             "hasVault": self.vault_path.exists(),
             "legacyAvailable": self.legacy_path.exists(),
             "vaultPath": str(self.vault_path),
+            "passwordless": self._is_passwordless_vault(),
         }
 
     def read_vault_envelope(self) -> str:
@@ -121,14 +124,18 @@ class VaultService:
         payload, key = decrypt_payload(password, envelope)
         self._set_payload(self._normalize_payload(payload))
         self._key = key
+        self._passwordless = password == ""
         self._vault_mtime_ns = self._current_vault_mtime_ns()
         self._refresh_session()
+        if password == "" and envelope.get("passwordless") is not True:
+            self._save_current()
         return copy.deepcopy(self._payload)
 
     def lock(self) -> None:
         self._payload = None
         self._key = None
         self._index = None
+        self._passwordless = False
         self._expires_at = 0.0
         self._vault_mtime_ns = 0
 
@@ -152,6 +159,7 @@ class VaultService:
         self._write_envelope(envelope)
         self._set_payload(payload)
         self._key = key
+        self._passwordless = new_password == ""
         self._vault_mtime_ns = self._current_vault_mtime_ns()
         self._refresh_session()
         return self.state()
@@ -285,6 +293,7 @@ class VaultService:
         self._write_envelope(envelope)
         self._set_payload(normalized)
         self._key = key
+        self._passwordless = password == ""
         self._vault_mtime_ns = self._current_vault_mtime_ns()
         self._refresh_session()
 
@@ -292,6 +301,7 @@ class VaultService:
         if self._payload is None or self._key is None:
             raise VaultLockedError("Vault is locked")
         envelope = encrypt_payload_with_key(self._key, self._payload)
+        envelope["passwordless"] = self._passwordless
         self._write_envelope(envelope)
         self._vault_mtime_ns = self._current_vault_mtime_ns()
 
@@ -317,10 +327,33 @@ class VaultService:
             raise FileNotFoundError("Vault does not exist")
         return json.loads(self.vault_path.read_text(encoding="utf-8"))
 
+    def _is_passwordless_vault(self) -> bool:
+        if not self.vault_path.exists():
+            return False
+        try:
+            envelope = self._read_envelope()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        return envelope.get("passwordless") is True
+
+    def _try_unlock_passwordless(self) -> bool:
+        if self._payload is not None and self._key is not None and self._passwordless:
+            self._refresh_session()
+            return True
+        if not self._is_passwordless_vault():
+            return False
+        try:
+            self.unlock("")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, VaultCryptoError):
+            return False
+        return self._is_unlocked() and self._payload is not None
+
     def _require_payload(self) -> Dict[str, Any]:
         if self._payload is not None and self._key is not None:
             self._reload_if_vault_changed()
         if not self._is_unlocked() or self._payload is None:
+            if self._try_unlock_passwordless():
+                return self._payload
             self.lock()
             raise VaultLockedError("Vault is locked")
         return self._payload
@@ -447,6 +480,8 @@ class VaultService:
             "accountKind": account_kind,
             "accountLabel": account_label,
             "loginAccountSource": login_account_source,
+            "titleEdited": bool(capture.get("titleEdited")),
+            "accountEdited": bool(capture.get("accountEdited")),
         }
 
     def _clean_capture_text(self, value: Any, max_length: int = MAX_CAPTURE_TEXT_LENGTH) -> str:
@@ -590,11 +625,17 @@ class VaultService:
             domains = entry.setdefault("domains", [])
             if not any(domain_matches(capture["hostname"], domain) for domain in domains):
                 domains.append(capture["hostname"])
-        if not entry.get("title") or entry.get("title") == "Untitled":
+        if capture.get("titleEdited") or not entry.get("title") or entry.get("title") == "Untitled":
             entry["title"] = capture["title"]
-        for field in ("username", "email", "phone"):
-            if capture[field] and not entry.get(field):
-                entry[field] = capture[field]
+        if capture.get("accountEdited"):
+            entry["username"] = capture["username"]
+            entry["email"] = capture["email"]
+            entry["phone"] = capture["phone"]
+            entry["loginAccountSource"] = capture["loginAccountSource"]
+        else:
+            for field in ("username", "email", "phone"):
+                if capture[field] and not entry.get(field):
+                    entry[field] = capture[field]
         if entry.get("loginAccountSource") not in LOGIN_ACCOUNT_SOURCES:
             entry["loginAccountSource"] = capture["loginAccountSource"]
         entry["password"] = capture["password"]

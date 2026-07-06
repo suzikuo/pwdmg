@@ -3,6 +3,7 @@ import type {
   AppUpdateApply,
   AppUpdateCheck,
   AppUpdateDownload,
+  AppUpdateProgressHandler,
   ApiResult,
   AppState,
   PluginListenerState,
@@ -16,7 +17,13 @@ export type CreateVaultResult = {
   migrated: number
 }
 
+export type StartupData = {
+  state: AppState
+  vault?: VaultPayload
+}
+
 export interface PasswordManagerApiAdapter {
+  getStartupData: () => Promise<ApiResult<StartupData>>
   getState: () => Promise<ApiResult<AppState>>
   createVault: (password: string, importLegacy: boolean) => Promise<ApiResult<CreateVaultResult>>
   unlock: (password: string) => Promise<ApiResult<VaultPayload>>
@@ -31,8 +38,8 @@ export interface PasswordManagerApiAdapter {
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
-  checkAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateCheck>>
-  downloadAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateDownload>>
+  checkAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateCheck>>
+  downloadAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateDownload>>
   applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
   safeExit: () => Promise<ApiResult<null>>
 }

@@ -12,7 +12,29 @@ let activeTab = null
 let activeHost = ''
 
 function send(message) {
-  return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      const error = chrome.runtime.lastError
+      if (error) {
+        resolve({ ok: false, code: 'EXTENSION_MESSAGE_ERROR', message: String(error.message || error) })
+        return
+      }
+      resolve(response)
+    })
+  })
+}
+
+function sendToActiveTab(message) {
+  return new Promise((resolve) => {
+    if (!activeTab?.id) {
+      resolve({ ok: false, message: '当前页面不可填充。' })
+      return
+    }
+    chrome.tabs.sendMessage(activeTab.id, message, (response) => {
+      const error = chrome.runtime.lastError
+      resolve(error ? { ok: false, message: String(error.message || error) } : (response || { ok: true }))
+    })
+  })
 }
 
 async function getActiveTab() {
@@ -34,7 +56,7 @@ function tabHost(tab) {
 }
 
 async function refreshActiveTab() {
-  if (activeTab?.id) chrome.tabs.sendMessage(activeTab.id, { type: 'MYPWDMG_REFRESH' }).catch(() => {})
+  await sendToActiveTab({ type: 'MYPWDMG_REFRESH' })
 }
 
 function setBadge(text, state) {
@@ -49,7 +71,7 @@ function showLocked(message = '请输入主密码解锁插件。') {
   matchListEl.innerHTML = ''
   form.hidden = false
   lockButton.hidden = true
-  passwordInput.focus()
+  window.setTimeout(() => passwordInput.focus(), 20)
 }
 
 function showUnlocked() {
@@ -95,7 +117,7 @@ async function loadMatches() {
   }
 
   statusEl.textContent = '已连接本地保险库。'
-  matchInfoEl.textContent = '正在查询当前网站...'
+  matchInfoEl.textContent = '正在查询当前站点...'
   const response = await send({ type: 'MYPWDMG_QUERY_MATCHES', hostname: activeHost })
   if (!response?.ok) {
     if (response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
@@ -108,7 +130,7 @@ async function loadMatches() {
   }
 
   const matches = Array.isArray(response.data) ? response.data : []
-  matchInfoEl.textContent = matches.length ? `当前网站有 ${matches.length} 个匹配账号。` : '当前网站暂无匹配账号。'
+  matchInfoEl.textContent = matches.length ? `当前站点有 ${matches.length} 个匹配账号。` : '当前站点暂无匹配账号。'
   matchListEl.innerHTML = matches.map(renderMatch).join('')
 }
 
@@ -120,11 +142,14 @@ function renderMatch(entry) {
   ].filter(Boolean)
   return `
     <div class="match-row">
-      <div>
+      <div class="match-copy">
         <strong>${escapeHtml(entry.title || 'Untitled')}</strong>
         <span>${escapeHtml(label)}</span>
       </div>
-      <small>${escapeHtml(badges.join(' · '))}</small>
+      <div class="match-meta">
+        <small>${escapeHtml(badges.join(' · '))}</small>
+        <button class="fill-button" type="button" data-entry-id="${escapeAttr(entry.id)}">填充</button>
+      </div>
     </div>
   `
 }
@@ -142,6 +167,10 @@ function escapeHtml(value) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/'/g, '&#39;')
 }
 
 async function loadState() {
@@ -195,6 +224,21 @@ lockButton.addEventListener('click', async () => {
 refreshButton.addEventListener('click', async () => {
   await refreshActiveTab()
   await loadState()
+})
+
+matchListEl.addEventListener('click', async (event) => {
+  const button = event.target?.closest?.('.fill-button')
+  if (!button) return
+  button.disabled = true
+  button.textContent = '...'
+  const response = await sendToActiveTab({ type: 'MYPWDMG_FILL_ENTRY', entryId: button.getAttribute('data-entry-id') })
+  if (!response?.ok) {
+    button.disabled = false
+    button.textContent = '填充'
+    statusEl.textContent = response?.message || '无法向当前页面填充。'
+    return
+  }
+  window.close()
 })
 
 loadState()

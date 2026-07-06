@@ -303,7 +303,14 @@ public class PwdAutofillService extends AutofillService {
         if (hints == null) return false;
         for (String h : hints) {
             String low = h.toLowerCase(Locale.ROOT);
-            if (low.contains("username") || low.contains("email") || low.contains("userid")) return true;
+            if (low.contains("username")
+                || low.contains("email")
+                || low.contains("userid")
+                || low.contains("account")
+                || low.contains("login")
+                || low.contains("phone")
+                || low.contains("mobile")
+                || low.contains("tel")) return true;
         }
         return false;
     }
@@ -379,9 +386,13 @@ public class PwdAutofillService extends AutofillService {
     private static boolean containsUsername(String text) {
         return text.contains("user")
             || text.contains("login")
+            || text.contains("loginname")
+            || text.contains("login-name")
             || text.contains("email")
             || text.contains("mail")
             || text.contains("account")
+            || text.contains("accountname")
+            || text.contains("account-name")
             || text.contains("phone")
             || text.contains("mobile")
             || text.contains("tel")
@@ -390,7 +401,9 @@ public class PwdAutofillService extends AutofillService {
             || text.contains("账号")
             || text.contains("账户")
             || text.contains("邮箱")
-            || text.contains("手机");
+            || text.contains("手机")
+            || text.contains("手机号码")
+            || text.contains("手机号");
     }
 
     private static boolean containsPassword(String text) {
@@ -472,6 +485,7 @@ public class PwdAutofillService extends AutofillService {
         return autofillType == View.AUTOFILL_TYPE_TEXT
             || klass == InputType.TYPE_CLASS_TEXT
             || klass == InputType.TYPE_CLASS_NUMBER
+            || klass == InputType.TYPE_CLASS_PHONE
             || inputType == 0;
     }
 

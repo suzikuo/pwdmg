@@ -53,17 +53,24 @@ final class AndroidUpdateManager {
     }
 
     JSONObject download(String manifestUrl) throws Exception {
+        return download(manifestUrl, null);
+    }
+
+    JSONObject download(String manifestUrl, ProgressCallback progress) throws Exception {
+        notifyProgress(progress, "check", 0, 0, "正在检查更新");
         JSONObject update = check(manifestUrl);
         if (!update.optBoolean("updateAvailable")) {
             throw new IllegalStateException("Already on the latest version");
         }
 
         JSONObject asset = update.getJSONObject("asset");
+        notifyProgress(progress, "download", 0, asset.optLong("size", 0), "正在准备下载");
         File packageFile = downloadAsset(
             asset.getString("url"),
             asset.getString("sha256"),
             asset.optLong("size", 0),
-            asset.getString("fileName")
+            asset.getString("fileName"),
+            progress
         );
 
         return new JSONObject()
@@ -158,10 +165,11 @@ final class AndroidUpdateManager {
         throw new IllegalArgumentException("Update manifest is missing an Android asset");
     }
 
-    private File downloadAsset(String url, String expectedSha256, long expectedSize, String fileName) throws Exception {
+    private File downloadAsset(String url, String expectedSha256, long expectedSize, String fileName, ProgressCallback progress) throws Exception {
         updateDir.mkdirs();
         File destination = new File(updateDir, safeApkName(fileName));
         if (destination.isFile() && sha256File(destination).equals(expectedSha256)) {
+            notifyProgress(progress, "download", destination.length(), expectedSize, "已存在可用安装包");
             return destination;
         }
 
@@ -176,10 +184,13 @@ final class AndroidUpdateManager {
         }
         long contentLength = connection.getContentLengthLong();
         long limit = expectedSize > 0 ? expectedSize : (contentLength > 0 ? contentLength : MAX_PACKAGE_BYTES);
+        long progressTotal = expectedSize > 0 ? expectedSize : (contentLength > 0 ? contentLength : 0);
         if (limit > MAX_PACKAGE_BYTES) {
             throw new IllegalArgumentException("Android APK is too large");
         }
 
+        notifyProgress(progress, "download", 0, progressTotal, "正在下载更新包");
+        long lastProgressAt = 0;
         try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(temp)) {
             byte[] buffer = new byte[256 * 1024];
             int read;
@@ -190,12 +201,18 @@ final class AndroidUpdateManager {
                 }
                 digest.update(buffer, 0, read);
                 output.write(buffer, 0, read);
+                long now = System.currentTimeMillis();
+                if (now - lastProgressAt > 250) {
+                    lastProgressAt = now;
+                    notifyProgress(progress, "download", total, progressTotal, "正在下载更新包");
+                }
             }
             output.getFD().sync();
         } finally {
             connection.disconnect();
         }
 
+        notifyProgress(progress, "verify", total, progressTotal, "正在校验更新包");
         String actualSha256 = hex(digest.digest());
         if (!actualSha256.equals(expectedSha256)) {
             temp.delete();
@@ -211,7 +228,12 @@ final class AndroidUpdateManager {
         if (!temp.renameTo(destination)) {
             throw new IllegalStateException("Could not move APK download into place");
         }
+        notifyProgress(progress, "download", destination.length(), expectedSize, "下载完成");
         return destination;
+    }
+
+    private void notifyProgress(ProgressCallback progress, String phase, long downloaded, long total, String message) {
+        if (progress != null) progress.onProgress(phase, downloaded, total, message);
     }
 
     private File resolveDownloadedApk(String packagePath) throws Exception {
@@ -330,5 +352,9 @@ final class AndroidUpdateManager {
             builder.append(String.format(Locale.ROOT, "%02x", value & 0xff));
         }
         return builder.toString();
+    }
+
+    interface ProgressCallback {
+        void onProgress(String phase, long downloaded, long total, String message);
     }
 }

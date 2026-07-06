@@ -309,7 +309,7 @@
               label="Manifest"
               type="textarea"
               autosize
-              placeholder="https://github.com/OWNER/REPO/releases/download/v2.0.1/update-manifest.json"
+              :placeholder="DEFAULT_UPDATE_MANIFEST_URL"
             />
             <div class="update-actions">
               <van-button size="small" type="primary" icon="replay" :loading="updateBusy === 'check'" @click="checkAppUpdate">检查</van-button>
@@ -348,6 +348,15 @@
               <div>
                 <span>安装方式</span>
                 <strong>{{ updateInstallModeText }}</strong>
+              </div>
+            </div>
+            <div v-if="updateBusy && updateProgress" class="update-progress">
+              <div class="update-progress-head">
+                <span>{{ updateProgressLabel }}</span>
+                <strong v-if="updateProgressPercent > 0">{{ updateProgressPercent }}%</strong>
+              </div>
+              <div class="update-progress-track">
+                <span :style="{ width: `${updateProgressPercent || 12}%` }"></span>
               </div>
             </div>
             <p v-if="downloadedUpdatePath" class="settings-note compact-note">已下载：{{ downloadedUpdatePath }}</p>
@@ -433,6 +442,7 @@ import type {
   AndroidAutofillState,
   AppState,
   AppUpdateCheck,
+  AppUpdateProgress,
   EntryKind,
   LoginAccountSource,
   PluginListenerState,
@@ -455,6 +465,9 @@ const PANE_WIDTH_KEY = 'mypwdmg.desktopPaneWidth'
 const UI_SCALE_KEY = 'mypwdmg.uiScaleLevel.v2'
 const FONT_SIZE_KEY = 'mypwdmg.fontSizePercent'
 const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
+const DEFAULT_UPDATE_MANIFEST_URL = 'https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json'
+const VERSIONED_DEFAULT_MANIFEST_URL_PATTERN =
+  /^https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/download\/[^/]+\/update-manifest\.json$/i
 const UI_SCALE_BASE = 0.92
 const UI_SCALE_MIN = 0.5
 const UI_SCALE_MAX = 1.3
@@ -462,13 +475,16 @@ const FONT_SIZE_MIN = 80
 const FONT_SIZE_MAX = 130
 const TOTP_PERIOD_SECONDS = 30
 const BACK_EXIT_INTERVAL = 1600
+const EXTERNAL_VAULT_REFRESH_DELAY_MS = 180
+const EXTERNAL_VAULT_REFRESH_MIN_INTERVAL_MS = 900
 
 const state = reactive<AppState>({
   hasVault: false,
   locked: true,
   expiresAt: 0,
   legacyAvailable: false,
-  vaultPath: ''
+  vaultPath: '',
+  passwordless: false
 })
 const stateLoading = ref(true)
 const stateError = ref('')
@@ -479,8 +495,9 @@ const androidAutofillBusy = ref(false)
 const backupStatus = ref('')
 const updateBusy = ref<'check' | 'download' | 'apply' | ''>('')
 const updateStatus = ref('')
-const updateManifestUrl = ref(localStorage.getItem(UPDATE_MANIFEST_URL_KEY) || '')
+const updateManifestUrl = ref(resolveUpdateManifestUrl(localStorage.getItem(UPDATE_MANIFEST_URL_KEY)))
 const updateInfo = ref<AppUpdateCheck | null>(null)
+const updateProgress = ref<AppUpdateProgress | null>(null)
 const downloadedUpdatePath = ref('')
 const password = ref('')
 const newPassword = ref('')
@@ -571,13 +588,16 @@ const pluginListenerStatus = computed(() => {
   if (!listener) return '未检测'
   if (!listener.supported) return '仅 Windows 支持'
   if (!listener.enabled) return '未开启'
+  if (listener.mode === 'packaged' && !listener.hostExecutableExists) return '缺少 Host'
   const browsers = [
     listener.chromeRegistered ? 'Chrome' : '',
     listener.edgeRegistered ? 'Edge' : ''
   ].filter(Boolean)
   return browsers.length ? `${browsers.join('/')} 已开启` : '未开启'
 })
-const showPluginSettings = computed(() => pluginListener.value?.supported === true)
+const runtimeMode = String(import.meta.env.VITE_STORAGE_MODE || import.meta.env.VITE_API_MODE || import.meta.env.MODE || '').toLowerCase()
+const isDesktopMode = computed(() => ['desktop', 'pywebview', 'native'].includes(runtimeMode))
+const showPluginSettings = computed(() => isDesktopMode.value && pluginListener.value?.supported !== false)
 const showAndroidAutofillSettings = computed(() => androidAutofill.value?.supported === true)
 const androidAutofillStatus = computed(() => {
   const state = androidAutofill.value
@@ -590,6 +610,18 @@ const updateInstallButtonText = computed(() => updatePlatform.value === 'android
 const updateInstallModeText = computed(() => {
   if (!updateInfo.value?.canApply) return '仅检查/下载'
   return updatePlatform.value === 'android' ? '系统安装器' : '自动安装'
+})
+const updateProgressPercent = computed(() => {
+  const progress = updateProgress.value?.progress || 0
+  return Math.max(0, Math.min(100, Math.round(progress)))
+})
+const updateProgressLabel = computed(() => {
+  const progress = updateProgress.value
+  if (!progress) return ''
+  if (progress.message) return progress.message
+  if (progress.phase === 'download') return '正在下载更新包'
+  if (progress.phase === 'verify') return '正在校验更新包'
+  return '正在检查更新'
 })
 const desktopGridStyle = computed<CssVars>(() => {
   if (!isWide.value) return {} as CssVars
@@ -610,6 +642,9 @@ let resizingPane = false
 let totpTimer = 0
 let totpCurrentStep = -1
 let lastBackRequestAt = 0
+let externalVaultRefreshTimer = 0
+let lastExternalVaultRefreshAt = 0
+let externalVaultRefreshing = false
 let sheetDrag: { kind: 'detail' | 'editor'; startY: number; pointerId: number; expanded: boolean } | null = null
 
 onMounted(() => {
@@ -625,12 +660,13 @@ onMounted(() => {
   window.addEventListener('resize', clampPaneToViewport)
   window.addEventListener('pointerdown', closeTopMenusOnOutside, true)
   window.addEventListener('focus', loadAndroidAutofillState)
+  window.addEventListener('focus', scheduleExternalVaultRefresh)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   window.visualViewport?.addEventListener('resize', updateEditorViewportHeight)
   window.visualViewport?.addEventListener('scroll', updateEditorViewportHeight)
   window.__mypwdmgHandleNativeBack = handleNativeBack
   updateEditorViewportHeight()
   loadState()
-  loadPluginListenerState()
   loadAndroidAutofillState()
 })
 
@@ -654,6 +690,9 @@ onUnmounted(() => {
   window.removeEventListener('resize', clampPaneToViewport)
   window.removeEventListener('pointerdown', closeTopMenusOnOutside, true)
   window.removeEventListener('focus', loadAndroidAutofillState)
+  window.removeEventListener('focus', scheduleExternalVaultRefresh)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  if (externalVaultRefreshTimer) window.clearTimeout(externalVaultRefreshTimer)
   window.visualViewport?.removeEventListener('resize', updateEditorViewportHeight)
   window.visualViewport?.removeEventListener('scroll', updateEditorViewportHeight)
   delete window.__mypwdmgHandleNativeBack
@@ -789,17 +828,31 @@ function setSheetExpanded(kind: 'detail' | 'editor', expanded: boolean) {
 async function loadState() {
   stateLoading.value = true
   stateError.value = ''
-  const result = await api.getState()
-  if (result.ok && result.data) {
-    Object.assign(state, result.data)
-    if (state.hasVault) {
-      if (state.locked) await unlockWithPassword('', true)
-      else await loadUnlockedVault()
+  let shouldAutoUnlock = false
+  try {
+    const result = await api.getStartupData()
+    if (result.ok && result.data) {
+      Object.assign(state, result.data.state)
+      if (result.data.vault) {
+        vault.value = result.data.vault
+        syncSettings(vault.value.settings)
+        state.locked = false
+      } else if (state.hasVault) {
+        if (state.locked && state.passwordless) shouldAutoUnlock = true
+        else if (!state.locked) await loadUnlockedVault()
+      }
+    } else {
+      stateError.value = result.message || '无法连接本地保险库'
     }
-  } else {
-    stateError.value = result.message || '无法连接本地保险库'
+  } finally {
+    stateLoading.value = false
   }
-  stateLoading.value = false
+
+  if (shouldAutoUnlock) {
+    window.setTimeout(() => {
+      unlockWithPassword('', true)
+    }, 0)
+  }
 }
 
 async function createVault() {
@@ -844,6 +897,60 @@ async function loadUnlockedVault() {
   syncSettings(vault.value.settings)
   state.locked = false
   return true
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') scheduleExternalVaultRefresh()
+}
+
+function scheduleExternalVaultRefresh() {
+  if (!isDesktopMode.value || !vault.value || state.locked) return
+  if (externalVaultRefreshTimer) window.clearTimeout(externalVaultRefreshTimer)
+  const now = Date.now()
+  const delay =
+    now - lastExternalVaultRefreshAt < EXTERNAL_VAULT_REFRESH_MIN_INTERVAL_MS
+      ? EXTERNAL_VAULT_REFRESH_MIN_INTERVAL_MS
+      : EXTERNAL_VAULT_REFRESH_DELAY_MS
+  externalVaultRefreshTimer = window.setTimeout(() => {
+    externalVaultRefreshTimer = 0
+    refreshVaultFromDisk()
+  }, delay)
+}
+
+async function refreshVaultFromDisk() {
+  if (!isDesktopMode.value || externalVaultRefreshing || !vault.value || state.locked) return
+  if (busy.value || cloudBusy.value || pluginBusy.value || updateBusy.value) return
+  if (editorOpen.value || passwordSheetOpen.value || createSheetOpen.value) return
+
+  externalVaultRefreshing = true
+  lastExternalVaultRefreshAt = Date.now()
+  const selectedEntryId = selectedEntry.value?.id || ''
+  try {
+    const result = await api.getVault()
+    if (!result.ok || !result.data) {
+      if (result.code === 'LOCKED') {
+        vault.value = null
+        selectedEntry.value = null
+        stopTotpTimer()
+        state.locked = true
+      }
+      return
+    }
+
+    vault.value = result.data
+    syncSettings(vault.value.settings)
+    if (selectedEntryId) {
+      selectedEntry.value = findEntry(vault.value.entries, selectedEntryId)
+      if (!selectedEntry.value) {
+        detailOpen.value = false
+        stopTotpTimer()
+      } else {
+        syncSelectedTotpTimer()
+      }
+    }
+  } finally {
+    externalVaultRefreshing = false
+  }
 }
 
 async function lockVault() {
@@ -1057,12 +1164,17 @@ async function moveEntry(payload: MoveEntryPayload) {
   if (selectedEntry.value) selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
 }
 
-function currentUpdateManifestUrl() {
-  const url = updateManifestUrl.value.trim()
-  if (!url) {
-    showFailToast('请先填写 GitHub Release manifest URL')
-    return ''
+function resolveUpdateManifestUrl(value: string | null) {
+  const url = (value || '').trim()
+  if (!url || url.includes('OWNER/REPO') || VERSIONED_DEFAULT_MANIFEST_URL_PATTERN.test(url)) {
+    return DEFAULT_UPDATE_MANIFEST_URL
   }
+  return url
+}
+
+function currentUpdateManifestUrl() {
+  const url = resolveUpdateManifestUrl(updateManifestUrl.value)
+  updateManifestUrl.value = url
   localStorage.setItem(UPDATE_MANIFEST_URL_KEY, url)
   return url
 }
@@ -1073,10 +1185,11 @@ async function checkAppUpdate() {
   if (!manifestUrl) return
 
   updateBusy.value = 'check'
-  updateStatus.value = ''
+  updateProgress.value = { action: 'check', phase: 'check', progress: 8, message: '正在获取版本信息' }
+  updateStatus.value = '正在获取版本信息'
   downloadedUpdatePath.value = ''
   try {
-    const result = await api.checkAppUpdate(manifestUrl)
+    const result = await api.checkAppUpdate(manifestUrl, handleUpdateProgress)
     if (!result.ok || !result.data) {
       showFailToast(result.message || '检查更新失败')
       return
@@ -1088,6 +1201,7 @@ async function checkAppUpdate() {
     showToast(updateStatus.value)
   } finally {
     updateBusy.value = ''
+    updateProgress.value = null
   }
 }
 
@@ -1097,9 +1211,10 @@ async function downloadAppUpdate() {
   if (!manifestUrl) return
 
   updateBusy.value = 'download'
-  updateStatus.value = ''
+  updateProgress.value = { action: 'download', phase: 'download', progress: 3, message: '正在准备下载' }
+  updateStatus.value = '正在准备下载'
   try {
-    const result = await api.downloadAppUpdate(manifestUrl)
+    const result = await api.downloadAppUpdate(manifestUrl, handleUpdateProgress)
     if (!result.ok || !result.data) {
       showFailToast(result.message || '下载更新失败')
       return
@@ -1110,7 +1225,27 @@ async function downloadAppUpdate() {
     showSuccessToast('更新包已下载')
   } finally {
     updateBusy.value = ''
+    updateProgress.value = null
   }
+}
+
+function handleUpdateProgress(progress: AppUpdateProgress) {
+  updateProgress.value = progress
+  const label = formatUpdateProgress(progress)
+  if (label) updateStatus.value = label
+}
+
+function formatUpdateProgress(progress: AppUpdateProgress) {
+  if (progress.phase === 'download') {
+    const downloaded = progress.downloaded ? formatBytes(progress.downloaded) : ''
+    const total = progress.total ? formatBytes(progress.total) : ''
+    const percent = progress.progress ? `${Math.round(progress.progress)}%` : ''
+    if (downloaded && total) return `正在下载 ${downloaded} / ${total}${percent ? ` (${percent})` : ''}`
+    if (downloaded) return `正在下载 ${downloaded}`
+    return progress.message || '正在下载更新包'
+  }
+  if (progress.phase === 'verify') return progress.message || '正在校验更新包'
+  return progress.message || '正在检查更新'
 }
 
 async function applyAppUpdate() {
@@ -1786,6 +1921,7 @@ function openDrawer() {
   createMenuOpen.value = false
   moreMenuOpen.value = false
   drawerOpen.value = true
+  if (drawerSection.value === 'settings') loadPluginListenerState()
   loadAndroidAutofillState()
   if (!isDrawerWide.value) drawerDetailOpen.value = false
 }
@@ -1815,6 +1951,7 @@ function openPluginDetail() {
 
 function selectDrawerSection(section: typeof drawerSection.value) {
   drawerSection.value = section
+  if (section === 'settings') loadPluginListenerState()
   if (!isDrawerWide.value) drawerDetailOpen.value = true
 }
 

@@ -15,11 +15,15 @@ const MAX_IMPORT_BACKUPS = 5
 const VAULT_PATH_LABEL = 'IndexedDB:mypwdmg-web-vault/vault'
 
 export const webStorageAdapter: VaultStorageAdapter = {
-  getStorageState: async () => guard(async () => ({
-    hasVault: Boolean(await idbGet<unknown>(VAULT_KEY)),
-    legacyAvailable: hasLegacyWebData(),
-    vaultPath: VAULT_PATH_LABEL
-  })),
+  getStorageState: async () => guard(async () => {
+    const envelope = await idbGet<Record<string, unknown>>(VAULT_KEY)
+    return {
+      hasVault: Boolean(envelope),
+      legacyAvailable: hasLegacyWebData(),
+      vaultPath: VAULT_PATH_LABEL,
+      passwordless: envelope?.passwordless === true
+    }
+  }),
   readVaultEnvelope: async () => guard(async () => {
     const envelope = await idbGet<unknown>(VAULT_KEY)
     if (!envelope) throw new Error('Vault does not exist')

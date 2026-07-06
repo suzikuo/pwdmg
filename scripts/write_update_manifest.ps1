@@ -58,6 +58,10 @@ if ($AndroidPackagePath.Trim() -or $AndroidAssetUrl.Trim()) {
     }
 }
 
+if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
+    throw "Desktop package zip was not found: $PackagePath. Run scripts\package_desktop.ps1 first, or pass -PackagePath to an existing zip."
+}
+
 $PackageFull = Resolve-Path $PackagePath
 $OutFull = [System.IO.Path]::GetFullPath($OutPath)
 $OutDir = Split-Path -Parent $OutFull
@@ -79,6 +83,9 @@ $Assets = [ordered]@{
 }
 
 if ($AndroidPackagePath.Trim()) {
+    if (-not (Test-Path -LiteralPath $AndroidPackagePath -PathType Leaf)) {
+        throw "Android package APK was not found: $AndroidPackagePath. Build Android first, or omit Android update fields."
+    }
     $AndroidPackageFull = Resolve-Path $AndroidPackagePath
     $AndroidHash = Get-FileHash -LiteralPath $AndroidPackageFull -Algorithm SHA256
     $AndroidItem = Get-Item -LiteralPath $AndroidPackageFull

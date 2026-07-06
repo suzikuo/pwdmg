@@ -1,55 +1,170 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 import threading
-import ctypes
 from pathlib import Path
 from typing import Any
 
 import webview
 
-from pwdmg_core.api import PasswordManagerApi
-from pwdmg_core.native_host import main as native_host_main
-from pwdmg_core.native_install import disable_plugin_listener, enable_plugin_listener, plugin_listener_state
-from pwdmg_core.paths import DEFAULT_DESKTOP_CONFIG, DESKTOP_CONFIG_FILE, ensure_app_dir
-from pwdmg_core.updater import DesktopUpdateService
-from pwdmg_core.vault import call_result
+from pwdmg_core.paths import DEFAULT_DESKTOP_CONFIG, DESKTOP_CONFIG_FILE, LEGACY_LOCAL_STORAGE_FILE, VAULT_FILE, ensure_app_dir
 
 
 _desktop_window: webview.Window | None = None
 _desktop_state: "DesktopWindowState | None" = None
 
 
-class DesktopPasswordManagerApi(PasswordManagerApi):
+def read_passwordless_marker(vault_path: Path) -> bool:
+    if not vault_path.exists():
+        return False
+    try:
+        envelope = json.loads(vault_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return isinstance(envelope, dict) and envelope.get("passwordless") is True
+
+
+def lightweight_storage_state() -> dict[str, Any]:
+    ensure_app_dir()
+    return {
+        "hasVault": VAULT_FILE.exists(),
+        "legacyAvailable": LEGACY_LOCAL_STORAGE_FILE.exists(),
+        "vaultPath": str(VAULT_FILE),
+        "passwordless": read_passwordless_marker(VAULT_FILE),
+    }
+
+
+def lightweight_app_state() -> dict[str, Any]:
+    return {
+        **lightweight_storage_state(),
+        "locked": True,
+        "expiresAt": 0,
+    }
+
+
+class DesktopPasswordManagerApi:
     def __init__(self) -> None:
-        super().__init__()
-        self.updater = DesktopUpdateService()
+        self._api = None
+        self._updater = None
+
+    @property
+    def api(self):
+        if self._api is None:
+            from pwdmg_core.api import PasswordManagerApi
+
+            self._api = PasswordManagerApi()
+        return self._api
+
+    @property
+    def updater(self):
+        if self._updater is None:
+            from pwdmg_core.updater import DesktopUpdateService
+
+            self._updater = DesktopUpdateService()
+        return self._updater
+
+    def getState(self) -> dict[str, Any]:
+        if self._api is None:
+            return self._call_result(lightweight_app_state)
+        return self.api.getState()
+
+    def getStorageState(self) -> dict[str, Any]:
+        if self._api is None:
+            return self._call_result(lightweight_storage_state)
+        return self.api.getStorageState()
+
+    def readVaultEnvelope(self) -> dict[str, Any]:
+        return self.api.readVaultEnvelope()
+
+    def writeVaultEnvelope(self, envelopeText: str, protectBackup: bool = False) -> dict[str, Any]:
+        return self.api.writeVaultEnvelope(envelopeText, protectBackup)
+
+    def readLegacyLocalStorage(self) -> dict[str, Any]:
+        return self.api.readLegacyLocalStorage()
+
+    def createVault(self, password: str, importLegacy: bool = True) -> dict[str, Any]:
+        return self.api.createVault(password, importLegacy)
+
+    def unlock(self, password: str) -> dict[str, Any]:
+        return self.api.unlock(password)
+
+    def lock(self) -> dict[str, Any]:
+        return self.api.lock()
+
+    def getVault(self) -> dict[str, Any]:
+        return self.api.getVault()
+
+    def saveVault(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.api.saveVault(payload)
+
+    def changePassword(self, newPassword: str) -> dict[str, Any]:
+        return self.api.changePassword(newPassword)
+
+    def exportVaultBackup(self) -> dict[str, Any]:
+        return self.api.exportVaultBackup()
+
+    def importVaultBackup(self, envelopeText: str) -> dict[str, Any]:
+        return self.api.importVaultBackup(envelopeText)
+
+    def queryMatches(self, hostname: str) -> dict[str, Any]:
+        return self.api.queryMatches(hostname)
+
+    def getFillPayload(self, entryId: str) -> dict[str, Any]:
+        return self.api.getFillPayload(entryId)
+
+    def listSaveTargets(self) -> dict[str, Any]:
+        return self.api.listSaveTargets()
+
+    def previewCapturedLogin(self, capture: dict[str, Any]) -> dict[str, Any]:
+        return self.api.previewCapturedLogin(capture)
+
+    def saveCapturedLogin(
+        self,
+        capture: dict[str, Any],
+        parentId: str = "",
+        updateEntryId: str = "",
+    ) -> dict[str, Any]:
+        return self.api.saveCapturedLogin(capture, parentId, updateEntryId)
+
+    def generateTotp(self, entryId: str) -> dict[str, Any]:
+        return self.api.generateTotp(entryId)
 
     def getPluginListenerState(self) -> dict[str, Any]:
         try:
+            from pwdmg_core.native_install import plugin_listener_state
+
             return {"ok": True, "data": plugin_listener_state()}
         except Exception as exc:
             return {"ok": False, "code": "PLUGIN_LISTENER_ERROR", "message": str(exc)}
 
     def enablePluginListener(self, extensionId: str, browsers: list[str] | None = None) -> dict[str, Any]:
         try:
+            from pwdmg_core.native_install import enable_plugin_listener
+
             return {"ok": True, "data": enable_plugin_listener(extensionId, browsers)}
         except Exception as exc:
             return {"ok": False, "code": "PLUGIN_LISTENER_ERROR", "message": str(exc)}
 
     def disablePluginListener(self) -> dict[str, Any]:
         try:
+            from pwdmg_core.native_install import disable_plugin_listener
+
             return {"ok": True, "data": disable_plugin_listener()}
         except Exception as exc:
             return {"ok": False, "code": "PLUGIN_LISTENER_ERROR", "message": str(exc)}
 
     def checkDesktopUpdate(self, manifestUrl: str) -> dict[str, Any]:
-        return call_result(lambda: self.updater.check(manifestUrl))
+        return self._call_result(lambda: self.updater.check(manifestUrl), "UPDATE_FAILED")
 
     def downloadDesktopUpdate(self, manifestUrl: str) -> dict[str, Any]:
-        return call_result(lambda: self.updater.download(manifestUrl))
+        return self._call_result(lambda: self.updater.download(manifestUrl), "UPDATE_FAILED")
+
+    @staticmethod
+    def _call_result(fn, code: str = "ERROR"):
+        try:
+            return {"ok": True, "data": fn()}
+        except Exception as exc:
+            return {"ok": False, "code": code, "message": str(exc)}
 
     def applyDesktopUpdate(self, packagePath: str) -> dict[str, Any]:
         try:
@@ -86,17 +201,6 @@ def to_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-def hide_packaged_console() -> None:
-    if os.name != "nt" or not getattr(sys, "frozen", False):
-        return
-    try:
-        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-        if hwnd:
-            ctypes.windll.user32.ShowWindow(hwnd, 0)
-    except Exception:
-        pass
 
 
 def normalize_desktop_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -245,7 +349,6 @@ def resolve_frontend_entry() -> str:
 def main() -> None:
     global _desktop_window, _desktop_state
 
-    hide_packaged_console()
     config = load_desktop_config()
     startup_config = get_pywebview_startup_config(config)
     webview_storage_dir = ensure_app_dir() / "webview_storage"
@@ -260,6 +363,7 @@ def main() -> None:
         x=startup_config["x_position"],
         y=startup_config["y_position"],
         resizable=True,
+        background_color="#070b10",
     )
     _desktop_window = window
     _desktop_state = desktop_state
@@ -274,7 +378,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    if "--native-host" in sys.argv:
-        native_host_main()
-    else:
-        main()
+    main()

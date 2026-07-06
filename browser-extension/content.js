@@ -4,7 +4,10 @@ const QUERY_DEBOUNCE_MS = 300
 const MUTATION_DEBOUNCE_MS = 900
 const SAVE_PROMPT_DELAY_MS = 900
 const CAPTURE_CLICK_WINDOW_MS = 800
+const FILL_CAPTURE_SUPPRESS_MS = 2500
 const INPUT_SELECTOR = 'input, textarea'
+const ACTION_CONTROL_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]'
+const SUBMIT_ACTION_RE = /(login|log in|sign in|signin|sign up|signup|register|create account|submit|continue|登录|登陆|注册|提交|继续|创建)/i
 
 const USER_RE = /(user|login|email|mail|account|phone|mobile|tel|\u7528\u6237\u540d|\u8d26\u53f7|\u8d26\u6237|\u90ae\u7bb1|\u624b\u673a)/i
 const EMAIL_RE = /(email|e-mail|mail|\u90ae\u7bb1)/i
@@ -23,6 +26,10 @@ let lastSubmitCapture = null
 let savePromptTimer = 0
 let pendingSave = null
 let lastOtpAutoFillKey = ''
+let extensionContextInvalidated = false
+let suppressCaptureUntil = 0
+const completedSaveTokens = new Set()
+const extensionFilledPasswords = new Map()
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -37,7 +44,35 @@ function escapeAttr(value) {
 }
 
 function sendMessage(message) {
-  return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
+  if (extensionContextInvalidated) {
+    return Promise.resolve({ ok: false, code: 'EXTENSION_CONTEXT_INVALIDATED', message: 'Extension context invalidated.' })
+  }
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        const error = chrome.runtime.lastError
+        if (error) {
+          const messageText = String(error.message || error)
+          if (/context invalidated|extension context/i.test(messageText)) {
+            extensionContextInvalidated = true
+          }
+          resolve({ ok: false, code: 'EXTENSION_MESSAGE_ERROR', message: messageText })
+          return
+        }
+        resolve(response)
+      })
+    } catch (error) {
+      const messageText = String(error?.message || error)
+      if (/context invalidated|extension context/i.test(messageText)) {
+        extensionContextInvalidated = true
+      }
+      resolve({ ok: false, code: 'EXTENSION_MESSAGE_ERROR', message: messageText })
+    }
+  })
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
 function fieldId(input) {
@@ -57,6 +92,10 @@ function isVisible(element) {
 }
 
 function fieldText(input) {
+  const labelText = Array.from(input.labels || []).map((label) => label.textContent)
+  const labelledByText = String(input.getAttribute('aria-labelledby') || '')
+    .split(/\s+/)
+    .map((id) => document.getElementById(id)?.textContent || '')
   return [
     input.name,
     input.id,
@@ -64,7 +103,9 @@ function fieldText(input) {
     input.placeholder,
     input.getAttribute('aria-label'),
     input.getAttribute('aria-labelledby'),
-    input.getAttribute('title')
+    input.getAttribute('title'),
+    ...labelText,
+    ...labelledByText
   ]
     .join(' ')
     .toLowerCase()
@@ -269,7 +310,7 @@ function renderPanel(matches, statusText = '', anchor = null) {
           <span>My Password</span>
           <small>${escapeHtml(statusText ? '状态' : `${matches.length} 个匹配账号`)}</small>
         </div>
-        <button class="mypwdmg-close" type="button" title="关闭" aria-label="关闭">&times;</button>
+        <button class="mypwdmg-close" type="button" title="关闭" aria-label="关闭">×</button>
       </div>
       ${
         statusText
@@ -328,23 +369,39 @@ function renderSavePrompt(preview) {
   positionRoot(preview.anchor || document.activeElement)
   const folders = Array.isArray(preview.folders) ? preview.folders : []
   const update = preview.updateCandidate
+  const titleValue = update?.title || preview.title || preview.hostname || 'Untitled'
+  const accountValue = preview.accountLabel || update?.username || update?.email || update?.phone || ''
+  const accountKind = ['email', 'phone', 'username'].includes(preview.accountKind) ? preview.accountKind : 'username'
   root.innerHTML = `
     <div class="mypwdmg-panel mypwdmg-save-panel" role="dialog" aria-label="保存到 My Password">
       <div class="mypwdmg-title">
         <div class="mypwdmg-title-text">
-          <span>${escapeHtml(update ? '更新 My Password' : '保存到 My Password')}</span>
+          <span>${escapeHtml(update ? '更新登录项' : '保存新登录')}</span>
           <small>${escapeHtml(preview.hostname || '当前网站')}</small>
         </div>
-        <button class="mypwdmg-close" type="button" title="关闭" aria-label="关闭">&times;</button>
+        <button class="mypwdmg-close" type="button" title="关闭" aria-label="关闭">×</button>
       </div>
       <div class="mypwdmg-save-body">
-        <div class="mypwdmg-save-summary">
-          <strong>${escapeHtml(preview.title || preview.hostname || 'Untitled')}</strong>
-          <small>${escapeHtml(preview.accountLabel || '未识别账号')}</small>
+        <div class="mypwdmg-save-editor">
+          <label class="mypwdmg-save-field">
+            <span>名称</span>
+            <input id="mypwdmg-save-title" class="mypwdmg-save-input" value="${escapeAttr(titleValue)}" autocomplete="off" />
+          </label>
+          <label class="mypwdmg-save-field">
+            <span>账号</span>
+            <div class="mypwdmg-account-edit">
+              <select id="mypwdmg-save-account-kind" class="mypwdmg-save-select" aria-label="账号类型">
+                <option value="username"${accountKind === 'username' ? ' selected' : ''}>账号</option>
+                <option value="email"${accountKind === 'email' ? ' selected' : ''}>邮箱</option>
+                <option value="phone"${accountKind === 'phone' ? ' selected' : ''}>手机</option>
+              </select>
+              <input id="mypwdmg-save-account" class="mypwdmg-save-input" value="${escapeAttr(accountValue)}" placeholder="未识别，可手动填写" autocomplete="off" />
+            </div>
+          </label>
         </div>
         ${
           update
-            ? `<div class="mypwdmg-save-note">更新现有条目：${escapeHtml(update.title || 'Untitled')}${update.path ? ` · ${escapeHtml(update.path)}` : ''}</div>`
+            ? `<div class="mypwdmg-save-note">将更新：${escapeHtml(update.title || 'Untitled')}${update.path ? ` · ${escapeHtml(update.path)}` : ''}</div>`
             : `
               <label class="mypwdmg-save-label" for="mypwdmg-save-folder">保存位置</label>
               <select id="mypwdmg-save-folder" class="mypwdmg-save-select">
@@ -370,6 +427,7 @@ function renderSavePrompt(preview) {
 
 function dismissSavePrompt() {
   if (pendingSave?.token) {
+    completedSaveTokens.add(pendingSave.token)
     sendMessage({ type: 'MYPWDMG_DISMISS_CAPTURE', token: pendingSave.token }).catch(() => {})
   }
   pendingSave = null
@@ -378,31 +436,50 @@ function dismissSavePrompt() {
 
 async function savePendingCapture() {
   if (!pendingSave?.token) return
+  const token = pendingSave.token
   const root = ensureRoot()
   const button = root.querySelector('[data-action="save"]')
   const folderSelect = root.querySelector('#mypwdmg-save-folder')
+  const titleInput = root.querySelector('#mypwdmg-save-title')
+  const accountInput = root.querySelector('#mypwdmg-save-account')
+  const accountKindSelect = root.querySelector('#mypwdmg-save-account-kind')
+  const title = String(titleInput?.value || '').trim()
+  const account = String(accountInput?.value || '').trim()
+  const accountKind = String(accountKindSelect?.value || 'username')
   button?.setAttribute('disabled', 'true')
   const response = await sendMessage({
     type: 'MYPWDMG_SAVE_CAPTURE',
-    token: pendingSave.token,
+    token,
     parentId: pendingSave.updateCandidate ? '' : folderSelect?.value || '',
-    updateEntryId: pendingSave.updateCandidate?.id || ''
+    updateEntryId: pendingSave.updateCandidate?.id || '',
+    overrides: {
+      title,
+      titleEdited: Boolean(title),
+      account,
+      accountKind,
+      accountEdited: Boolean(account)
+    }
   })
   if (!response?.ok) {
     renderPanel([], response?.message || '保存失败。', pendingSave.anchor || document.activeElement)
     return
   }
-  renderPanel([], response.data?.action === 'updated' ? '已更新 My Password。' : '已保存到 My Password。', pendingSave.anchor || document.activeElement)
+  renderPanel([], response.data?.action === 'updated' ? '已更新。' : '已保存。', pendingSave.anchor || document.activeElement)
+  completedSaveTokens.add(token)
   pendingSave = null
   window.setTimeout(removeRoot, 1600)
 }
 
 function scheduleQuery(force = false, delay = QUERY_DEBOUNCE_MS) {
+  if (extensionContextInvalidated) return
+  if (pendingSave?.token) return
   window.clearTimeout(queryTimer)
   queryTimer = window.setTimeout(() => queryMatches(force), delay)
 }
 
 async function queryMatches(force = false) {
+  if (extensionContextInvalidated) return
+  if (pendingSave?.token) return
   const fields = detectLoginFields()
   if (!fields) {
     removeRoot()
@@ -445,6 +522,9 @@ async function queryMatches(force = false) {
 
 async function fillEntry(entryId) {
   if (!entryId) return
+  if (extensionContextInvalidated) return
+  if (pendingSave?.token) return
+  suppressCaptureUntil = Date.now() + FILL_CAPTURE_SUPPRESS_MS
   const response = await sendMessage({ type: 'MYPWDMG_GET_FILL', entryId })
   if (!response?.ok || !response.data) {
     const fields = detectLoginFields()
@@ -456,6 +536,7 @@ async function fillEntry(entryId) {
     return
   }
   applyFill(response.data)
+  suppressCaptureUntil = Date.now() + FILL_CAPTURE_SUPPRESS_MS
   removeRoot()
 }
 
@@ -492,13 +573,19 @@ function setInputValue(input, value) {
   descriptor?.set?.call(input, value)
   input.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertReplacementText' }))
   input.dispatchEvent(new Event('change', { bubbles: true }))
+  if (isPasswordInput(input)) {
+    extensionFilledPasswords.set(fieldId(input), String(value))
+  }
 }
 
 function captureLoginFromScope(scope = document, anchor = null) {
+  if (Date.now() < suppressCaptureUntil) return null
   const fields = detectLoginFieldsInScope(scope)
   if (!fields?.passwordInput) return null
   const password = String(fields.passwordInput.value || '')
   if (!password) return null
+  const passwordFieldId = fieldId(fields.passwordInput)
+  if (extensionFilledPasswords.get(passwordFieldId) === password) return null
 
   const account = String(fields.usernameInput?.value || '').trim()
   const accountKind = fields.usernameKind || accountFieldKind(fields.usernameInput)
@@ -519,7 +606,7 @@ function detectLoginFieldsInScope(scope = document) {
   const inputs = allInputs(scope)
   const passwordInputs = inputs.filter(isPasswordInput)
   if (!passwordInputs.length) return null
-  const passwordInput = passwordInputs.at(-1)
+  const passwordInput = passwordInputs.filter((input) => String(input.value || '')).at(-1) || passwordInputs.at(-1)
   const usernameInput = findUsernameInput(passwordInput, scope) || findUsernameInput(passwordInput, document)
   return {
     usernameInput,
@@ -532,16 +619,24 @@ function scheduleSaveCapture(captureInfo) {
   if (!captureInfo?.capture?.password) return
   lastSubmitCapture = { ...captureInfo, at: Date.now() }
   window.clearTimeout(savePromptTimer)
-  savePromptTimer = window.setTimeout(() => prepareSavePrompt(captureInfo), SAVE_PROMPT_DELAY_MS)
+  prepareSavePrompt(captureInfo, SAVE_PROMPT_DELAY_MS).catch(() => {})
 }
 
-async function prepareSavePrompt(captureInfo) {
+async function prepareSavePrompt(captureInfo, renderDelay = 0) {
   if (!captureInfo?.capture?.password) return
   const response = await sendMessage({
     type: 'MYPWDMG_PREPARE_CAPTURE',
     capture: captureInfo.capture
   })
+  if (!response?.ok) {
+    if (response?.code === 'LOCKED_CAPTURE_PENDING' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
+      renderPanel([], response?.message || 'My Password 插件已锁定，解锁后继续保存。', captureInfo.anchor)
+    }
+    return
+  }
   if (!response?.ok || !response.data?.shouldPrompt || !response.data?.token) return
+  if (renderDelay > 0) await sleep(renderDelay)
+  if (completedSaveTokens.has(response.data.token) || pendingSave?.token === response.data.token) return
   renderSavePrompt({
     ...response.data,
     anchor: captureInfo.anchor
@@ -549,6 +644,7 @@ async function prepareSavePrompt(captureInfo) {
 }
 
 async function takePreparedSavePrompt() {
+  if (extensionContextInvalidated) return
   const response = await sendMessage({
     type: 'MYPWDMG_TAKE_SAVE_PROMPT',
     hostname: location.hostname
@@ -567,17 +663,38 @@ function handleSubmitCapture(event) {
 
 function handleClickCapture(event) {
   const target = event.target instanceof Element ? event.target : null
-  if (!target?.closest('button, input[type="submit"], input[type="button"], [role="button"]')) return
+  if (target?.closest?.(`#${ROOT_ID}`)) return
+  const control = target?.closest(ACTION_CONTROL_SELECTOR)
+  if (!control) return
   const text = [
-    target.textContent,
-    target.getAttribute?.('aria-label'),
-    target.getAttribute?.('title'),
-    target.getAttribute?.('value')
+    control.textContent,
+    control.getAttribute?.('aria-label'),
+    control.getAttribute?.('title'),
+    control.getAttribute?.('value')
   ]
     .join(' ')
     .toLowerCase()
-  if (!/(login|log in|sign in|signin|sign up|signup|register|create account|submit|continue|登录|登陆|注册|提交|继续|创建)/i.test(text)) return
+  const type = inputType(control)
+  const isNativeSubmit = control instanceof HTMLButtonElement
+    ? (control.getAttribute('type') || 'submit').toLowerCase() === 'submit'
+    : type === 'submit' || type === 'image'
+  if (!isNativeSubmit && !SUBMIT_ACTION_RE.test(text)) return
 
+  const form = control.closest('form') || document
+  const captureInfo = captureLoginFromScope(form, control)
+  if (!captureInfo) return
+  window.setTimeout(() => {
+    if (lastSubmitCapture && Date.now() - lastSubmitCapture.at <= CAPTURE_CLICK_WINDOW_MS) return
+    scheduleSaveCapture({ ...captureInfo, at: Date.now() })
+  }, 0)
+}
+
+function handleEnterCapture(event) {
+  if (event.key !== 'Enter') return
+  const target = event.target instanceof Element ? event.target : null
+  if (!target?.matches?.('input')) return
+  const type = inputType(target)
+  if (['button', 'submit', 'checkbox', 'radio', 'file', 'hidden'].includes(type)) return
   const form = target.closest('form') || document
   const captureInfo = captureLoginFromScope(form, target)
   if (!captureInfo) return
@@ -603,15 +720,32 @@ const observer = new MutationObserver((mutations) => {
   if (mutations.some(mutationMayAffectLoginFields)) scheduleQuery(false, MUTATION_DEBOUNCE_MS)
 })
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'MYPWDMG_REFRESH') {
     lastQueryKey = ''
     queryMatches(true)
+    takePreparedSavePrompt()
+    sendResponse?.({ ok: true })
+  }
+  if (message?.type === 'MYPWDMG_FILL_ENTRY') {
+    fillEntry(message.entryId)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, message: String(error?.message || error) }))
+    return true
+  }
+  if (message?.type === 'MYPWDMG_CAPTURE_READY') {
+    takePreparedSavePrompt()
   }
 })
 
 document.addEventListener('focusin', () => scheduleQuery(false), true)
+document.addEventListener('input', (event) => {
+  const target = event.target instanceof Element ? event.target : null
+  if (!target || !isPasswordInput(target) || !event.isTrusted) return
+  extensionFilledPasswords.delete(fieldId(target))
+}, true)
 document.addEventListener('keydown', (event) => {
+  handleEnterCapture(event)
   if (event.key !== 'Escape') return
   if (!document.getElementById(ROOT_ID)) return
   if (pendingSave?.token) {

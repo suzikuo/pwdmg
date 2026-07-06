@@ -3,6 +3,7 @@ import type {
   AppUpdateApply,
   AppUpdateCheck,
   AppUpdateDownload,
+  AppUpdateProgressHandler,
   ApiResult,
   PluginListenerState
 } from '../types'
@@ -11,6 +12,7 @@ export type StorageState = {
   hasVault: boolean
   legacyAvailable: boolean
   vaultPath: string
+  passwordless?: boolean
 }
 
 export type WriteEnvelopeResult = {
@@ -30,8 +32,8 @@ export interface VaultStorageAdapter {
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
-  checkAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateCheck>>
-  downloadAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateDownload>>
+  checkAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateCheck>>
+  downloadAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateDownload>>
   applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
   safeExit: () => Promise<ApiResult<null>>
 }

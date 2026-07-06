@@ -8,8 +8,12 @@ param(
     [string] $AndroidAssetUrl = "",
     [string] $JavaHome = "",
     [string] $Notes = "",
+    [string] $Mode = "",
     [switch] $Clean,
+    [switch] $SkipFrontend,
     [switch] $IncludeAndroid,
+    [switch] $NoNativeHost,
+    [switch] $SkipDesktopBuild,
     [switch] $DesktopOnly,
     [switch] $SkipAndroidBuild,
     [switch] $NoVersionBump,
@@ -23,6 +27,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$ReleaseModeSelectedInteractively = $false
 
 function Show-Help {
     Write-Host "Usage:"
@@ -35,26 +40,35 @@ function Show-Help {
     Write-Host "  4. Builds the Android release APK unless -DesktopOnly is used."
     Write-Host "  5. Generates release\update-manifest.json for GitHub Releases."
     Write-Host "  6. Publishes the GitHub Release unless -NoPublish is used."
+    Write-Host "  If no flow option is provided in an interactive shell, a release mode menu is shown."
     Write-Host ""
     Write-Host "Examples:"
-    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Repo suzikuo/mypwdmg"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Repo suzikuo/pwdmg"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1"
-    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Bump minor -Repo suzikuo/mypwdmg"
-    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Version 2.1.0 -Repo suzikuo/mypwdmg"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Mode build"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Mode build -DesktopOnly -NoNativeHost"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Mode publish"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Mode full -Repo suzikuo/pwdmg"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Bump minor -Repo suzikuo/pwdmg"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -Version 2.1.0 -Repo suzikuo/pwdmg"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -NoVersionBump -NoPublish"
     Write-Host "  powershell -ExecutionPolicy Bypass -File .\scripts\release_desktop.ps1 -NoVersionBump -PublishOnly"
     Write-Host ""
     Write-Host "Options:"
     Write-Host "  -Bump major|minor|patch  Version bump kind. Default: patch."
     Write-Host "  -Version VERSION         Explicit version, for example 2.1.0."
-    Write-Host "  -VersionCode NUMBER      Explicit Android/front manifest build code. Default: Android versionCode + 1."
+    Write-Host "  -VersionCode NUMBER      Explicit Android/front manifest build code. Default: +1 when version changes."
     Write-Host "  -Repo OWNER/REPO         GitHub repository. Inferred from git remote when possible."
     Write-Host "  -AssetUrl URL            Explicit release zip URL. Overrides -Repo URL generation."
     Write-Host "  -AndroidAssetUrl URL     Explicit Android APK URL. Overrides -Repo URL generation."
     Write-Host "  -JavaHome PATH           Optional JDK/JBR path for Android Gradle."
     Write-Host "  -Notes TEXT              Release notes for manifest and optional GitHub release."
+    Write-Host "  -Mode MODE               Release flow: full, build, publish, or menu."
     Write-Host "  -Clean                   Pass -Clean to package_desktop.ps1."
+    Write-Host "  -SkipFrontend            Pass -SkipFrontend to package_desktop.ps1."
     Write-Host "  -IncludeAndroid          Legacy alias; Android is included by default."
+    Write-Host "  -NoNativeHost            Build desktop package without My Password Host.exe."
+    Write-Host "  -SkipDesktopBuild        Use existing release desktop zip instead of rebuilding desktop."
     Write-Host "  -DesktopOnly             Build/publish only the Windows desktop package."
     Write-Host "  -SkipAndroidBuild        Use the existing Android APK output instead of running Gradle."
     Write-Host "  -NoVersionBump           Rebuild current version without editing version files."
@@ -66,9 +80,176 @@ function Show-Help {
     Write-Host "  -Help                    Show this help."
 }
 
+function Select-ReleaseMode {
+    Write-Host ""
+    Write-Host "Select release flow:" -ForegroundColor Cyan
+    Write-Host "  [1] Full flow    Version -> build -> manifest -> publish"
+    Write-Host "  [2] Build only   Build packages and manifest, do not publish or bump by default"
+    Write-Host "  [3] Publish only Publish existing files from release\"
+    Write-Host ""
+
+    while ($true) {
+        $Choice = (Read-Host "Enter 1/2/3").Trim().ToLowerInvariant()
+        switch ($Choice) {
+            "1" { $script:ReleaseModeSelectedInteractively = $true; return "full" }
+            "full" { $script:ReleaseModeSelectedInteractively = $true; return "full" }
+            "f" { $script:ReleaseModeSelectedInteractively = $true; return "full" }
+            "2" { $script:ReleaseModeSelectedInteractively = $true; return "build" }
+            "build" { $script:ReleaseModeSelectedInteractively = $true; return "build" }
+            "b" { $script:ReleaseModeSelectedInteractively = $true; return "build" }
+            "3" { $script:ReleaseModeSelectedInteractively = $true; return "publish" }
+            "publish" { $script:ReleaseModeSelectedInteractively = $true; return "publish" }
+            "p" { $script:ReleaseModeSelectedInteractively = $true; return "publish" }
+            default { Write-Host "Please choose 1, 2, or 3." -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Select-BuildOptions {
+    Write-Host ""
+    Write-Host "Select build target:" -ForegroundColor Cyan
+    Write-Host "  [1] Desktop + Host + Android"
+    Write-Host "  [2] Desktop + Host only"
+    Write-Host "  [3] Desktop without Host only"
+    Write-Host "  [4] Desktop without Host + Android"
+    Write-Host "  [5] Android only, use existing desktop zip for manifest"
+    Write-Host ""
+
+    while ($true) {
+        $Choice = (Read-Host "Enter 1/2/3/4/5").Trim().ToLowerInvariant()
+        switch ($Choice) {
+            "1" {
+                $script:SkipDesktopBuild = $false
+                $script:NoNativeHost = $false
+                $script:DesktopOnly = $false
+                break
+            }
+            "2" {
+                $script:SkipDesktopBuild = $false
+                $script:NoNativeHost = $false
+                $script:DesktopOnly = $true
+                break
+            }
+            "3" {
+                $script:SkipDesktopBuild = $false
+                $script:NoNativeHost = $true
+                $script:DesktopOnly = $true
+                break
+            }
+            "4" {
+                $script:SkipDesktopBuild = $false
+                $script:NoNativeHost = $true
+                $script:DesktopOnly = $false
+                break
+            }
+            "5" {
+                $script:SkipDesktopBuild = $true
+                $script:DesktopOnly = $false
+                break
+            }
+            default {
+                Write-Host "Please choose 1, 2, 3, 4, or 5." -ForegroundColor Yellow
+                continue
+            }
+        }
+        break
+    }
+
+    if (-not $SkipDesktopBuild) {
+        $CleanChoice = (Read-Host "Clean desktop build outputs first? y/N").Trim().ToLowerInvariant()
+        if ($CleanChoice -eq "y" -or $CleanChoice -eq "yes") {
+            $script:Clean = $true
+        }
+
+        $SkipFrontendChoice = (Read-Host "Skip frontend npm build? y/N").Trim().ToLowerInvariant()
+        if ($SkipFrontendChoice -eq "y" -or $SkipFrontendChoice -eq "yes") {
+            $script:SkipFrontend = $true
+        }
+    }
+
+    if (-not $DesktopOnly) {
+        $SkipAndroidChoice = (Read-Host "Skip Android Gradle build and reuse existing APK? y/N").Trim().ToLowerInvariant()
+        if ($SkipAndroidChoice -eq "y" -or $SkipAndroidChoice -eq "yes") {
+            $script:SkipAndroidBuild = $true
+        }
+    }
+}
+
+function Resolve-ReleaseMode {
+    $NormalizedMode = $Mode.Trim().ToLowerInvariant()
+    $AllowedModes = @("", "full", "build", "publish", "menu")
+    if ($AllowedModes -notcontains $NormalizedMode) {
+        throw "Mode must be one of: full, build, publish, menu."
+    }
+
+    if ($NormalizedMode -eq "menu") {
+        return (Select-ReleaseMode)
+    }
+    if ($NormalizedMode) {
+        return $NormalizedMode
+    }
+
+    $HasLegacyFlowFlag = $PSBoundParameters.ContainsKey("PublishOnly") -or
+        $PSBoundParameters.ContainsKey("NoPublish") -or
+        $PSBoundParameters.ContainsKey("Publish")
+    if (-not $HasLegacyFlowFlag -and -not [Console]::IsInputRedirected) {
+        return (Select-ReleaseMode)
+    }
+
+    if ($PublishOnly) {
+        return "publish"
+    }
+    if ($NoPublish) {
+        return "build"
+    }
+    return "full"
+}
+
+function Apply-ReleaseMode {
+    param([string] $SelectedMode)
+
+    switch ($SelectedMode) {
+        "full" {
+            $script:PublishOnly = $false
+            $script:NoPublish = $false
+        }
+        "build" {
+            $script:PublishOnly = $false
+            $script:NoPublish = $true
+            if (-not $PSBoundParameters.ContainsKey("NoVersionBump") -and
+                -not $PSBoundParameters.ContainsKey("Version") -and
+                -not $PSBoundParameters.ContainsKey("Bump") -and
+                -not $PSBoundParameters.ContainsKey("NoPublish")) {
+                $script:NoVersionBump = $true
+            }
+        }
+        "publish" {
+            $script:PublishOnly = $true
+            $script:NoPublish = $false
+            $script:NoVersionBump = $true
+        }
+    }
+}
+
 if ($Help) {
     Show-Help
     exit 0
+}
+
+$ReleaseMode = Resolve-ReleaseMode
+Apply-ReleaseMode $ReleaseMode
+$HasExplicitBuildOption = $PSBoundParameters.ContainsKey("Clean") -or
+    $PSBoundParameters.ContainsKey("SkipFrontend") -or
+    $PSBoundParameters.ContainsKey("DesktopOnly") -or
+    $PSBoundParameters.ContainsKey("SkipDesktopBuild") -or
+    $PSBoundParameters.ContainsKey("NoNativeHost") -or
+    $PSBoundParameters.ContainsKey("SkipAndroidBuild") -or
+    $PSBoundParameters.ContainsKey("IncludeAndroid")
+if ($ReleaseMode -eq "build" -and -not $HasExplicitBuildOption -and -not [Console]::IsInputRedirected) {
+    Select-BuildOptions
+}
+if ($SkipDesktopBuild -and $DesktopOnly) {
+    throw "-SkipDesktopBuild cannot be combined with -DesktopOnly because no package would be produced."
 }
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -109,6 +290,29 @@ function Require-ReleaseFile {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Release file was not found: $Path"
     }
+}
+
+function Ensure-DesktopArchive {
+    if (Test-Path -LiteralPath $ArchivePath -PathType Leaf) {
+        return
+    }
+
+    $DesktopStageDir = Join-Path $RootPath "release\desktop"
+    if (-not (Test-Path -LiteralPath $DesktopStageDir -PathType Container)) {
+        throw "Desktop archive was not produced, and the staged desktop directory was not found: $DesktopStageDir"
+    }
+
+    $StageItems = @(Get-ChildItem -LiteralPath $DesktopStageDir -Force)
+    if ($StageItems.Count -eq 0) {
+        throw "Desktop archive was not produced, and the staged desktop directory is empty: $DesktopStageDir"
+    }
+
+    Write-Host "Desktop archive was not produced by package_desktop.ps1; creating it from staged files."
+    if (-not (Test-Path -LiteralPath (Split-Path -Parent $ArchivePath))) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $ArchivePath) | Out-Null
+    }
+    Compress-Archive -Path (Join-Path $DesktopStageDir "*") -DestinationPath $ArchivePath -Force
+    Require-ReleaseFile $ArchivePath
 }
 
 function Get-CurrentVersion {
@@ -266,12 +470,25 @@ function Update-VersionFiles {
 }
 
 function Invoke-DesktopPackage {
+    if ($SkipDesktopBuild) {
+        Require-ReleaseFile $ArchivePath
+        Write-Host "Skipping desktop build; using existing archive: $ArchivePath"
+        return
+    }
+
     $PackageArgs = @()
     if ($Clean) {
         $PackageArgs += "-Clean"
     }
+    if ($SkipFrontend) {
+        $PackageArgs += "-SkipFrontend"
+    }
+    if ($NoNativeHost) {
+        $PackageArgs += "-NoNativeHost"
+    }
     & $PackageScript @PackageArgs
     Assert-LastExitCode "Desktop package script"
+    Ensure-DesktopArchive
 }
 
 function Invoke-AndroidPackage {
@@ -305,6 +522,10 @@ function Invoke-AndroidPackage {
 
 function Invoke-Manifest {
     param([string] $ReleaseVersion, [string] $Url)
+    Require-ReleaseFile $ArchivePath
+    if ($ShouldIncludeAndroid) {
+        Require-ReleaseFile $AndroidArchivePath
+    }
     if ($ShouldIncludeAndroid) {
         & $ManifestScript `
             -Version $ReleaseVersion `
@@ -362,37 +583,61 @@ if (-not ($NextVersion -match '^\d+\.\d+\.\d+$')) {
 
 $CurrentAndroidCode = Get-AndroidVersionCode
 $CurrentManifestCode = Get-ManifestVersionCode
-$NextVersionCode = if ($VersionCode -gt 0) { $VersionCode } else { [Math]::Max($CurrentAndroidCode, $CurrentManifestCode) + 1 }
+$CurrentVersionCode = [Math]::Max($CurrentAndroidCode, $CurrentManifestCode)
+$NextVersionCode = if ($VersionCode -gt 0) {
+    $VersionCode
+}
+elseif ($NoVersionBump -and -not $Version.Trim()) {
+    $CurrentVersionCode
+}
+else {
+    $CurrentVersionCode + 1
+}
 
 if (-not $Repo.Trim()) {
     $Repo = Infer-GitHubRepo
 }
 $Repo = $Repo.Trim()
 
-if (-not $AssetUrl.Trim()) {
-    $AssetUrl = Build-AssetUrl $Repo $NextVersion
-}
 $AssetUrl = $AssetUrl.Trim()
-if (-not ($AssetUrl -match '^https://')) {
-    throw "AssetUrl must be HTTPS: $AssetUrl"
-}
-
-if ($ShouldIncludeAndroid -and -not $AndroidAssetUrl.Trim()) {
-    $AndroidAssetUrl = Build-AndroidAssetUrl $Repo $NextVersion
-}
 $AndroidAssetUrl = $AndroidAssetUrl.Trim()
-if ($ShouldIncludeAndroid -and -not ($AndroidAssetUrl -match '^https://')) {
-    throw "AndroidAssetUrl must be HTTPS: $AndroidAssetUrl"
+if (-not $PublishOnly) {
+    if (-not $AssetUrl) {
+        $AssetUrl = Build-AssetUrl $Repo $NextVersion
+    }
+    if (-not ($AssetUrl -match '^https://')) {
+        throw "AssetUrl must be HTTPS: $AssetUrl"
+    }
+
+    if ($ShouldIncludeAndroid -and -not $AndroidAssetUrl) {
+        $AndroidAssetUrl = Build-AndroidAssetUrl $Repo $NextVersion
+    }
+    if ($ShouldIncludeAndroid -and -not ($AndroidAssetUrl -match '^https://')) {
+        throw "AndroidAssetUrl must be HTTPS: $AndroidAssetUrl"
+    }
 }
 
+Write-Host "Release mode: $ReleaseMode"
 Write-Host "Release version: $CurrentVersion -> $NextVersion"
-Write-Host "Version code: $CurrentAndroidCode -> $NextVersionCode"
+Write-Host "Version code: $CurrentVersionCode -> $NextVersionCode"
 Write-Host "GitHub repo: $(if ($Repo) { $Repo } else { '(not set)' })"
-Write-Host "Asset URL: $AssetUrl"
-if ($ShouldIncludeAndroid) {
+if ($AssetUrl) {
+    Write-Host "Asset URL: $AssetUrl"
+}
+elseif ($PublishOnly) {
+    Write-Host "Asset URL: existing manifest"
+}
+if ($ShouldIncludeAndroid -and $AndroidAssetUrl) {
     Write-Host "Android asset URL: $AndroidAssetUrl"
 }
+Write-Host "Desktop build: $(if ($SkipDesktopBuild) { 'skip, use existing zip' } else { 'enabled' })"
+Write-Host "Native Host: $(if ($SkipDesktopBuild) { 'unchanged' } elseif ($NoNativeHost) { 'excluded' } else { 'included' })"
+Write-Host "Clean desktop build: $(if ($Clean) { 'enabled' } else { 'disabled' })"
+Write-Host "Frontend build: $(if ($SkipDesktopBuild) { 'unchanged' } elseif ($SkipFrontend) { 'skipped' } else { 'enabled' })"
 Write-Host "Android package: $(if ($ShouldIncludeAndroid) { 'enabled' } else { 'desktop only' })"
+if ($ShouldIncludeAndroid) {
+    Write-Host "Android Gradle build: $(if ($SkipAndroidBuild) { 'skipped, use existing APK' } else { 'enabled' })"
+}
 Write-Host "Publish GitHub Release: $(if ($ShouldPublish) { 'enabled' } else { 'disabled' })"
 
 if ($PublishOnly) {
