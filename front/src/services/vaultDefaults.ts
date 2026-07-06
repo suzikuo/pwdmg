@@ -61,7 +61,7 @@ function normalizeEntries(entries: VaultEntry[]): VaultEntry[] {
 
 function normalizeLoginAccountSource(value: unknown): LoginAccountSource {
   return typeof value === 'string' && LOGIN_ACCOUNT_SOURCES.has(value as LoginAccountSource)
-    ? value as LoginAccountSource
+    ? (value as LoginAccountSource)
     : 'auto'
 }
 

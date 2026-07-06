@@ -26,6 +26,9 @@ class CoreTests(unittest.TestCase):
     def test_domain_matching(self):
         self.assertTrue(domain_matches("www.example.com", "example.com"))
         self.assertTrue(domain_matches("login.example.com", "example.com"))
+        self.assertTrue(domain_matches("us-east-2.signin.aws.amazon.com", "*.signin.aws.amazon.com"))
+        self.assertTrue(domain_matches("us-east-1.signin.aws.amazon.com", "us-east-*.signin.aws.amazon.com"))
+        self.assertFalse(domain_matches("us-west-1.signin.aws.amazon.com", "us-east-*.signin.aws.amazon.com"))
         self.assertFalse(domain_matches("badexample.com", "example.com"))
 
     def test_totp_known_vector(self):
@@ -67,6 +70,32 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(fill["email"], "alice@example.com")
             self.assertEqual(fill["loginAccountSource"], "email")
 
+    def test_vault_service_query_matches_wildcard_domain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "entry-aws",
+                            "kind": "login",
+                            "title": "AWS",
+                            "domains": ["*.signin.aws.amazon.com"],
+                            "username": "alice",
+                            "password": "secret",
+                            "totpSecret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                        }
+                    ]
+                )
+            )
+
+            matches = service.query_matches("us-east-2.signin.aws.amazon.com")
+            self.assertEqual(matches[0]["id"], "entry-aws")
+            self.assertTrue(matches[0]["hasTotp"])
+
     def test_vault_service_defaults_new_login_account_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault_path = Path(tmp) / "vault.json"
@@ -81,6 +110,98 @@ class CoreTests(unittest.TestCase):
             fill = service.get_fill_payload("entry-1")
             self.assertEqual(fill["email"], "")
             self.assertEqual(fill["loginAccountSource"], "auto")
+
+    def test_save_captured_login_creates_entry_in_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "folder-1",
+                            "kind": "folder",
+                            "title": "Work",
+                            "domains": [],
+                            "children": [],
+                        }
+                    ]
+                )
+            )
+
+            result = service.save_captured_login(
+                {
+                    "hostname": "login.example.com",
+                    "title": "Example Login",
+                    "account": "alice@example.com",
+                    "accountKind": "email",
+                    "password": "secret",
+                },
+                parentId="folder-1",
+            )
+
+            self.assertEqual(result["action"], "created")
+            saved = service.get_vault()["entries"][0]["children"][0]
+            self.assertEqual(saved["email"], "alice@example.com")
+            self.assertEqual(saved["password"], "secret")
+            self.assertEqual(saved["domains"], ["login.example.com"])
+            self.assertEqual(saved["loginAccountSource"], "email")
+
+    def test_preview_captured_login_skips_same_password_and_updates_changed_password(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "entry-1",
+                            "kind": "login",
+                            "title": "Example",
+                            "domains": ["example.com"],
+                            "username": "alice",
+                            "email": "",
+                            "password": "old-secret",
+                            "phone": "",
+                            "loginAccountSource": "auto",
+                            "note": "",
+                            "totpSecret": "",
+                            "children": [],
+                        }
+                    ]
+                )
+            )
+
+            same = service.preview_captured_login(
+                {
+                    "hostname": "www.example.com",
+                    "title": "Example",
+                    "account": "alice",
+                    "accountKind": "username",
+                    "password": "old-secret",
+                }
+            )
+            self.assertFalse(same["shouldPrompt"])
+            self.assertTrue(same["passwordSame"])
+
+            changed_capture = {
+                "hostname": "www.example.com",
+                "title": "Example",
+                "account": "alice",
+                "accountKind": "username",
+                "password": "new-secret",
+            }
+            changed = service.preview_captured_login(changed_capture)
+            self.assertTrue(changed["shouldPrompt"])
+            self.assertEqual(changed["updateCandidate"]["id"], "entry-1")
+
+            updated = service.save_captured_login(changed_capture, updateEntryId="entry-1")
+            self.assertEqual(updated["action"], "updated")
+            self.assertEqual(service.get_fill_payload("entry-1")["password"], "new-secret")
 
     def test_vault_service_change_password(self):
         with tempfile.TemporaryDirectory() as tmp:

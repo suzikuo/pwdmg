@@ -294,6 +294,10 @@ public class AutofillPickerActivity extends Activity {
         next.usernameId = (AutofillId) intent.getParcelableExtra(EXTRA_USERNAME_ID);
         next.passwordId = (AutofillId) intent.getParcelableExtra(EXTRA_PASSWORD_ID);
         next.otpId = (AutofillId) intent.getParcelableExtra(EXTRA_OTP_ID);
+        next.usernameKind = intent.getStringExtra(EXTRA_ACCOUNT_KIND);
+        if (next.usernameKind == null || next.usernameKind.trim().isEmpty()) {
+            next.usernameKind = PwdAutofillService.ACCOUNT_KIND_GENERIC;
+        }
         return next;
     }
 

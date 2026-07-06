@@ -6,7 +6,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 from .crypto import VaultCryptoError, VaultKey, decrypt_payload, decrypt_payload_with_key, encrypt_payload, encrypt_payload_with_key
 from .domain import domain_matches, find_entry, flatten_entries, normalize_domain
@@ -20,6 +20,9 @@ MAX_LOCAL_IMPORT_BACKUPS = 5
 LOCAL_IMPORT_BACKUP_PREFIX = "vault-before-cloud-download-"
 LOCAL_IMPORT_BACKUP_SUFFIX = ".json"
 LOGIN_ACCOUNT_SOURCES = {"auto", "username", "email", "phone"}
+CAPTURE_ACCOUNT_KINDS = {"generic", "username", "email", "phone"}
+MAX_CAPTURE_TEXT_LENGTH = 512
+MAX_CAPTURE_PASSWORD_LENGTH = 4096
 
 
 class VaultLockedError(Exception):
@@ -216,6 +219,70 @@ class VaultService:
         self._refresh_session()
         return result
 
+    def list_save_targets(self) -> Dict[str, Any]:
+        payload = self._require_payload()
+        self._refresh_session()
+        return {"folders": self._folder_summaries(payload.get("entries") or [])}
+
+    def preview_captured_login(self, capture: Dict[str, Any]) -> Dict[str, Any]:
+        payload = self._require_payload()
+        normalized = self._normalize_capture(capture)
+        if not normalized["password"]:
+            raise ValueError("Captured password is empty")
+
+        candidate = self._find_capture_candidate(payload.get("entries") or [], normalized)
+        self._refresh_session()
+        return {
+            "hostname": normalized["hostname"],
+            "title": normalized["title"],
+            "accountLabel": normalized["accountLabel"],
+            "accountKind": normalized["accountKind"],
+            "folders": self._folder_summaries(payload.get("entries") or []),
+            "updateCandidate": self._candidate_summary(candidate["entry"], candidate["path"], normalized)
+            if candidate
+            else None,
+            "passwordSame": bool(candidate and candidate["passwordSame"]),
+            "shouldPrompt": not bool(candidate and candidate["passwordSame"]),
+        }
+
+    def save_captured_login(
+        self,
+        capture: Dict[str, Any],
+        parentId: str = "",
+        updateEntryId: str = "",
+    ) -> Dict[str, Any]:
+        payload = self._require_payload()
+        normalized = self._normalize_capture(capture)
+        if not normalized["password"]:
+            raise ValueError("Captured password is empty")
+
+        if updateEntryId:
+            entry = find_entry(payload.get("entries") or [], updateEntryId)
+            if not entry or entry.get("kind") != "login":
+                raise KeyError("Entry not found")
+            self._apply_capture_update(entry, normalized)
+            action = "updated"
+        else:
+            entry = self._entry_from_capture(normalized)
+            target = self._find_folder(payload.get("entries") or [], parentId)
+            if parentId and target is None:
+                raise KeyError("Folder not found")
+            if target is None:
+                payload.setdefault("entries", []).insert(0, entry)
+            else:
+                target.setdefault("children", []).insert(0, entry)
+            action = "created"
+
+        payload["updatedAt"] = int(time.time())
+        self._payload = self._normalize_payload(payload)
+        self._save_current()
+        self._refresh_session()
+        saved = find_entry(self._payload.get("entries") or [], entry.get("id")) or entry
+        return {
+            "action": action,
+            "entry": self._entry_summary(saved),
+        }
+
     def generate_totp(self, entry_id: str) -> str:
         entry = self._get_login(entry_id)
         self._refresh_session()
@@ -330,6 +397,183 @@ class VaultService:
 
     def _normalize_login_account_source(self, value: Any) -> str:
         return value if value in LOGIN_ACCOUNT_SOURCES else "auto"
+
+    def _normalize_capture(self, capture: Dict[str, Any]) -> Dict[str, Any]:
+        title = self._clean_capture_text(capture.get("title")) or "Untitled"
+        hostname = normalize_domain(
+            self._clean_capture_text(capture.get("hostname") or capture.get("domain") or capture.get("url"))
+        )
+        account_kind = capture.get("accountKind") if capture.get("accountKind") in CAPTURE_ACCOUNT_KINDS else "generic"
+        account_value = self._clean_capture_text(capture.get("account") or capture.get("accountValue"))
+        username = self._clean_capture_text(capture.get("username"))
+        email = self._clean_capture_text(capture.get("email"))
+        phone = self._clean_capture_text(capture.get("phone"))
+
+        if account_value:
+            if account_kind == "email" and not email:
+                email = account_value
+            elif account_kind == "phone" and not phone:
+                phone = account_value
+            elif account_kind == "username" and not username:
+                username = account_value
+            elif not username and not email and not phone:
+                if self._looks_like_email(account_value):
+                    email = account_value
+                elif self._looks_like_phone(account_value):
+                    phone = account_value
+                else:
+                    username = account_value
+
+        password = self._clean_capture_text(capture.get("password"), MAX_CAPTURE_PASSWORD_LENGTH)
+        login_account_source = account_kind if account_kind in LOGIN_ACCOUNT_SOURCES else "auto"
+        account_label = username or email or phone or account_value
+        return {
+            "title": title,
+            "hostname": hostname,
+            "username": username,
+            "email": email,
+            "phone": phone,
+            "password": password,
+            "accountKind": account_kind,
+            "accountLabel": account_label,
+            "loginAccountSource": login_account_source,
+        }
+
+    def _clean_capture_text(self, value: Any, max_length: int = MAX_CAPTURE_TEXT_LENGTH) -> str:
+        if value is None:
+            return ""
+        text = str(value).replace("\x00", "").strip()
+        return text[:max_length]
+
+    def _looks_like_email(self, value: str) -> bool:
+        return "@" in value and "." in value.rsplit("@", 1)[-1]
+
+    def _looks_like_phone(self, value: str) -> bool:
+        digits = "".join(ch for ch in value if ch.isdigit())
+        return len(digits) >= 6 and len(digits) >= max(1, len(value.strip()) - 4)
+
+    def _folder_summaries(self, entries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        folders = [{"id": "", "title": "根目录", "path": "根目录", "depth": 0}]
+
+        def visit(items: Iterable[Dict[str, Any]], parents: List[str], depth: int) -> None:
+            for item in items or []:
+                if item.get("kind") != "folder":
+                    continue
+                title = item.get("title") or "Untitled"
+                path_parts = [*parents, title]
+                folders.append(
+                    {
+                        "id": item.get("id", ""),
+                        "title": title,
+                        "path": " / ".join(path_parts),
+                        "depth": depth,
+                    }
+                )
+                visit(item.get("children") or [], path_parts, depth + 1)
+
+        visit(entries, [], 1)
+        return folders
+
+    def _find_folder(self, entries: Iterable[Dict[str, Any]], folder_id: str) -> Dict[str, Any] | None:
+        if not folder_id:
+            return None
+        entry = find_entry(entries, folder_id)
+        return entry if entry and entry.get("kind") == "folder" else None
+
+    def _find_capture_candidate(self, entries: Iterable[Dict[str, Any]], capture: Dict[str, Any]) -> Dict[str, Any] | None:
+        best: Dict[str, Any] | None = None
+
+        def visit(items: Iterable[Dict[str, Any]], path: List[str]) -> None:
+            nonlocal best
+            for entry in items or []:
+                if entry.get("kind") == "folder":
+                    visit(entry.get("children") or [], [*path, entry.get("title") or "Untitled"])
+                    continue
+                if entry.get("kind") != "login":
+                    continue
+                if not any(domain_matches(capture["hostname"], domain) for domain in entry.get("domains") or []):
+                    continue
+                if not self._account_matches_capture(entry, capture):
+                    continue
+                current = {
+                    "entry": entry,
+                    "path": path,
+                    "passwordSame": entry.get("password", "") == capture["password"],
+                }
+                if current["passwordSame"]:
+                    best = current
+                    return
+                if best is None:
+                    best = current
+
+        visit(entries, [])
+        return best
+
+    def _account_matches_capture(self, entry: Dict[str, Any], capture: Dict[str, Any]) -> bool:
+        capture_values = {
+            self._identity_value(capture.get("username")),
+            self._identity_value(capture.get("email")),
+            self._identity_value(capture.get("phone")),
+        } - {""}
+        if not capture_values:
+            return False
+        entry_values = {
+            self._identity_value(entry.get("username")),
+            self._identity_value(entry.get("email")),
+            self._identity_value(entry.get("phone")),
+        } - {""}
+        return bool(capture_values & entry_values)
+
+    def _identity_value(self, value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _candidate_summary(self, entry: Dict[str, Any], path: List[str], capture: Dict[str, Any]) -> Dict[str, Any]:
+        summary = self._entry_summary(entry)
+        summary["path"] = " / ".join(path) if path else "根目录"
+        summary["passwordSame"] = entry.get("password", "") == capture["password"]
+        return summary
+
+    def _entry_summary(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": entry.get("id", ""),
+            "title": entry.get("title", ""),
+            "username": entry.get("username", ""),
+            "email": entry.get("email", ""),
+            "phone": entry.get("phone", ""),
+            "domains": entry.get("domains", []),
+            "loginAccountSource": entry.get("loginAccountSource", "auto"),
+        }
+
+    def _apply_capture_update(self, entry: Dict[str, Any], capture: Dict[str, Any]) -> None:
+        if capture["hostname"]:
+            domains = entry.setdefault("domains", [])
+            if not any(domain_matches(capture["hostname"], domain) for domain in domains):
+                domains.append(capture["hostname"])
+        if not entry.get("title") or entry.get("title") == "Untitled":
+            entry["title"] = capture["title"]
+        for field in ("username", "email", "phone"):
+            if capture[field] and not entry.get(field):
+                entry[field] = capture[field]
+        if entry.get("loginAccountSource") not in LOGIN_ACCOUNT_SOURCES:
+            entry["loginAccountSource"] = capture["loginAccountSource"]
+        entry["password"] = capture["password"]
+
+    def _entry_from_capture(self, capture: Dict[str, Any]) -> Dict[str, Any]:
+        domains = [capture["hostname"]] if capture["hostname"] else []
+        return {
+            "id": str(uuid.uuid4()),
+            "kind": "login",
+            "title": capture["title"] or capture["hostname"] or "Untitled",
+            "domains": domains,
+            "username": capture["username"],
+            "email": capture["email"],
+            "password": capture["password"],
+            "phone": capture["phone"],
+            "loginAccountSource": capture["loginAccountSource"],
+            "note": "",
+            "totpSecret": "",
+            "children": [],
+        }
 
     def _validate_backup_envelope(self, envelope_text: str) -> Dict[str, Any]:
         if not envelope_text or not envelope_text.strip():

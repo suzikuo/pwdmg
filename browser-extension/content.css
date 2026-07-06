@@ -85,3 +85,68 @@
   color: #475569;
   line-height: 1.5;
 }
+
+.mypwdmg-save-body {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.mypwdmg-save-body strong,
+.mypwdmg-save-body small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mypwdmg-save-body small,
+.mypwdmg-save-note,
+.mypwdmg-save-label {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mypwdmg-save-select {
+  width: 100%;
+  height: 32px;
+  border: 1px solid rgba(31, 41, 55, 0.16);
+  border-radius: 8px;
+  padding: 0 8px;
+  color: #1f2937;
+  background: #fff;
+  font: inherit;
+}
+
+.mypwdmg-save-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.mypwdmg-save-primary,
+.mypwdmg-save-secondary {
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mypwdmg-save-primary {
+  color: #fff;
+  background: #0f766e;
+}
+
+.mypwdmg-save-secondary {
+  color: #0f766e;
+  background: #e7f5f2;
+}
+
+.mypwdmg-save-primary:disabled {
+  opacity: 0.65;
+  cursor: default;
+}

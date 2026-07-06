@@ -15,6 +15,9 @@ ALLOWED_METHODS = {
     "lock",
     "queryMatches",
     "getFillPayload",
+    "listSaveTargets",
+    "previewCapturedLogin",
+    "saveCapturedLogin",
     "generateTotp",
 }
 

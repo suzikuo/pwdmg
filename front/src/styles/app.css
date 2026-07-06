@@ -1446,4 +1446,9 @@ body.is-entry-pointer-drag .entry-kind-mark {
     width: 28px;
     min-width: 28px;
   }
+
+  .account-source-field {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
 }

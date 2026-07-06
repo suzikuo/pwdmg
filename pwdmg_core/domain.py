@@ -20,6 +20,9 @@ def normalize_domain(value: str) -> str:
         value = parsed.hostname or ""
     else:
         value = value.split("/", 1)[0]
+    value = value.rsplit("@", 1)[-1]
+    if ":" in value:
+        value = value.split(":", 1)[0]
     value = value.strip(".")
     if value.startswith("www."):
         value = value[4:]
@@ -43,6 +46,9 @@ def domain_matches(hostname: str, saved_domain: str) -> bool:
     domain = normalize_domain(saved_domain)
     if not host or not domain:
         return False
+    if "*" in domain:
+        pattern = "^" + re.escape(domain).replace(r"\*", r"[^.]*") + "$"
+        return re.fullmatch(pattern, host) is not None
     return host == domain or host.endswith("." + domain)
 
 

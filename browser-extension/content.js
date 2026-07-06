@@ -2,6 +2,8 @@ const ROOT_ID = 'mypwdmg-autofill-root'
 const FIELD_ID_ATTR = 'data-mypwdmg-field-id'
 const QUERY_DEBOUNCE_MS = 300
 const MUTATION_DEBOUNCE_MS = 900
+const SAVE_PROMPT_DELAY_MS = 900
+const CAPTURE_CLICK_WINDOW_MS = 800
 const INPUT_SELECTOR = 'input, textarea'
 
 const USER_RE = /(user|login|email|mail|account|phone|mobile|tel|\u7528\u6237\u540d|\u8d26\u53f7|\u8d26\u6237|\u90ae\u7bb1|\u624b\u673a)/i
@@ -17,6 +19,10 @@ let lastQueryKey = ''
 let queryTimer = 0
 let panelPinned = false
 let panelDrag = null
+let lastSubmitCapture = null
+let savePromptTimer = 0
+let pendingSave = null
+let lastOtpAutoFillKey = ''
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -24,6 +30,10 @@ function escapeHtml(value) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/'/g, '&#39;')
 }
 
 function sendMessage(message) {
@@ -97,7 +107,7 @@ function accountFieldKind(input) {
   const hasEmail = EMAIL_RE.test(text)
   const hasPhone = PHONE_RE.test(text)
   const hasUsername = USERNAME_RE.test(text)
-  const hasChoiceText = /(^|[\s_/-])(or|and)([\s_/-]|$)|[\/|,，、]|或|或者/.test(text)
+  const hasChoiceText = /(^|[\s_/-])(or|and)([\s_/-]|$)|[\/|,\uFF0C\u3001]|\u6216|\u6216\u8005/.test(text)
   if (hasEmail && !hasPhone && !(hasUsername && hasChoiceText)) return 'email'
   if (hasPhone && !hasEmail && !(hasUsername && hasChoiceText)) return 'phone'
   if (hasUsername && !hasEmail && !hasPhone) return 'username'
@@ -123,7 +133,18 @@ function findUsernameInput(passwordInput, scope) {
 function detectLoginFields() {
   const inputs = allInputs()
   const passwordInput = inputs.find(isPasswordInput)
-  if (!passwordInput) return null
+  if (!passwordInput) {
+    const otpInput = inputs.find(isOtpInput)
+    if (!otpInput) return null
+    return {
+      usernameInput: null,
+      usernameKind: 'generic',
+      passwordInput: null,
+      otpInput,
+      otpOnly: true,
+      anchor: otpInput
+    }
+  }
 
   const form = passwordInput.closest('form') || document
   const usernameInput = findUsernameInput(passwordInput, form) || findUsernameInput(passwordInput, document)
@@ -136,6 +157,7 @@ function detectLoginFields() {
     usernameKind: accountFieldKind(usernameInput),
     passwordInput,
     otpInput,
+    otpOnly: false,
     anchor: passwordInput || usernameInput || otpInput
   }
 }
@@ -270,6 +292,77 @@ function renderPanel(matches, statusText = '', anchor = null) {
   })
 }
 
+function renderSavePrompt(preview) {
+  pendingSave = preview
+  panelPinned = false
+  const root = ensureRoot()
+  positionRoot(preview.anchor || document.activeElement)
+  const folders = Array.isArray(preview.folders) ? preview.folders : []
+  const update = preview.updateCandidate
+  root.innerHTML = `
+    <div class="mypwdmg-panel mypwdmg-save-panel" role="dialog" aria-label="保存到 My Password">
+      <div class="mypwdmg-title">
+        <span>${escapeHtml(update ? '更新 My Password' : '保存到 My Password')}</span>
+        <button class="mypwdmg-close" type="button" title="Close">x</button>
+      </div>
+      <div class="mypwdmg-save-body">
+        <strong>${escapeHtml(preview.title || preview.hostname || 'Untitled')}</strong>
+        <small>${escapeHtml([preview.accountLabel, preview.hostname].filter(Boolean).join(' · '))}</small>
+        ${
+          update
+            ? `<div class="mypwdmg-save-note">更新现有条目：${escapeHtml(update.title || 'Untitled')}${update.path ? ` (${escapeHtml(update.path)})` : ''}</div>`
+            : `
+              <label class="mypwdmg-save-label" for="mypwdmg-save-folder">保存位置</label>
+              <select id="mypwdmg-save-folder" class="mypwdmg-save-select">
+                ${folders
+                  .map((folder) => `<option value="${escapeAttr(folder.id || '')}">${escapeHtml(folder.path || folder.title || '根目录')}</option>`)
+                  .join('')}
+              </select>
+            `
+        }
+        <div class="mypwdmg-save-actions">
+          <button class="mypwdmg-save-secondary" type="button" data-action="dismiss">忽略</button>
+          <button class="mypwdmg-save-primary" type="button" data-action="save">${escapeHtml(update ? '更新' : '保存')}</button>
+        </div>
+      </div>
+    </div>
+  `
+
+  root.querySelector('.mypwdmg-close')?.addEventListener('click', dismissSavePrompt)
+  root.querySelector('[data-action="dismiss"]')?.addEventListener('click', dismissSavePrompt)
+  root.querySelector('[data-action="save"]')?.addEventListener('click', savePendingCapture)
+  root.querySelector('.mypwdmg-title')?.addEventListener('pointerdown', startPanelDrag)
+}
+
+function dismissSavePrompt() {
+  if (pendingSave?.token) {
+    sendMessage({ type: 'MYPWDMG_DISMISS_CAPTURE', token: pendingSave.token }).catch(() => {})
+  }
+  pendingSave = null
+  removeRoot()
+}
+
+async function savePendingCapture() {
+  if (!pendingSave?.token) return
+  const root = ensureRoot()
+  const button = root.querySelector('[data-action="save"]')
+  const folderSelect = root.querySelector('#mypwdmg-save-folder')
+  button?.setAttribute('disabled', 'true')
+  const response = await sendMessage({
+    type: 'MYPWDMG_SAVE_CAPTURE',
+    token: pendingSave.token,
+    parentId: pendingSave.updateCandidate ? '' : folderSelect?.value || '',
+    updateEntryId: pendingSave.updateCandidate?.id || ''
+  })
+  if (!response?.ok) {
+    renderPanel([], response?.message || '保存失败。', pendingSave.anchor || document.activeElement)
+    return
+  }
+  renderPanel([], response.data?.action === 'updated' ? '已更新 My Password。' : '已保存到 My Password。', pendingSave.anchor || document.activeElement)
+  pendingSave = null
+  window.setTimeout(removeRoot, 1600)
+}
+
 function scheduleQuery(force = false, delay = QUERY_DEBOUNCE_MS) {
   window.clearTimeout(queryTimer)
   queryTimer = window.setTimeout(() => queryMatches(force), delay)
@@ -304,6 +397,17 @@ async function queryMatches(force = false) {
   }
 
   lastMatches = response.data || []
+  if (fields.otpOnly && fields.otpInput) {
+    const totpMatches = lastMatches.filter((entry) => entry.hasTotp)
+    if (totpMatches.length === 1) {
+      const autoFillKey = [location.hostname, fieldId(fields.otpInput), totpMatches[0].id].join('|')
+      if (autoFillKey !== lastOtpAutoFillKey) {
+        lastOtpAutoFillKey = autoFillKey
+        await fillEntry(totpMatches[0].id)
+        return
+      }
+    }
+  }
   renderPanel(lastMatches, '', fields.anchor)
 }
 
@@ -358,6 +462,99 @@ function setInputValue(input, value) {
   input.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
+function captureLoginFromScope(scope = document, anchor = null) {
+  const fields = detectLoginFieldsInScope(scope)
+  if (!fields?.passwordInput) return null
+  const password = String(fields.passwordInput.value || '')
+  if (!password) return null
+
+  const account = String(fields.usernameInput?.value || '').trim()
+  const accountKind = fields.usernameKind || accountFieldKind(fields.usernameInput)
+  const capture = {
+    hostname: location.hostname,
+    title: document.title || location.hostname,
+    account,
+    accountKind,
+    username: accountKind === 'username' ? account : '',
+    email: accountKind === 'email' ? account : '',
+    phone: accountKind === 'phone' ? account : '',
+    password
+  }
+  return { capture, anchor: anchor || fields.passwordInput || fields.usernameInput }
+}
+
+function detectLoginFieldsInScope(scope = document) {
+  const inputs = allInputs(scope)
+  const passwordInputs = inputs.filter(isPasswordInput)
+  if (!passwordInputs.length) return null
+  const passwordInput = passwordInputs.at(-1)
+  const usernameInput = findUsernameInput(passwordInput, scope) || findUsernameInput(passwordInput, document)
+  return {
+    usernameInput,
+    usernameKind: accountFieldKind(usernameInput),
+    passwordInput
+  }
+}
+
+function scheduleSaveCapture(captureInfo) {
+  if (!captureInfo?.capture?.password) return
+  lastSubmitCapture = { ...captureInfo, at: Date.now() }
+  window.clearTimeout(savePromptTimer)
+  savePromptTimer = window.setTimeout(() => prepareSavePrompt(captureInfo), SAVE_PROMPT_DELAY_MS)
+}
+
+async function prepareSavePrompt(captureInfo) {
+  if (!captureInfo?.capture?.password) return
+  const response = await sendMessage({
+    type: 'MYPWDMG_PREPARE_CAPTURE',
+    capture: captureInfo.capture
+  })
+  if (!response?.ok || !response.data?.shouldPrompt || !response.data?.token) return
+  renderSavePrompt({
+    ...response.data,
+    anchor: captureInfo.anchor
+  })
+}
+
+async function takePreparedSavePrompt() {
+  const response = await sendMessage({
+    type: 'MYPWDMG_TAKE_SAVE_PROMPT',
+    hostname: location.hostname
+  })
+  if (!response?.ok || !response.data?.token) return
+  renderSavePrompt({
+    ...response.data,
+    anchor: document.activeElement
+  })
+}
+
+function handleSubmitCapture(event) {
+  const form = event.target?.closest?.('form') || event.target
+  scheduleSaveCapture(captureLoginFromScope(form, event.target))
+}
+
+function handleClickCapture(event) {
+  const target = event.target instanceof Element ? event.target : null
+  if (!target?.closest('button, input[type="submit"], input[type="button"], [role="button"]')) return
+  const text = [
+    target.textContent,
+    target.getAttribute?.('aria-label'),
+    target.getAttribute?.('title'),
+    target.getAttribute?.('value')
+  ]
+    .join(' ')
+    .toLowerCase()
+  if (!/(login|log in|sign in|signin|sign up|signup|register|create account|submit|continue|登录|登陆|注册|提交|继续|创建)/i.test(text)) return
+
+  const form = target.closest('form') || document
+  const captureInfo = captureLoginFromScope(form, target)
+  if (!captureInfo) return
+  window.setTimeout(() => {
+    if (lastSubmitCapture && Date.now() - lastSubmitCapture.at <= CAPTURE_CLICK_WINDOW_MS) return
+    scheduleSaveCapture({ ...captureInfo, at: Date.now() })
+  }, 0)
+}
+
 function nodeHasInput(node) {
   if (node.nodeType !== Node.ELEMENT_NODE) return false
   return node.matches?.(INPUT_SELECTOR) || Boolean(node.querySelector?.(INPUT_SELECTOR))
@@ -382,6 +579,8 @@ chrome.runtime.onMessage.addListener((message) => {
 })
 
 document.addEventListener('focusin', () => scheduleQuery(false), true)
+document.addEventListener('submit', handleSubmitCapture, true)
+document.addEventListener('click', handleClickCapture, true)
 window.addEventListener('pageshow', () => scheduleQuery(true))
 window.addEventListener('resize', () => {
   if (panelPinned) clampPanelPosition()
@@ -394,3 +593,4 @@ observer.observe(document.documentElement, {
   attributeFilter: ['type', 'name', 'id', 'autocomplete', 'placeholder', 'aria-label', 'style', 'class', 'disabled', 'readonly']
 })
 scheduleQuery(true)
+takePreparedSavePrompt()

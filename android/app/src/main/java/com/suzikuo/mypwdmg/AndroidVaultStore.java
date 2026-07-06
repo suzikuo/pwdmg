@@ -608,7 +608,6 @@ final class AndroidVaultStore {
         if (portIndex >= 0) result = result.substring(0, portIndex);
         while (result.startsWith(".")) result = result.substring(1);
         while (result.endsWith(".")) result = result.substring(0, result.length() - 1);
-        if (result.startsWith("*.")) result = result.substring(2);
         if (result.startsWith("www.")) result = result.substring(4);
         return result;
     }
@@ -616,7 +615,25 @@ final class AndroidVaultStore {
     private static boolean domainMatches(String hostname, String savedDomain) {
         String host = normalizeDomain(hostname);
         String domain = normalizeDomain(savedDomain);
-        return !host.isEmpty() && !domain.isEmpty() && (host.equals(domain) || host.endsWith("." + domain));
+        if (host.isEmpty() || domain.isEmpty()) return false;
+        if (domain.indexOf('*') >= 0) return wildcardDomainMatches(host, domain);
+        return host.equals(domain) || host.endsWith("." + domain);
+    }
+
+    private static boolean wildcardDomainMatches(String host, String domain) {
+        StringBuilder pattern = new StringBuilder("^");
+        for (int index = 0; index < domain.length(); index += 1) {
+            char ch = domain.charAt(index);
+            if (ch == '*') {
+                pattern.append("[^.]*");
+            } else if ("\\.[]{}()+-^$?|".indexOf(ch) >= 0) {
+                pattern.append('\\').append(ch);
+            } else {
+                pattern.append(ch);
+            }
+        }
+        pattern.append("$");
+        return host.matches(pattern.toString());
     }
 
     private static void flattenEntries(JSONArray entries, List<JSONObject> output) {

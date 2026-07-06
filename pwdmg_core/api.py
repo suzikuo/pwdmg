@@ -54,5 +54,25 @@ class PasswordManagerApi:
     def getFillPayload(self, entryId: str) -> Dict[str, Any]:
         return call_result(lambda: self.service.get_fill_payload(entryId))
 
+    def listSaveTargets(self) -> Dict[str, Any]:
+        return call_result(self.service.list_save_targets)
+
+    def previewCapturedLogin(self, capture: Dict[str, Any]) -> Dict[str, Any]:
+        return call_result(lambda: self.service.preview_captured_login(capture))
+
+    def saveCapturedLogin(
+        self,
+        capture: Dict[str, Any],
+        parentId: str = "",
+        updateEntryId: str = "",
+    ) -> Dict[str, Any]:
+        return call_result(
+            lambda: self.service.save_captured_login(
+                capture,
+                parentId=parentId,
+                updateEntryId=updateEntryId,
+            )
+        )
+
     def generateTotp(self, entryId: str) -> Dict[str, Any]:
         return call_result(lambda: self.service.generate_totp(entryId))
