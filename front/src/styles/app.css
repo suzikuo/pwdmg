@@ -938,6 +938,47 @@ body.is-entry-pointer-drag .entry-drop-zone {
   margin-top: 0;
 }
 
+.update-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.update-actions .van-button {
+  margin-top: 0;
+}
+
+.update-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--panel-bg);
+}
+
+.update-summary div {
+  min-width: 0;
+}
+
+.update-summary span,
+.update-summary strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.update-summary span {
+  color: var(--text-muted);
+  font-size: var(--app-font-sm);
+}
+
+.update-summary strong {
+  margin-top: 2px;
+  color: var(--text-main);
+  font-size: var(--app-font-sm);
+}
+
 .backup-action-button.van-button--small {
   height: max(28px, calc(30px * var(--ui-scale)));
   padding: 0 8px;

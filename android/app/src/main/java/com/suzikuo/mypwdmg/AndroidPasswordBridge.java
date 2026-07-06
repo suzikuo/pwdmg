@@ -31,10 +31,12 @@ public final class AndroidPasswordBridge {
     private static final String TAG = "PwdAutofillBridge";
     private final Activity activity;
     private final AndroidVaultStore store;
+    private final AndroidUpdateManager updater;
 
     AndroidPasswordBridge(Activity activity) {
         this.activity = activity;
         this.store = new AndroidVaultStore(activity);
+        this.updater = new AndroidUpdateManager(activity);
     }
 
     @JavascriptInterface
@@ -490,6 +492,21 @@ public final class AndroidPasswordBridge {
             });
             return autofillState();
         });
+    }
+
+    @JavascriptInterface
+    public String checkAppUpdate(String manifestUrl) {
+        return result(() -> updater.check(manifestUrl));
+    }
+
+    @JavascriptInterface
+    public String downloadAppUpdate(String manifestUrl) {
+        return result(() -> updater.download(manifestUrl));
+    }
+
+    @JavascriptInterface
+    public String applyAppUpdate(String packagePath) {
+        return result(() -> updater.apply(packagePath));
     }
 
     @JavascriptInterface

@@ -96,6 +96,47 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(matches[0]["id"], "entry-aws")
             self.assertTrue(matches[0]["hasTotp"])
 
+    def test_vault_service_query_index_rebuilds_after_save(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "entry-old",
+                            "kind": "login",
+                            "title": "Old",
+                            "domains": ["old.example.net"],
+                            "username": "old",
+                            "password": "old-secret",
+                        }
+                    ]
+                )
+            )
+            self.assertEqual([m["id"] for m in service.query_matches("old.example.net")], ["entry-old"])
+
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "entry-new",
+                            "kind": "login",
+                            "title": "New",
+                            "domains": ["example.com"],
+                            "username": "new",
+                            "password": "new-secret",
+                        }
+                    ]
+                )
+            )
+
+            self.assertEqual(service.query_matches("old.example.net"), [])
+            self.assertEqual([m["id"] for m in service.query_matches("app.example.com")], ["entry-new"])
+            self.assertEqual(service.get_fill_payload("entry-new")["password"], "new-secret")
+
     def test_vault_service_defaults_new_login_account_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault_path = Path(tmp) / "vault.json"

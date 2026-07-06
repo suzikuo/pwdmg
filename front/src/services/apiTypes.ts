@@ -1,4 +1,15 @@
-import type { AndroidAutofillState, ApiResult, AppState, PluginListenerState, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types'
+import type {
+  AndroidAutofillState,
+  AppUpdateApply,
+  AppUpdateCheck,
+  AppUpdateDownload,
+  ApiResult,
+  AppState,
+  PluginListenerState,
+  VaultBackupExport,
+  VaultBackupImport,
+  VaultPayload
+} from '../types'
 
 export type CreateVaultResult = {
   vault: VaultPayload
@@ -20,6 +31,9 @@ export interface PasswordManagerApiAdapter {
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
+  checkAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateCheck>>
+  downloadAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateDownload>>
+  applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
   safeExit: () => Promise<ApiResult<null>>
 }
 

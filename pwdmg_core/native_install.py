@@ -12,7 +12,7 @@ from .paths import NATIVE_HOST_DIR, PLUGIN_CONFIG_FILE, ensure_app_dir
 
 
 HOST_NAME = "com.suzikuo.mypwdmg"
-PACKAGED_HOST_EXE_NAME = "My Password Host.exe"
+PACKAGED_HOST_ARG = "--native-host"
 CHROME_REG_PATH = rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}"
 EDGE_REG_PATH = rf"Software\Microsoft\Edge\NativeMessagingHosts\{HOST_NAME}"
 EXTENSION_ID_RE = re.compile(r"^[a-p]{32}$")
@@ -118,13 +118,12 @@ def _write_launcher() -> Path:
 
 
 def _host_command() -> str:
-    executable = _host_executable_path()
     if _is_packaged():
+        executable = Path(sys.executable).resolve()
         if not executable.exists():
-            raise FileNotFoundError(
-                f"插件 Host 程序不存在：{executable}。请将 {PACKAGED_HOST_EXE_NAME} 与 GUI exe 放在同一目录。"
-            )
-        return f'"{executable}"'
+            raise FileNotFoundError(f"Packaged executable does not exist: {executable}")
+        return f'"{executable}" {PACKAGED_HOST_ARG}'
+    executable = _host_executable_path()
     return f'"{executable}" -m pwdmg_core.native_host'
 
 
@@ -135,8 +134,6 @@ def _host_working_dir() -> Path:
 
 
 def _host_executable_path() -> Path:
-    if _is_packaged():
-        return Path(sys.executable).resolve().with_name(PACKAGED_HOST_EXE_NAME)
     return Path(sys.executable).resolve()
 
 
@@ -200,19 +197,11 @@ def _delete_registry(path: str) -> None:
 def _stop_packaged_host_processes() -> None:
     if not _is_packaged():
         return
-    host = _host_executable_path()
-    if not host.exists():
-        return
-    try:
-        subprocess.run(
-            ["taskkill", "/IM", host.name, "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except OSError:
-        pass
+    # Packaged mode uses the same exe for GUI and Native Messaging
+    # (`My Password.exe --native-host`). Killing by image name would close the
+    # desktop app too, so disabling the listener relies on the local flag that
+    # is checked before each native-host request.
+    return
 
 
 def _is_process_running(image_name: str) -> bool:

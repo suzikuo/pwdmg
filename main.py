@@ -14,6 +14,8 @@ from pwdmg_core.api import PasswordManagerApi
 from pwdmg_core.native_host import main as native_host_main
 from pwdmg_core.native_install import disable_plugin_listener, enable_plugin_listener, plugin_listener_state
 from pwdmg_core.paths import DEFAULT_DESKTOP_CONFIG, DESKTOP_CONFIG_FILE, ensure_app_dir
+from pwdmg_core.updater import DesktopUpdateService
+from pwdmg_core.vault import call_result
 
 
 _desktop_window: webview.Window | None = None
@@ -21,6 +23,10 @@ _desktop_state: "DesktopWindowState | None" = None
 
 
 class DesktopPasswordManagerApi(PasswordManagerApi):
+    def __init__(self) -> None:
+        super().__init__()
+        self.updater = DesktopUpdateService()
+
     def getPluginListenerState(self) -> dict[str, Any]:
         try:
             return {"ok": True, "data": plugin_listener_state()}
@@ -38,6 +44,27 @@ class DesktopPasswordManagerApi(PasswordManagerApi):
             return {"ok": True, "data": disable_plugin_listener()}
         except Exception as exc:
             return {"ok": False, "code": "PLUGIN_LISTENER_ERROR", "message": str(exc)}
+
+    def checkDesktopUpdate(self, manifestUrl: str) -> dict[str, Any]:
+        return call_result(lambda: self.updater.check(manifestUrl))
+
+    def downloadDesktopUpdate(self, manifestUrl: str) -> dict[str, Any]:
+        return call_result(lambda: self.updater.download(manifestUrl))
+
+    def applyDesktopUpdate(self, packagePath: str) -> dict[str, Any]:
+        try:
+            data = self.updater.apply(packagePath)
+            window = _desktop_window
+            state = _desktop_state
+            if window is not None and state is not None:
+                state.save_window(window)
+            if window is not None:
+                timer = threading.Timer(0.2, window.destroy)
+                timer.daemon = True
+                timer.start()
+            return {"ok": True, "data": data}
+        except Exception as exc:
+            return {"ok": False, "code": "UPDATE_FAILED", "message": str(exc)}
 
     def safeExit(self) -> dict[str, Any]:
         try:

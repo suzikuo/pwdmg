@@ -65,6 +65,45 @@ export interface AndroidAutofillState {
   settingsAvailable: boolean
 }
 
+export interface AppUpdateAsset {
+  url: string
+  sha256: string
+  size: number
+  fileName: string
+}
+
+export interface AppUpdateCheck {
+  supported: boolean
+  currentVersion: string
+  currentCode?: number
+  latestVersion: string
+  latestCode?: number
+  updateAvailable: boolean
+  manifestUrl: string
+  notes: string
+  publishedAt: string
+  canApply: boolean
+  platform?: string
+  installPermissionGranted?: boolean
+  asset: AppUpdateAsset
+}
+
+export interface AppUpdateDownload {
+  update: AppUpdateCheck
+  packagePath: string
+  sha256: string
+  size: number
+}
+
+export interface AppUpdateApply {
+  packagePath: string
+  scriptPath?: string
+  installDir?: string
+  permissionRequired?: boolean
+  installerOpened?: boolean
+  willRestart: boolean
+}
+
 export interface ApiResult<T> {
   ok: boolean
   data?: T

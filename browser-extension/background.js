@@ -1,12 +1,17 @@
 const HOST_NAME = 'com.suzikuo.mypwdmg'
 const REQUEST_TIMEOUT_MS = 15000
 const SAVE_CAPTURE_TTL_MS = 5 * 60 * 1000
+const QUERY_CACHE_TTL_MS = 8000
+const QUERY_CACHE_MAX = 64
 
 let port = null
 let nextId = 1
 const pending = new Map()
 const pendingCaptures = new Map()
 const pendingPromptsByTab = new Map()
+const queryCache = new Map()
+const inflightQueryMatches = new Map()
+let queryCacheVersion = 0
 
 function ensurePort() {
   if (port) return port
@@ -29,6 +34,7 @@ function ensurePort() {
     }
     pending.clear()
     port = null
+    clearQueryCache()
   })
 
   return port
@@ -66,6 +72,24 @@ function prunePendingCaptures() {
   }
 }
 
+function pruneQueryCache() {
+  const now = Date.now()
+  for (const [key, item] of queryCache) {
+    if (item.expiresAt <= now) queryCache.delete(key)
+  }
+  while (queryCache.size > QUERY_CACHE_MAX) {
+    const firstKey = queryCache.keys().next().value
+    if (!firstKey) break
+    queryCache.delete(firstKey)
+  }
+}
+
+function clearQueryCache() {
+  queryCacheVersion += 1
+  queryCache.clear()
+  inflightQueryMatches.clear()
+}
+
 function newToken() {
   return crypto.randomUUID?.() || `capture-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
@@ -95,6 +119,42 @@ function hostLooksRelated(left, right) {
   const a = normalizeHost(left)
   const b = normalizeHost(right)
   return Boolean(a && b && (a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`)))
+}
+
+function queryCacheKey(hostname = '') {
+  return normalizeHost(hostname)
+}
+
+async function queryMatchesCached(hostname = '') {
+  pruneQueryCache()
+  const key = queryCacheKey(hostname)
+  if (!key) return nativeCall('queryMatches', { hostname })
+
+  const cached = queryCache.get(key)
+  if (cached && cached.expiresAt > Date.now()) return cached.response
+
+  const inflight = inflightQueryMatches.get(key)
+  if (inflight) return inflight
+
+  const cacheVersion = queryCacheVersion
+  let request
+  request = nativeCall('queryMatches', { hostname: key }).then((response) => {
+    if (response?.ok && cacheVersion === queryCacheVersion) {
+      queryCache.set(key, {
+        response,
+        expiresAt: Date.now() + QUERY_CACHE_TTL_MS
+      })
+      pruneQueryCache()
+    }
+    return response
+  }).finally(() => {
+    if (inflightQueryMatches.get(key) === request) {
+      inflightQueryMatches.delete(key)
+    }
+  })
+
+  inflightQueryMatches.set(key, request)
+  return request
 }
 
 function forgetPromptToken(token) {
@@ -147,7 +207,10 @@ async function savePreparedCapture(token, parentId = '', updateEntryId = '') {
     parentId: parentId || '',
     updateEntryId: updateEntryId || ''
   })
-  if (response?.ok) refreshActiveTab()
+  if (response?.ok) {
+    clearQueryCache()
+    refreshActiveTab()
+  }
   return response
 }
 
@@ -169,17 +232,22 @@ function dismissPreparedCapture(token) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ;(async () => {
     if (message?.type === 'MYPWDMG_QUERY_MATCHES') {
-      sendResponse(await nativeCall('queryMatches', { hostname: message.hostname }))
+      sendResponse(await queryMatchesCached(message.hostname))
       return
     }
     if (message?.type === 'MYPWDMG_UNLOCK') {
       const response = await nativeCall('unlock', { password: message.password || '' })
-      if (response?.ok) refreshActiveTab()
+      if (response?.ok) {
+        clearQueryCache()
+        refreshActiveTab()
+      }
       sendResponse(response)
       return
     }
     if (message?.type === 'MYPWDMG_LOCK') {
-      sendResponse(await nativeCall('lock'))
+      const response = await nativeCall('lock')
+      if (response?.ok) clearQueryCache()
+      sendResponse(response)
       return
     }
     if (message?.type === 'MYPWDMG_GET_FILL') {

@@ -300,6 +300,60 @@
             </van-cell>
           </div>
         </section>
+        <section v-else-if="drawerSection === 'updates'" class="drawer-panel update-panel">
+          <div class="settings-group">
+            <div class="settings-group-title">应用更新</div>
+            <p class="settings-note compact-note">使用 GitHub Release 的 manifest 检查版本。下载包必须通过 SHA256 校验后才能安装。</p>
+            <van-field
+              v-model="updateManifestUrl"
+              label="Manifest"
+              type="textarea"
+              autosize
+              placeholder="https://github.com/OWNER/REPO/releases/download/v2.0.1/update-manifest.json"
+            />
+            <div class="update-actions">
+              <van-button size="small" type="primary" icon="replay" :loading="updateBusy === 'check'" @click="checkAppUpdate">检查</van-button>
+              <van-button
+                size="small"
+                plain
+                type="primary"
+                icon="down"
+                :disabled="!updateInfo?.updateAvailable"
+                :loading="updateBusy === 'download'"
+                @click="downloadAppUpdate"
+              >
+                下载
+              </van-button>
+              <van-button
+                size="small"
+                plain
+                type="danger"
+                icon="upgrade"
+                :disabled="!downloadedUpdatePath || !updateInfo?.canApply"
+                :loading="updateBusy === 'apply'"
+                @click="applyAppUpdate"
+              >
+                {{ updateInstallButtonText }}
+              </van-button>
+            </div>
+            <div v-if="updateInfo" class="update-summary">
+              <div>
+                <span>当前版本</span>
+                <strong>{{ updateInfo.currentVersion }}</strong>
+              </div>
+              <div>
+                <span>最新版本</span>
+                <strong>{{ updateInfo.latestVersion }}</strong>
+              </div>
+              <div>
+                <span>安装方式</span>
+                <strong>{{ updateInstallModeText }}</strong>
+              </div>
+            </div>
+            <p v-if="downloadedUpdatePath" class="settings-note compact-note">已下载：{{ downloadedUpdatePath }}</p>
+            <p v-if="updateStatus" class="settings-note compact-note">{{ updateStatus }}</p>
+          </div>
+        </section>
         <section v-else-if="drawerSection === 'backup'" class="drawer-panel">
           <p class="settings-note">上传会覆盖固定云端文件；备份会直接上传一个带日期的云端文件，不在本地留存。下载会覆盖本机保险库。</p>
           <van-form @submit="saveSettings">
@@ -348,7 +402,7 @@
               <span>Edge</span>
               <strong>{{ pluginListener.enabled && pluginListener.edgeRegistered ? '已注册' : '未注册' }}</strong>
               <span>Host</span>
-              <strong>{{ pluginListener.mode === 'packaged' ? (pluginListener.hostExecutableExists ? '已找到' : '缺少 Host exe') : '开发模式' }}</strong>
+              <strong>{{ pluginListener.mode === 'packaged' ? (pluginListener.hostExecutableExists ? '已找到' : '缺少程序') : '开发模式' }}</strong>
             </div>
             <p class="settings-note compact-note">开启后浏览器会按需启动后台 Host；关闭后已有连接也会停止返回填充数据。</p>
           </div>
@@ -375,7 +429,16 @@ import EntryList from './components/EntryList.vue'
 import { AliyunOSSAPI, APIResponseStatus, DEFAULT_OSS_OBJECT_NAME, normalizeObjectName } from './services/aliyunOss'
 import { api } from './services/api'
 import { generateTotp } from './services/totp'
-import type { AndroidAutofillState, AppState, EntryKind, LoginAccountSource, PluginListenerState, VaultEntry, VaultPayload } from './types'
+import type {
+  AndroidAutofillState,
+  AppState,
+  AppUpdateCheck,
+  EntryKind,
+  LoginAccountSource,
+  PluginListenerState,
+  VaultEntry,
+  VaultPayload
+} from './types'
 
 type ThemeMode = 'light' | 'dark'
 type CssVars = Record<string, string>
@@ -391,6 +454,7 @@ const DESKTOP_QUERY = '(min-width: 820px)'
 const PANE_WIDTH_KEY = 'mypwdmg.desktopPaneWidth'
 const UI_SCALE_KEY = 'mypwdmg.uiScaleLevel.v2'
 const FONT_SIZE_KEY = 'mypwdmg.fontSizePercent'
+const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
 const UI_SCALE_BASE = 0.92
 const UI_SCALE_MIN = 0.5
 const UI_SCALE_MAX = 1.3
@@ -413,6 +477,11 @@ const cloudBusy = ref(false)
 const pluginBusy = ref(false)
 const androidAutofillBusy = ref(false)
 const backupStatus = ref('')
+const updateBusy = ref<'check' | 'download' | 'apply' | ''>('')
+const updateStatus = ref('')
+const updateManifestUrl = ref(localStorage.getItem(UPDATE_MANIFEST_URL_KEY) || '')
+const updateInfo = ref<AppUpdateCheck | null>(null)
+const downloadedUpdatePath = ref('')
 const password = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
@@ -515,6 +584,12 @@ const androidAutofillStatus = computed(() => {
   if (!state) return '未检测'
   if (!state.supported) return '不支持'
   return state.enabled ? '已开启' : '去设置'
+})
+const updatePlatform = computed(() => updateInfo.value?.platform || (showAndroidAutofillSettings.value ? 'android' : 'desktop'))
+const updateInstallButtonText = computed(() => updatePlatform.value === 'android' ? '打开安装器' : '安装并重启')
+const updateInstallModeText = computed(() => {
+  if (!updateInfo.value?.canApply) return '仅检查/下载'
+  return updatePlatform.value === 'android' ? '系统安装器' : '自动安装'
 })
 const desktopGridStyle = computed<CssVars>(() => {
   if (!isWide.value) return {} as CssVars
@@ -982,6 +1057,95 @@ async function moveEntry(payload: MoveEntryPayload) {
   if (selectedEntry.value) selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
 }
 
+function currentUpdateManifestUrl() {
+  const url = updateManifestUrl.value.trim()
+  if (!url) {
+    showFailToast('请先填写 GitHub Release manifest URL')
+    return ''
+  }
+  localStorage.setItem(UPDATE_MANIFEST_URL_KEY, url)
+  return url
+}
+
+async function checkAppUpdate() {
+  if (updateBusy.value) return
+  const manifestUrl = currentUpdateManifestUrl()
+  if (!manifestUrl) return
+
+  updateBusy.value = 'check'
+  updateStatus.value = ''
+  downloadedUpdatePath.value = ''
+  try {
+    const result = await api.checkAppUpdate(manifestUrl)
+    if (!result.ok || !result.data) {
+      showFailToast(result.message || '检查更新失败')
+      return
+    }
+    updateInfo.value = result.data
+    updateStatus.value = result.data.updateAvailable
+      ? `发现新版本 ${result.data.latestVersion}`
+      : '当前已是最新版本'
+    showToast(updateStatus.value)
+  } finally {
+    updateBusy.value = ''
+  }
+}
+
+async function downloadAppUpdate() {
+  if (updateBusy.value) return
+  const manifestUrl = currentUpdateManifestUrl()
+  if (!manifestUrl) return
+
+  updateBusy.value = 'download'
+  updateStatus.value = ''
+  try {
+    const result = await api.downloadAppUpdate(manifestUrl)
+    if (!result.ok || !result.data) {
+      showFailToast(result.message || '下载更新失败')
+      return
+    }
+    updateInfo.value = result.data.update
+    downloadedUpdatePath.value = result.data.packagePath
+    updateStatus.value = `更新包已下载并校验通过，大小 ${formatBytes(result.data.size)}`
+    showSuccessToast('更新包已下载')
+  } finally {
+    updateBusy.value = ''
+  }
+}
+
+async function applyAppUpdate() {
+  if (updateBusy.value || !downloadedUpdatePath.value) return
+  const isAndroidUpdate = updatePlatform.value === 'android'
+  try {
+    await showConfirmDialog({
+      title: isAndroidUpdate ? '安装 Android 更新' : '安装更新',
+      message: isAndroidUpdate
+        ? '将打开系统安装器。Android 会要求你确认安装，安装完成后重新打开应用即可。继续吗？'
+        : '应用会关闭，后台更新脚本会替换程序文件并重新启动。继续吗？',
+      confirmButtonText: isAndroidUpdate ? '打开安装器' : '安装并重启',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
+  updateBusy.value = 'apply'
+  const result = await api.applyAppUpdate(downloadedUpdatePath.value)
+  if (!result.ok) {
+    updateBusy.value = ''
+    showFailToast(result.message || '安装更新失败')
+    return
+  }
+  if (result.data?.permissionRequired) {
+    updateBusy.value = ''
+    updateStatus.value = '请在系统页面允许安装未知应用，返回后再次点击打开安装器'
+    showToast('请先允许安装未知应用')
+    return
+  }
+  updateStatus.value = isAndroidUpdate ? '已打开系统安装器' : '正在关闭并安装更新'
+  showSuccessToast(isAndroidUpdate ? '请在系统安装器中确认' : '正在安装更新')
+}
+
 async function saveSettings() {
   await persistSettings({ closeDrawer: true, toast: true })
 }
@@ -1329,6 +1493,13 @@ function makeDatedBackupName(fileName: string) {
 
 function padDatePart(value: number) {
   return String(value).padStart(2, '0')
+}
+
+function formatBytes(value: number) {
+  const bytes = Number(value) || 0
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round((bytes / 1024) * 10) / 10} KB`
+  return `${Math.round((bytes / 1024 / 1024) * 10) / 10} MB`
 }
 
 async function confirmTwice(options: {

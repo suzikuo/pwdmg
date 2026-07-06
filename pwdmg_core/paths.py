@@ -8,6 +8,7 @@ VAULT_FILE = APP_DIR / "vault.json"
 LEGACY_LOCAL_STORAGE_FILE = APP_DIR / "localStorage_data.json"
 DESKTOP_CONFIG_FILE = APP_DIR / "desktop_config.json"
 LOCAL_BACKUP_DIR = APP_DIR / "backups"
+UPDATE_DIR = APP_DIR / "updates"
 NATIVE_HOST_DIR = APP_DIR / "native-host"
 PLUGIN_CONFIG_FILE = APP_DIR / "plugin_config.json"
 

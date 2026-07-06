@@ -1,4 +1,4 @@
-import type { ApiResult, PluginListenerState } from '../types'
+import type { ApiResult, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, PluginListenerState } from '../types'
 import { emptyPluginListenerState, fail, ok } from './apiTypes'
 import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
 
@@ -14,6 +14,9 @@ export const androidStorageAdapter: VaultStorageAdapter = {
   disablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
   getAndroidAutofillState: () => call('getAutofillState'),
   openAndroidAutofillSettings: () => call('openAutofillSettings'),
+  checkAppUpdate: (manifestUrl) => call<AppUpdateCheck>('checkAppUpdate', manifestUrl),
+  downloadAppUpdate: (manifestUrl) => call<AppUpdateDownload>('downloadAppUpdate', manifestUrl),
+  applyAppUpdate: (packagePath) => call<AppUpdateApply>('applyAppUpdate', packagePath),
   safeExit: () => call<null>('safeExit')
 }
 

@@ -1,59 +1,244 @@
-body {
-  width: 260px;
-  margin: 0;
-  color: #172033;
-  background: #f7faf9;
-  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-main {
-  padding: 12px;
-}
-
-h1 {
-  margin: 0 0 6px;
-  font-size: 16px;
-  letter-spacing: 0;
-}
-
-p {
-  margin: 0 0 10px;
-  color: #5b667a;
-  line-height: 1.45;
-  font-size: 13px;
-}
-
-form {
-  display: grid;
-  gap: 8px;
-}
-
-input,
-button {
-  width: 100%;
-  height: 34px;
-  border-radius: 8px;
-  font: inherit;
+* {
   box-sizing: border-box;
 }
 
+body {
+  width: 326px;
+  margin: 0;
+  color: #111827;
+  background: #f8fafc;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
 input {
-  border: 1px solid rgba(31, 41, 55, 0.16);
-  padding: 0 10px;
-  outline: none;
+  font: inherit;
 }
 
 button {
-  border: 0;
-  background: #0f766e;
-  color: #fff;
-  font-weight: 700;
   cursor: pointer;
 }
 
-.secondary {
-  display: none;
-  margin-top: 8px;
-  background: #e7f5f2;
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid rgba(20, 184, 166, 0.55);
+  outline-offset: 2px;
+}
+
+.popup-shell {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+h1 {
+  margin: 0;
+  color: #111827;
+  font-size: 16px;
+  font-weight: 760;
+  line-height: 1.25;
+}
+
+.popup-header p {
+  max-width: 205px;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: #334155;
+  background: #e2e8f0;
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 24px;
+}
+
+.state-badge[data-state="unlocked"] {
   color: #0f766e;
+  background: #ccfbf1;
+}
+
+.state-badge[data-state="locked"] {
+  color: #9f1239;
+  background: #ffe4e6;
+}
+
+.state-badge[data-state="error"] {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.state-badge[data-state="empty"] {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.status-panel {
+  display: grid;
+  gap: 3px;
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid rgba(17, 24, 39, 0.1);
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.status-panel p {
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.status-panel .match-info {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.unlock-form {
+  display: grid;
+  gap: 6px;
+}
+
+.unlock-form[hidden],
+#lockButton[hidden],
+.match-list:empty {
+  display: none;
+}
+
+.unlock-form label {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.password-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76px;
+  gap: 8px;
+}
+
+input {
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  border: 1px solid rgba(17, 24, 39, 0.16);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: #111827;
+  background: #ffffff;
+}
+
+button {
+  height: 36px;
+  border: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  background: #0f766e;
+  font-weight: 740;
+}
+
+button:hover {
+  background: #0d6963;
+}
+
+.match-list {
+  display: grid;
+  max-height: 214px;
+  overflow: auto;
+  gap: 6px;
+}
+
+.match-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 48px;
+  padding: 9px 10px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.match-row div {
+  min-width: 0;
+}
+
+.match-row strong,
+.match-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.match-row strong {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.match-row span {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.match-row small {
+  flex: 0 0 auto;
+  max-width: 80px;
+  overflow: hidden;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #334155;
+  background: #e2e8f0;
+  font-size: 11px;
+  font-weight: 680;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.secondary {
+  color: #334155;
+  background: #e2e8f0;
+}
+
+.secondary:hover {
+  background: #dbe4ee;
+}
+
+.secondary.danger {
+  color: #9f1239;
+  background: #ffe4e6;
+}
+
+.secondary.danger:hover {
+  background: #fecdd3;
 }

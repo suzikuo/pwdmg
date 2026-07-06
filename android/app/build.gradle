@@ -2,6 +2,12 @@ plugins {
     id "com.android.application"
 }
 
+def releaseStoreFile = System.getenv("MYPWDMG_ANDROID_KEYSTORE")
+def releaseStorePassword = System.getenv("MYPWDMG_ANDROID_KEYSTORE_PASSWORD")
+def releaseKeyAlias = System.getenv("MYPWDMG_ANDROID_KEY_ALIAS")
+def releaseKeyPassword = System.getenv("MYPWDMG_ANDROID_KEY_PASSWORD")
+def hasReleaseSigning = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
 android {
     namespace "com.suzikuo.mypwdmg"
     compileSdk 35
@@ -10,8 +16,8 @@ android {
         applicationId "com.suzikuo.mypwdmg"
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName "2.0.0"
+        versionCode 203
+        versionName "2.0.3"
     }
 
     buildFeatures {
@@ -25,12 +31,20 @@ android {
             keyAlias "androiddebugkey"
             keyPassword "android"
         }
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
         }
     }
 

@@ -263,24 +263,22 @@ function renderPanel(matches, statusText = '', anchor = null) {
   positionRoot(anchor)
   const root = ensureRoot()
   root.innerHTML = `
-    <div class="mypwdmg-panel" role="dialog" aria-label="My Password">
+    <div class="mypwdmg-panel" role="dialog" aria-label="My Password 自动填充">
       <div class="mypwdmg-title">
-        <span>My Password</span>
-        <button class="mypwdmg-close" type="button" title="Close">x</button>
+        <div class="mypwdmg-title-text">
+          <span>My Password</span>
+          <small>${escapeHtml(statusText ? '状态' : `${matches.length} 个匹配账号`)}</small>
+        </div>
+        <button class="mypwdmg-close" type="button" title="关闭" aria-label="关闭">&times;</button>
       </div>
       ${
         statusText
-          ? `<div class="mypwdmg-status">${escapeHtml(statusText)}</div>`
-          : matches
-              .map(
-                (entry) => `
-                  <button class="mypwdmg-entry" type="button" data-entry-id="${escapeHtml(entry.id)}">
-                    <strong>${escapeHtml(entry.title || 'Untitled')}</strong>
-                    <small>${escapeHtml(entry.username || entry.email || entry.phone || entry.domains?.[0] || '')}${entry.hasTotp ? ' · TOTP' : ''}</small>
-                  </button>
-                `
-              )
-              .join('')
+          ? `<div class="mypwdmg-status"><span class="mypwdmg-status-dot"></span><span>${escapeHtml(statusText)}</span></div>`
+          : `
+            <div class="mypwdmg-list" role="list">
+              ${matches.map((entry) => renderEntryButton(entry)).join('')}
+            </div>
+          `
       }
     </div>
   `
@@ -290,6 +288,37 @@ function renderPanel(matches, statusText = '', anchor = null) {
   root.querySelectorAll('.mypwdmg-entry').forEach((button) => {
     button.addEventListener('click', () => fillEntry(button.getAttribute('data-entry-id')))
   })
+}
+
+function renderEntryButton(entry) {
+  const label = accountLabel(entry)
+  const domain = entry.domains?.[0] || ''
+  return `
+    <button class="mypwdmg-entry" type="button" data-entry-id="${escapeAttr(entry.id)}" role="listitem">
+      <span class="mypwdmg-entry-main">
+        <span class="mypwdmg-entry-head">
+          <strong>${escapeHtml(entry.title || 'Untitled')}</strong>
+          ${entry.hasTotp ? '<span class="mypwdmg-badge">TOTP</span>' : ''}
+        </span>
+        <small>${escapeHtml(label || domain || '未设置账号')}</small>
+      </span>
+      <span class="mypwdmg-entry-side">
+        <span class="mypwdmg-account-kind">${escapeHtml(sourceLabel(entry.loginAccountSource))}</span>
+        <span class="mypwdmg-chevron">›</span>
+      </span>
+    </button>
+  `
+}
+
+function accountLabel(entry) {
+  return entry.username || entry.email || entry.phone || ''
+}
+
+function sourceLabel(source) {
+  if (source === 'email') return '邮箱'
+  if (source === 'phone') return '手机'
+  if (source === 'username') return '账号'
+  return '自动'
 }
 
 function renderSavePrompt(preview) {
@@ -302,15 +331,20 @@ function renderSavePrompt(preview) {
   root.innerHTML = `
     <div class="mypwdmg-panel mypwdmg-save-panel" role="dialog" aria-label="保存到 My Password">
       <div class="mypwdmg-title">
-        <span>${escapeHtml(update ? '更新 My Password' : '保存到 My Password')}</span>
-        <button class="mypwdmg-close" type="button" title="Close">x</button>
+        <div class="mypwdmg-title-text">
+          <span>${escapeHtml(update ? '更新 My Password' : '保存到 My Password')}</span>
+          <small>${escapeHtml(preview.hostname || '当前网站')}</small>
+        </div>
+        <button class="mypwdmg-close" type="button" title="关闭" aria-label="关闭">&times;</button>
       </div>
       <div class="mypwdmg-save-body">
-        <strong>${escapeHtml(preview.title || preview.hostname || 'Untitled')}</strong>
-        <small>${escapeHtml([preview.accountLabel, preview.hostname].filter(Boolean).join(' · '))}</small>
+        <div class="mypwdmg-save-summary">
+          <strong>${escapeHtml(preview.title || preview.hostname || 'Untitled')}</strong>
+          <small>${escapeHtml(preview.accountLabel || '未识别账号')}</small>
+        </div>
         ${
           update
-            ? `<div class="mypwdmg-save-note">更新现有条目：${escapeHtml(update.title || 'Untitled')}${update.path ? ` (${escapeHtml(update.path)})` : ''}</div>`
+            ? `<div class="mypwdmg-save-note">更新现有条目：${escapeHtml(update.title || 'Untitled')}${update.path ? ` · ${escapeHtml(update.path)}` : ''}</div>`
             : `
               <label class="mypwdmg-save-label" for="mypwdmg-save-folder">保存位置</label>
               <select id="mypwdmg-save-folder" class="mypwdmg-save-select">
@@ -386,13 +420,11 @@ async function queryMatches(force = false) {
 
   if (!response?.ok) {
     lastMatches = []
-    if (response?.code === 'PLUGIN_DISABLED') {
+    if (response?.code === 'PLUGIN_DISABLED' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
       removeRoot()
       return
     }
-    if (response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
-      renderPanel([], 'Click the My Password toolbar icon to unlock.', fields.anchor)
-    }
+    removeRoot()
     return
   }
 
@@ -416,7 +448,7 @@ async function fillEntry(entryId) {
   const response = await sendMessage({ type: 'MYPWDMG_GET_FILL', entryId })
   if (!response?.ok || !response.data) {
     const fields = detectLoginFields()
-    if (response?.code === 'PLUGIN_DISABLED') {
+    if (response?.code === 'PLUGIN_DISABLED' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
       removeRoot()
       return
     }
@@ -579,6 +611,15 @@ chrome.runtime.onMessage.addListener((message) => {
 })
 
 document.addEventListener('focusin', () => scheduleQuery(false), true)
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return
+  if (!document.getElementById(ROOT_ID)) return
+  if (pendingSave?.token) {
+    dismissSavePrompt()
+    return
+  }
+  removeRoot()
+}, true)
 document.addEventListener('submit', handleSubmitCapture, true)
 document.addEventListener('click', handleClickCapture, true)
 window.addEventListener('pageshow', () => scheduleQuery(true))

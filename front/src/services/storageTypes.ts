@@ -1,4 +1,11 @@
-import type { AndroidAutofillState, ApiResult, PluginListenerState } from '../types'
+import type {
+  AndroidAutofillState,
+  AppUpdateApply,
+  AppUpdateCheck,
+  AppUpdateDownload,
+  ApiResult,
+  PluginListenerState
+} from '../types'
 
 export type StorageState = {
   hasVault: boolean
@@ -23,5 +30,8 @@ export interface VaultStorageAdapter {
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
+  checkAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateCheck>>
+  downloadAppUpdate: (manifestUrl: string) => Promise<ApiResult<AppUpdateDownload>>
+  applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
   safeExit: () => Promise<ApiResult<null>>
 }

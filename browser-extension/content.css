@@ -3,68 +3,149 @@
   right: var(--mypwdmg-right, 16px);
   top: var(--mypwdmg-top, 76px);
   z-index: 2147483647;
-  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   pointer-events: none;
 }
 
+#mypwdmg-autofill-root,
+#mypwdmg-autofill-root * {
+  box-sizing: border-box;
+}
+
 .mypwdmg-panel {
-  width: 286px;
-  max-width: calc(100vw - 32px);
+  width: 320px;
+  max-width: calc(100vw - 24px);
   overflow: hidden;
-  color: #1f2937;
+  color: #111827;
   background: #ffffff;
-  border: 1px solid rgba(31, 41, 55, 0.12);
-  border-radius: 8px;
-  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.2);
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 18px 54px rgba(17, 24, 39, 0.22);
   pointer-events: auto;
+}
+
+.mypwdmg-panel.is-dragging {
+  opacity: 0.97;
+  box-shadow: 0 22px 64px rgba(17, 24, 39, 0.28);
 }
 
 .mypwdmg-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
-  font-weight: 700;
-  background: #0f766e;
-  color: #fff;
+  gap: 12px;
+  min-height: 48px;
+  padding: 9px 10px 9px 14px;
+  color: #ffffff;
+  background: #115e59;
   cursor: move;
   user-select: none;
   touch-action: none;
 }
 
+.mypwdmg-title-text {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.mypwdmg-title-text span {
+  overflow: hidden;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 760;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mypwdmg-title-text small {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 11px;
+  font-weight: 520;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mypwdmg-close {
-  width: 22px;
-  height: 22px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.14);
-  color: #fff;
-  font-size: 14px;
-  line-height: 22px;
+  color: #ffffff;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
   cursor: pointer;
   touch-action: manipulation;
 }
 
-.mypwdmg-panel.is-dragging {
-  opacity: 0.96;
-  box-shadow: 0 22px 58px rgba(15, 23, 42, 0.28);
+.mypwdmg-close:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.mypwdmg-list {
+  max-height: min(384px, calc(100vh - 120px));
+  overflow: auto;
+  padding: 6px;
+  background: #f8fafc;
 }
 
 .mypwdmg-entry {
-  display: block;
+  display: flex;
+  align-items: center;
   width: 100%;
-  padding: 11px 12px;
-  border: 0;
-  border-top: 1px solid rgba(31, 41, 55, 0.08);
-  background: #fff;
-  color: #1f2937;
+  min-height: 58px;
+  gap: 10px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #111827;
+  font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
+.mypwdmg-entry + .mypwdmg-entry {
+  margin-top: 4px;
+}
+
 .mypwdmg-entry:hover {
-  background: #eefaf7;
+  border-color: rgba(20, 184, 166, 0.26);
+  background: #ffffff;
+}
+
+.mypwdmg-entry:focus-visible,
+.mypwdmg-save-primary:focus-visible,
+.mypwdmg-save-secondary:focus-visible,
+.mypwdmg-close:focus-visible,
+.mypwdmg-save-select:focus-visible {
+  outline: 2px solid rgba(20, 184, 166, 0.55);
+  outline-offset: 2px;
+}
+
+.mypwdmg-entry-main {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 3px;
+}
+
+.mypwdmg-entry-head {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
 }
 
 .mypwdmg-entry strong,
@@ -75,47 +156,137 @@
   white-space: nowrap;
 }
 
+.mypwdmg-entry strong {
+  min-width: 0;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 720;
+  line-height: 1.3;
+}
+
 .mypwdmg-entry small {
-  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.mypwdmg-entry-side {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
   color: #64748b;
 }
 
+.mypwdmg-account-kind,
+.mypwdmg-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  max-width: 58px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 680;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.mypwdmg-account-kind {
+  color: #334155;
+  background: #e2e8f0;
+}
+
+.mypwdmg-badge {
+  flex: 0 0 auto;
+  color: #0f766e;
+  background: #ccfbf1;
+}
+
+.mypwdmg-chevron {
+  color: #94a3b8;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .mypwdmg-status {
-  padding: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px;
   color: #475569;
+  font-size: 13px;
   line-height: 1.5;
+  background: #ffffff;
+}
+
+.mypwdmg-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: #14b8a6;
+  box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.14);
 }
 
 .mypwdmg-save-body {
   display: grid;
-  gap: 8px;
+  gap: 10px;
   padding: 12px;
+  background: #ffffff;
 }
 
-.mypwdmg-save-body strong,
-.mypwdmg-save-body small {
+.mypwdmg-save-summary {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.mypwdmg-save-summary strong,
+.mypwdmg-save-summary small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.mypwdmg-save-body small,
+.mypwdmg-save-summary strong {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.mypwdmg-save-summary small,
 .mypwdmg-save-note,
 .mypwdmg-save-label {
   color: #64748b;
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.45;
+}
+
+.mypwdmg-save-note {
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: #475569;
+  background: #f1f5f9;
+}
+
+.mypwdmg-save-label {
+  font-weight: 680;
 }
 
 .mypwdmg-save-select {
   width: 100%;
-  height: 32px;
-  border: 1px solid rgba(31, 41, 55, 0.16);
+  height: 34px;
+  border: 1px solid rgba(17, 24, 39, 0.16);
   border-radius: 8px;
-  padding: 0 8px;
-  color: #1f2937;
-  background: #fff;
+  padding: 0 9px;
+  color: #111827;
+  background: #ffffff;
   font: inherit;
 }
 
@@ -128,22 +299,31 @@
 
 .mypwdmg-save-primary,
 .mypwdmg-save-secondary {
-  height: 32px;
+  height: 34px;
   border: 0;
   border-radius: 8px;
   font: inherit;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 720;
   cursor: pointer;
 }
 
 .mypwdmg-save-primary {
-  color: #fff;
+  color: #ffffff;
   background: #0f766e;
 }
 
+.mypwdmg-save-primary:hover {
+  background: #0d6963;
+}
+
 .mypwdmg-save-secondary {
-  color: #0f766e;
-  background: #e7f5f2;
+  color: #334155;
+  background: #e2e8f0;
+}
+
+.mypwdmg-save-secondary:hover {
+  background: #dbe4ee;
 }
 
 .mypwdmg-save-primary:disabled {

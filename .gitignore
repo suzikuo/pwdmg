@@ -19,6 +19,7 @@
 # Build output and generated files
 /build/
 /dist/
+/release/
 /front/node_modules/
 /front/dist/
 /native-host/
@@ -29,6 +30,15 @@
 /android/app/build/
 /bak/
 
+# Local vault/config data
+/vault.json
+/localStorage_data.json
+/desktop_config.json
+/plugin_config.json
+/updates/
+*.vault.json
+*.backup.json
+
 # Signing/secrets
 *.jks
 *.keystore
@@ -37,4 +47,3 @@
 # OS
 .DS_Store
 Thumbs.db
-

@@ -13,6 +13,7 @@ from .domain import domain_matches, find_entry, flatten_entries, normalize_domai
 from .legacy import convert_legacy_cards, load_legacy_cards
 from .paths import LEGACY_LOCAL_STORAGE_FILE, LOCAL_BACKUP_DIR, VAULT_FILE, ensure_app_dir
 from .totp import generate_totp
+from .vault_index import VaultIndex
 
 
 SESSION_SECONDS = 10 * 60
@@ -61,6 +62,7 @@ class VaultService:
         self.session_seconds = session_seconds
         self._payload: Dict[str, Any] | None = None
         self._key: VaultKey | None = None
+        self._index: VaultIndex | None = None
         self._expires_at = 0.0
         self._vault_mtime_ns = 0
 
@@ -89,7 +91,7 @@ class VaultService:
         envelope = self._validate_backup_envelope(envelope_text)
         backup_path = self._backup_current_vault() if protect_backup else None
         self.vault_path.parent.mkdir(parents=True, exist_ok=True)
-        self.vault_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_envelope(envelope)
         self.lock()
         return {
             "vaultPath": str(self.vault_path),
@@ -117,7 +119,7 @@ class VaultService:
     def unlock(self, password: str) -> Dict[str, Any]:
         envelope = self._read_envelope()
         payload, key = decrypt_payload(password, envelope)
-        self._payload = self._normalize_payload(payload)
+        self._set_payload(self._normalize_payload(payload))
         self._key = key
         self._vault_mtime_ns = self._current_vault_mtime_ns()
         self._refresh_session()
@@ -126,6 +128,7 @@ class VaultService:
     def lock(self) -> None:
         self._payload = None
         self._key = None
+        self._index = None
         self._expires_at = 0.0
         self._vault_mtime_ns = 0
 
@@ -138,7 +141,7 @@ class VaultService:
             raise VaultLockedError("Vault is locked")
         normalized = self._normalize_payload(payload)
         normalized["updatedAt"] = int(time.time())
-        self._payload = normalized
+        self._set_payload(normalized)
         self._save_current()
         self._refresh_session()
         return copy.deepcopy(normalized)
@@ -146,9 +149,8 @@ class VaultService:
     def change_password(self, new_password: str) -> Dict[str, Any]:
         payload = copy.deepcopy(self._require_payload())
         envelope, key = encrypt_payload(new_password or "", payload)
-        self.vault_path.parent.mkdir(parents=True, exist_ok=True)
-        self.vault_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._payload = payload
+        self._write_envelope(envelope)
+        self._set_payload(payload)
         self._key = key
         self._vault_mtime_ns = self._current_vault_mtime_ns()
         self._refresh_session()
@@ -169,8 +171,7 @@ class VaultService:
         self._require_payload()
         envelope = self._validate_backup_envelope(envelope_text)
         backup_path = self._backup_current_vault()
-        self.vault_path.parent.mkdir(parents=True, exist_ok=True)
-        self.vault_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_envelope(envelope)
         self.lock()
         return {
             "state": self.state(),
@@ -179,26 +180,10 @@ class VaultService:
         }
 
     def query_matches(self, hostname: str) -> List[Dict[str, Any]]:
-        payload = self._require_payload()
         host = normalize_domain(hostname)
         matches: List[Dict[str, Any]] = []
-        for entry in flatten_entries(payload.get("entries") or []):
-            if entry.get("kind") != "login":
-                continue
-            if any(domain_matches(host, domain) for domain in entry.get("domains") or []):
-                matches.append(
-                    {
-                        "id": entry.get("id"),
-                        "title": entry.get("title"),
-                        "username": entry.get("username", ""),
-                        "email": entry.get("email", ""),
-                        "phone": entry.get("phone", ""),
-                        "loginAccountSource": entry.get("loginAccountSource", "auto"),
-                        "domains": entry.get("domains", []),
-                        "hasPassword": bool(entry.get("password")),
-                        "hasTotp": bool(entry.get("totpSecret")),
-                    }
-                )
+        for entry in self._require_index().matching_logins(host):
+            matches.append(self._match_summary(entry))
         self._refresh_session()
         return matches
 
@@ -257,7 +242,7 @@ class VaultService:
             raise ValueError("Captured password is empty")
 
         if updateEntryId:
-            entry = find_entry(payload.get("entries") or [], updateEntryId)
+            entry = self._require_index().get_login(updateEntryId)
             if not entry or entry.get("kind") != "login":
                 raise KeyError("Entry not found")
             self._apply_capture_update(entry, normalized)
@@ -274,10 +259,10 @@ class VaultService:
             action = "created"
 
         payload["updatedAt"] = int(time.time())
-        self._payload = self._normalize_payload(payload)
+        self._set_payload(self._normalize_payload(payload))
         self._save_current()
         self._refresh_session()
-        saved = find_entry(self._payload.get("entries") or [], entry.get("id")) or entry
+        saved = self._require_index().get_entry(entry.get("id")) or entry
         return {
             "action": action,
             "entry": self._entry_summary(saved),
@@ -289,17 +274,16 @@ class VaultService:
         return generate_totp(entry.get("totpSecret") or "")
 
     def _get_login(self, entry_id: str) -> Dict[str, Any]:
-        payload = self._require_payload()
-        entry = find_entry(payload.get("entries") or [], entry_id)
+        entry = self._require_index().get_login(entry_id)
         if not entry or entry.get("kind") != "login":
             raise KeyError("Entry not found")
         return entry
 
     def _write_new_envelope(self, password: str, payload: Dict[str, Any]) -> None:
-        envelope, key = encrypt_payload(password, self._normalize_payload(payload))
-        self.vault_path.parent.mkdir(parents=True, exist_ok=True)
-        self.vault_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._payload = self._normalize_payload(payload)
+        normalized = self._normalize_payload(payload)
+        envelope, key = encrypt_payload(password, normalized)
+        self._write_envelope(envelope)
+        self._set_payload(normalized)
         self._key = key
         self._vault_mtime_ns = self._current_vault_mtime_ns()
         self._refresh_session()
@@ -308,9 +292,25 @@ class VaultService:
         if self._payload is None or self._key is None:
             raise VaultLockedError("Vault is locked")
         envelope = encrypt_payload_with_key(self._key, self._payload)
-        self.vault_path.parent.mkdir(parents=True, exist_ok=True)
-        self.vault_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_envelope(envelope)
         self._vault_mtime_ns = self._current_vault_mtime_ns()
+
+    def _write_envelope(self, envelope: Dict[str, Any]) -> None:
+        text = json.dumps(envelope, ensure_ascii=False, indent=2)
+        self._write_text_atomic(self.vault_path, text)
+
+    def _write_text_atomic(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp_path.write_text(content, encoding="utf-8")
+            temp_path.replace(path)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
 
     def _read_envelope(self) -> Dict[str, Any]:
         if not self.vault_path.exists():
@@ -325,6 +325,16 @@ class VaultService:
             raise VaultLockedError("Vault is locked")
         return self._payload
 
+    def _set_payload(self, payload: Dict[str, Any]) -> None:
+        self._payload = payload
+        self._index = VaultIndex.build(payload.get("entries") or [])
+
+    def _require_index(self) -> VaultIndex:
+        payload = self._require_payload()
+        if self._index is None:
+            self._index = VaultIndex.build(payload.get("entries") or [])
+        return self._index
+
     def _reload_if_vault_changed(self) -> None:
         if not self.vault_path.exists():
             self.lock()
@@ -335,7 +345,7 @@ class VaultService:
         if not self._key:
             return
         payload = decrypt_payload_with_key(self._key, self._read_envelope())
-        self._payload = self._normalize_payload(payload)
+        self._set_payload(self._normalize_payload(payload))
         self._vault_mtime_ns = current_mtime_ns
 
     def _current_vault_mtime_ns(self) -> int:
@@ -477,11 +487,29 @@ class VaultService:
     def _find_folder(self, entries: Iterable[Dict[str, Any]], folder_id: str) -> Dict[str, Any] | None:
         if not folder_id:
             return None
-        entry = find_entry(entries, folder_id)
+        if self._index is not None:
+            entry = self._index.get_entry(folder_id)
+        else:
+            entry = find_entry(entries, folder_id)
         return entry if entry and entry.get("kind") == "folder" else None
 
     def _find_capture_candidate(self, entries: Iterable[Dict[str, Any]], capture: Dict[str, Any]) -> Dict[str, Any] | None:
         best: Dict[str, Any] | None = None
+
+        if self._index is not None and capture.get("hostname"):
+            for entry in self._index.matching_logins(capture["hostname"]):
+                if not self._account_matches_capture(entry, capture):
+                    continue
+                current = {
+                    "entry": entry,
+                    "path": self._index.path_for(entry.get("id", "")),
+                    "passwordSame": entry.get("password", "") == capture["password"],
+                }
+                if current["passwordSame"]:
+                    return current
+                if best is None:
+                    best = current
+            return best
 
         def visit(items: Iterable[Dict[str, Any]], path: List[str]) -> None:
             nonlocal best
@@ -542,6 +570,19 @@ class VaultService:
             "phone": entry.get("phone", ""),
             "domains": entry.get("domains", []),
             "loginAccountSource": entry.get("loginAccountSource", "auto"),
+        }
+
+    def _match_summary(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": entry.get("id"),
+            "title": entry.get("title"),
+            "username": entry.get("username", ""),
+            "email": entry.get("email", ""),
+            "phone": entry.get("phone", ""),
+            "loginAccountSource": entry.get("loginAccountSource", "auto"),
+            "domains": entry.get("domains", []),
+            "hasPassword": bool(entry.get("password")),
+            "hasTotp": bool(entry.get("totpSecret")),
         }
 
     def _apply_capture_update(self, entry: Dict[str, Any], capture: Dict[str, Any]) -> None:

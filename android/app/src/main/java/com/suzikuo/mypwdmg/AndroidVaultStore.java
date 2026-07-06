@@ -14,10 +14,16 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import javax.crypto.Cipher;
@@ -45,6 +51,7 @@ final class AndroidVaultStore {
     private static byte[] salt;
     private static int iterations;
     private static long expiresAt;
+    private static VaultSessionIndex vaultIndex;
 
     static class LockedException extends Exception {
         LockedException(String message) {
@@ -95,7 +102,7 @@ final class AndroidVaultStore {
             lock();
         } else if (key != null) {
             try {
-                payload = normalizePayload(decryptWithCurrentKey(envelope));
+                setPayload(normalizePayload(decryptWithCurrentKey(envelope)));
                 refreshSession();
             } catch (Exception ignored) {
                 lock();
@@ -124,7 +131,7 @@ final class AndroidVaultStore {
     synchronized JSONObject unlock(String password) throws Exception {
         JSONObject envelope = readEnvelope();
         JSONObject nextPayload = decryptPayload(password, envelope);
-        payload = normalizePayload(nextPayload);
+        setPayload(normalizePayload(nextPayload));
         refreshSession();
         return copy(payload);
     }
@@ -146,6 +153,7 @@ final class AndroidVaultStore {
         salt = null;
         iterations = 0;
         expiresAt = 0;
+        vaultIndex = null;
     }
 
     synchronized JSONObject getVault() throws Exception {
@@ -156,7 +164,7 @@ final class AndroidVaultStore {
         requirePayload();
         JSONObject normalized = normalizePayload(nextPayload);
         normalized.put("updatedAt", nowSeconds());
-        payload = normalized;
+        setPayload(normalized);
         writeEnvelope(encryptWithCurrentKey(payload));
         refreshSession();
         return copy(payload);
@@ -201,7 +209,9 @@ final class AndroidVaultStore {
     }
 
     synchronized String generateTotp(String entryId) throws Exception {
-        JSONObject entry = findEntry(requirePayload().optJSONArray("entries"), entryId);
+        JSONObject sourcePayload = requirePayload();
+        JSONObject entry = vaultIndex == null ? null : vaultIndex.getLogin(entryId);
+        if (entry == null) entry = findEntry(sourcePayload.optJSONArray("entries"), entryId);
         if (entry == null || !"login".equals(entry.optString("kind"))) {
             throw new IllegalArgumentException("Entry not found");
         }
@@ -214,32 +224,17 @@ final class AndroidVaultStore {
     }
 
     JSONArray queryMatchesFromPayload(JSONObject sourcePayload, String hostname, boolean includeAll) throws JSONException {
-        String host = normalizeDomain(hostname);
         JSONArray matches = new JSONArray();
-        List<JSONObject> entries = new ArrayList<>();
-        flattenEntries(sourcePayload.optJSONArray("entries"), entries);
 
         if (includeAll) {
-            for (JSONObject entry : entries) {
-                if (!"login".equals(entry.optString("kind"))) continue;
+            for (JSONObject entry : indexedLoginEntries(sourcePayload)) {
                 matches.put(matchSummary(entry, entry.optJSONArray("domains")));
             }
             return matches;
         }
 
-        for (JSONObject entry : entries) {
-            if (!"login".equals(entry.optString("kind"))) continue;
-            JSONArray domains = entry.optJSONArray("domains");
-            boolean matched = false;
-            for (int index = 0; domains != null && index < domains.length(); index += 1) {
-                if (domainMatches(host, domains.optString(index))) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) continue;
-
-            matches.put(matchSummary(entry, domains));
+        for (JSONObject entry : matchingLoginEntries(sourcePayload, hostname)) {
+            matches.put(matchSummary(entry, entry.optJSONArray("domains")));
         }
         return matches;
     }
@@ -258,7 +253,8 @@ final class AndroidVaultStore {
     }
 
     JSONObject getFillPayloadFromPayload(JSONObject sourcePayload, String entryId) throws Exception {
-        JSONObject entry = findEntry(sourcePayload.optJSONArray("entries"), entryId);
+        JSONObject entry = vaultIndex == null ? null : vaultIndex.getLogin(entryId);
+        if (entry == null) entry = findEntry(sourcePayload.optJSONArray("entries"), entryId);
         if (entry == null || !"login".equals(entry.optString("kind"))) {
             throw new IllegalArgumentException("Entry not found");
         }
@@ -298,9 +294,14 @@ final class AndroidVaultStore {
         salt = randomBytes(16);
         iterations = DEFAULT_ITERATIONS;
         key = deriveKey(password, salt, iterations);
-        payload = normalizePayload(nextPayload);
+        setPayload(normalizePayload(nextPayload));
         writeEnvelope(encryptWithCurrentKey(payload));
         refreshSession();
+    }
+
+    private static void setPayload(JSONObject nextPayload) throws JSONException {
+        payload = nextPayload;
+        vaultIndex = VaultSessionIndex.build(payload.optJSONArray("entries"));
     }
 
     private JSONObject decryptPayload(String password, JSONObject envelope) throws Exception {
@@ -502,11 +503,25 @@ final class AndroidVaultStore {
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new IllegalStateException("Could not create directory");
         }
-        FileOutputStream output = new FileOutputStream(file, false);
+        File temp = new File(parent == null ? new File(".") : parent, "." + file.getName() + "." + UUID.randomUUID() + ".tmp");
+        FileOutputStream output = new FileOutputStream(temp, false);
         try {
             output.write(content.getBytes(StandardCharsets.UTF_8));
+            output.getFD().sync();
         } finally {
             output.close();
+        }
+        try {
+            Files.move(
+                temp.toPath(),
+                file.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            );
+        } catch (Exception atomicMoveError) {
+            Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            if (temp.exists()) temp.delete();
         }
     }
 
@@ -647,6 +662,35 @@ final class AndroidVaultStore {
         }
     }
 
+    private static List<JSONObject> indexedLoginEntries(JSONObject sourcePayload) {
+        if (vaultIndex != null) return vaultIndex.loginEntries();
+
+        List<JSONObject> entries = new ArrayList<>();
+        flattenEntries(sourcePayload.optJSONArray("entries"), entries);
+        List<JSONObject> logins = new ArrayList<>();
+        for (JSONObject entry : entries) {
+            if ("login".equals(entry.optString("kind"))) logins.add(entry);
+        }
+        return logins;
+    }
+
+    private static List<JSONObject> matchingLoginEntries(JSONObject sourcePayload, String hostname) {
+        if (vaultIndex != null) return vaultIndex.matchingLogins(hostname);
+
+        String host = normalizeDomain(hostname);
+        List<JSONObject> matches = new ArrayList<>();
+        for (JSONObject entry : indexedLoginEntries(sourcePayload)) {
+            JSONArray domains = entry.optJSONArray("domains");
+            for (int index = 0; domains != null && index < domains.length(); index += 1) {
+                if (domainMatches(host, domains.optString(index))) {
+                    matches.add(entry);
+                    break;
+                }
+            }
+        }
+        return matches;
+    }
+
     private static JSONObject findEntry(JSONArray entries, String entryId) {
         for (int index = 0; entries != null && index < entries.length(); index += 1) {
             JSONObject entry = entries.optJSONObject(index);
@@ -692,5 +736,113 @@ final class AndroidVaultStore {
             }
         }
         return output.toByteArray();
+    }
+
+    private static final class VaultSessionIndex {
+        private final Map<String, JSONObject> entriesById = new HashMap<>();
+        private final List<JSONObject> loginEntries = new ArrayList<>();
+        private final Map<String, List<JSONObject>> exactDomainEntries = new HashMap<>();
+        private final List<JSONObject> wildcardEntries = new ArrayList<>();
+
+        static VaultSessionIndex build(JSONArray entries) {
+            VaultSessionIndex index = new VaultSessionIndex();
+            index.visit(entries);
+            return index;
+        }
+
+        JSONObject getLogin(String entryId) {
+            JSONObject entry = entriesById.get(entryId == null ? "" : entryId);
+            return entry != null && "login".equals(entry.optString("kind")) ? entry : null;
+        }
+
+        List<JSONObject> loginEntries() {
+            return new ArrayList<>(loginEntries);
+        }
+
+        List<JSONObject> matchingLogins(String hostname) {
+            String host = normalizeDomain(hostname);
+            if (host.isEmpty()) return new ArrayList<>();
+
+            Set<String> candidateIds = new HashSet<>();
+            for (String suffix : domainSuffixes(host)) {
+                List<JSONObject> entries = exactDomainEntries.get(suffix);
+                if (entries == null) continue;
+                for (JSONObject entry : entries) {
+                    String id = entry.optString("id");
+                    if (!id.isEmpty()) candidateIds.add(id);
+                }
+            }
+
+            for (JSONObject entry : wildcardEntries) {
+                JSONArray domains = entry.optJSONArray("domains");
+                for (int index = 0; domains != null && index < domains.length(); index += 1) {
+                    String domain = normalizeDomain(domains.optString(index));
+                    if (domain.indexOf('*') >= 0 && domainMatches(host, domain)) {
+                        String id = entry.optString("id");
+                        if (!id.isEmpty()) candidateIds.add(id);
+                        break;
+                    }
+                }
+            }
+
+            List<JSONObject> matches = new ArrayList<>();
+            if (candidateIds.isEmpty()) return matches;
+            for (JSONObject entry : loginEntries) {
+                if (candidateIds.contains(entry.optString("id"))) matches.add(entry);
+            }
+            return matches;
+        }
+
+        private void visit(JSONArray entries) {
+            for (int index = 0; entries != null && index < entries.length(); index += 1) {
+                JSONObject entry = entries.optJSONObject(index);
+                if (entry == null) continue;
+
+                String id = entry.optString("id");
+                if (!id.isEmpty()) entriesById.put(id, entry);
+
+                if ("folder".equals(entry.optString("kind"))) {
+                    visit(entry.optJSONArray("children"));
+                    continue;
+                }
+                if (!"login".equals(entry.optString("kind"))) continue;
+
+                loginEntries.add(entry);
+                boolean hasWildcard = false;
+                JSONArray domains = entry.optJSONArray("domains");
+                for (int domainIndex = 0; domains != null && domainIndex < domains.length(); domainIndex += 1) {
+                    String domain = normalizeDomain(domains.optString(domainIndex));
+                    if (domain.isEmpty()) continue;
+                    if (domain.indexOf('*') >= 0) {
+                        hasWildcard = true;
+                    } else {
+                        List<JSONObject> list = exactDomainEntries.get(domain);
+                        if (list == null) {
+                            list = new ArrayList<>();
+                            exactDomainEntries.put(domain, list);
+                        }
+                        list.add(entry);
+                    }
+                }
+                if (hasWildcard) wildcardEntries.add(entry);
+            }
+        }
+
+        private static List<String> domainSuffixes(String hostname) {
+            String host = normalizeDomain(hostname);
+            List<String> suffixes = new ArrayList<>();
+            if (host.isEmpty()) return suffixes;
+            String[] parts = host.split("\\.");
+            for (int index = 0; index < parts.length; index += 1) {
+                StringBuilder builder = new StringBuilder();
+                for (int part = index; part < parts.length; part += 1) {
+                    if (parts[part].isEmpty()) continue;
+                    if (builder.length() > 0) builder.append('.');
+                    builder.append(parts[part]);
+                }
+                if (builder.length() > 0) suffixes.add(builder.toString());
+            }
+            return suffixes;
+        }
     }
 }

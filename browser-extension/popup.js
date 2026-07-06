@@ -1,67 +1,178 @@
 const statusEl = document.getElementById('status')
+const matchInfoEl = document.getElementById('matchInfo')
+const siteHostEl = document.getElementById('siteHost')
+const stateBadgeEl = document.getElementById('stateBadge')
 const form = document.getElementById('unlockForm')
 const passwordInput = document.getElementById('password')
 const lockButton = document.getElementById('lockButton')
+const refreshButton = document.getElementById('refreshButton')
+const matchListEl = document.getElementById('matchList')
+
+let activeTab = null
+let activeHost = ''
 
 function send(message) {
   return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
 }
 
-async function refreshActiveTab() {
+async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-  if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'MYPWDMG_REFRESH' }).catch(() => {})
+  activeTab = tab || null
+  activeHost = tabHost(tab)
+  siteHostEl.textContent = activeHost || '当前页面不可填充'
+  return activeTab
 }
 
-function setUnlocked() {
-  statusEl.textContent = '插件已解锁，可以回到网页登录框选择账号。'
-  form.style.display = 'none'
-  lockButton.style.display = 'block'
+function tabHost(tab) {
+  try {
+    const url = new URL(tab?.url || '')
+    if (!['http:', 'https:'].includes(url.protocol)) return ''
+    return url.hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
 }
 
-function setLocked(message = '插件未解锁。') {
+async function refreshActiveTab() {
+  if (activeTab?.id) chrome.tabs.sendMessage(activeTab.id, { type: 'MYPWDMG_REFRESH' }).catch(() => {})
+}
+
+function setBadge(text, state) {
+  stateBadgeEl.textContent = text
+  stateBadgeEl.dataset.state = state
+}
+
+function showLocked(message = '请输入主密码解锁插件。') {
+  setBadge('已锁定', 'locked')
   statusEl.textContent = message
-  form.style.display = 'grid'
-  lockButton.style.display = 'none'
+  matchInfoEl.textContent = ''
+  matchListEl.innerHTML = ''
+  form.hidden = false
+  lockButton.hidden = true
   passwordInput.focus()
 }
 
+function showUnlocked() {
+  setBadge('已解锁', 'unlocked')
+  form.hidden = true
+  lockButton.hidden = false
+}
+
+function showUnavailable(message, state = 'error') {
+  setBadge(state === 'empty' ? '未创建' : '不可用', state)
+  statusEl.textContent = message
+  matchInfoEl.textContent = ''
+  matchListEl.innerHTML = ''
+  form.hidden = true
+  lockButton.hidden = true
+}
+
 async function unlock(password, silent = false) {
-  if (!silent) statusEl.textContent = '正在解锁...'
+  if (!silent) {
+    setBadge('解锁中', 'checking')
+    statusEl.textContent = '正在解锁...'
+  }
+
   const response = await send({ type: 'MYPWDMG_UNLOCK', password })
   passwordInput.value = ''
   if (!response?.ok) {
-    if (!silent) setLocked(response?.message || '解锁失败。')
+    if (!silent) showLocked(response?.message || '解锁失败。')
     return false
   }
-  setUnlocked()
-  refreshActiveTab()
+
+  showUnlocked()
+  await refreshActiveTab()
+  await loadMatches()
   return true
 }
 
-async function loadState() {
-  form.style.display = 'none'
-  lockButton.style.display = 'none'
+async function loadMatches() {
+  if (!activeHost) {
+    statusEl.textContent = '当前页面不是可填充的网站。'
+    matchInfoEl.textContent = ''
+    matchListEl.innerHTML = ''
+    return
+  }
 
+  statusEl.textContent = '已连接本地保险库。'
+  matchInfoEl.textContent = '正在查询当前网站...'
+  const response = await send({ type: 'MYPWDMG_QUERY_MATCHES', hostname: activeHost })
+  if (!response?.ok) {
+    if (response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
+      showLocked('请输入主密码解锁插件。')
+      return
+    }
+    matchInfoEl.textContent = response?.message || '无法读取当前网站账号。'
+    matchListEl.innerHTML = ''
+    return
+  }
+
+  const matches = Array.isArray(response.data) ? response.data : []
+  matchInfoEl.textContent = matches.length ? `当前网站有 ${matches.length} 个匹配账号。` : '当前网站暂无匹配账号。'
+  matchListEl.innerHTML = matches.map(renderMatch).join('')
+}
+
+function renderMatch(entry) {
+  const label = entry.username || entry.email || entry.phone || entry.domains?.[0] || '未设置账号'
+  const badges = [
+    sourceLabel(entry.loginAccountSource),
+    entry.hasTotp ? 'TOTP' : ''
+  ].filter(Boolean)
+  return `
+    <div class="match-row">
+      <div>
+        <strong>${escapeHtml(entry.title || 'Untitled')}</strong>
+        <span>${escapeHtml(label)}</span>
+      </div>
+      <small>${escapeHtml(badges.join(' · '))}</small>
+    </div>
+  `
+}
+
+function sourceLabel(source) {
+  if (source === 'email') return '邮箱'
+  if (source === 'phone') return '手机'
+  if (source === 'username') return '账号'
+  return '自动'
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+async function loadState() {
+  form.hidden = true
+  lockButton.hidden = true
+  matchListEl.innerHTML = ''
+  setBadge('检测中', 'checking')
+
+  await getActiveTab()
   const response = await send({ type: 'MYPWDMG_STATE' })
   if (!response?.ok) {
-    statusEl.textContent = response?.message || '无法连接本地 Native Host。'
+    showUnavailable(response?.message || '无法连接本地 Native Host。')
     return
   }
 
   const state = response.data
   if (!state.hasVault) {
-    statusEl.textContent = '还没有保险库，请先打开桌面端创建。'
+    showUnavailable('还没有保险库，请先打开桌面端创建。', 'empty')
     return
   }
 
   if (!state.locked) {
-    setUnlocked()
+    showUnlocked()
+    await loadMatches()
     return
   }
 
+  setBadge('解锁中', 'checking')
   statusEl.textContent = '正在尝试空密码解锁...'
   const unlocked = await unlock('', true)
-  if (!unlocked) setLocked('请输入主密码解锁插件。')
+  if (!unlocked) showLocked('请输入主密码解锁插件。')
 }
 
 form.addEventListener('submit', async (event) => {
@@ -70,10 +181,20 @@ form.addEventListener('submit', async (event) => {
 })
 
 lockButton.addEventListener('click', async () => {
+  setBadge('锁定中', 'checking')
   statusEl.textContent = '正在锁定...'
-  await send({ type: 'MYPWDMG_LOCK' })
-  setLocked('插件已锁定。')
-  refreshActiveTab()
+  const response = await send({ type: 'MYPWDMG_LOCK' })
+  if (!response?.ok) {
+    statusEl.textContent = response?.message || '锁定失败。'
+    return
+  }
+  showLocked('插件已锁定。')
+  await refreshActiveTab()
+})
+
+refreshButton.addEventListener('click', async () => {
+  await refreshActiveTab()
+  await loadState()
 })
 
 loadState()

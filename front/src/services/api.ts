@@ -1,7 +1,7 @@
 import type { ApiResult, AppState, PluginListenerState, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types'
 import { androidStorageAdapter } from './androidStorageAdapter'
 import { fail, ok, type CreateVaultResult, type PasswordManagerApiAdapter } from './apiTypes'
-import { desktopStorageAdapter } from './desktopStorageAdapter'
+import { callDesktopApi, desktopStorageAdapter } from './desktopStorageAdapter'
 import { migrateLegacyStorageText } from './legacyWeb'
 import type { VaultStorageAdapter } from './storageTypes'
 import { cloneVaultPayload, defaultVaultPayload, normalizeVaultPayload, nowSeconds } from './vaultDefaults'
@@ -15,21 +15,35 @@ let vaultKey: VaultKey | null = null
 let expiresAt = 0
 
 export const api: PasswordManagerApiAdapter = {
-  getState: () => useAndroidNativeApi() ? callAndroidApi('getState') : guard(getState),
-  createVault: (password, importLegacy) => useAndroidNativeApi() ? callAndroidApi('createVault', password, importLegacy) : guard(() => createVault(password, importLegacy)),
-  unlock: (password) => useAndroidNativeApi() ? callAndroidApi('unlock', password) : guard(() => unlock(password)),
-  lock: () => useAndroidNativeApi() ? callAndroidApi('lock') : guard(lock),
-  getVault: () => useAndroidNativeApi() ? callAndroidApi('getVault') : guard(getVault),
-  saveVault: (nextPayload) => useAndroidNativeApi() ? callAndroidApi('saveVault', JSON.stringify(nextPayload)) : guard(() => saveVault(nextPayload)),
-  changePassword: (newPassword) => useAndroidNativeApi() ? callAndroidApi('changePassword', newPassword) : guard(() => changePassword(newPassword)),
-  exportVaultBackup: () => useAndroidNativeApi() ? callAndroidApi('exportVaultBackup') : guard(exportVaultBackup),
-  importVaultBackup: (envelopeText) => useAndroidNativeApi() ? callAndroidApi('importVaultBackup', envelopeText) : guard(() => importVaultBackup(envelopeText)),
+  getState: () => nativeVaultCall('getState', () => guard(getState)),
+  createVault: (password, importLegacy) => nativeVaultCall('createVault', () => guard(() => createVault(password, importLegacy)), password, importLegacy),
+  unlock: (password) => nativeVaultCall('unlock', () => guard(() => unlock(password)), password),
+  lock: () => nativeVaultCall('lock', () => guard(lock)),
+  getVault: () => nativeVaultCall('getVault', () => guard(getVault)),
+  saveVault: (nextPayload) => nativeVaultCall('saveVault', () => guard(() => saveVault(nextPayload)), nextPayload),
+  changePassword: (newPassword) => nativeVaultCall('changePassword', () => guard(() => changePassword(newPassword)), newPassword),
+  exportVaultBackup: () => nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
+  importVaultBackup: (envelopeText) => nativeVaultCall('importVaultBackup', () => guard(() => importVaultBackup(envelopeText)), envelopeText),
   getPluginListenerState: () => selectedStorage().getPluginListenerState(),
   enablePluginListener: (extensionId, browsers) => selectedStorage().enablePluginListener(extensionId, browsers),
   disablePluginListener: () => selectedStorage().disablePluginListener(),
   getAndroidAutofillState: () => selectedStorage().getAndroidAutofillState(),
   openAndroidAutofillSettings: () => selectedStorage().openAndroidAutofillSettings(),
+  checkAppUpdate: (manifestUrl) => selectedStorage().checkAppUpdate(manifestUrl),
+  downloadAppUpdate: (manifestUrl) => selectedStorage().downloadAppUpdate(manifestUrl),
+  applyAppUpdate: (packagePath) => selectedStorage().applyAppUpdate(packagePath),
   safeExit: () => selectedStorage().safeExit()
+}
+
+function nativeVaultCall<T>(method: string, webFallback: () => Promise<ApiResult<T>>, ...args: unknown[]): Promise<ApiResult<T>> {
+  if (useAndroidNativeApi()) return callAndroidApi(method, ...androidArgs(method, args))
+  if (useDesktopStorage()) return callDesktopApi(method, ...args)
+  return webFallback()
+}
+
+function androidArgs(method: string, args: unknown[]) {
+  if (method === 'saveVault') return [JSON.stringify(args[0])]
+  return args
 }
 
 async function getState(): Promise<AppState> {

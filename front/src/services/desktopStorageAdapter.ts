@@ -1,4 +1,4 @@
-import type { ApiResult, PluginListenerState } from '../types'
+import type { ApiResult, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, PluginListenerState } from '../types'
 import { fail, ok } from './apiTypes'
 import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
 
@@ -21,7 +21,14 @@ export const desktopStorageAdapter: VaultStorageAdapter = {
     settingsAvailable: false
   }),
   openAndroidAutofillSettings: async () => fail('ANDROID_ONLY', '自动填充服务只能在 Android 端配置。'),
+  checkAppUpdate: (manifestUrl) => call<AppUpdateCheck>('checkDesktopUpdate', manifestUrl),
+  downloadAppUpdate: (manifestUrl) => call<AppUpdateDownload>('downloadDesktopUpdate', manifestUrl),
+  applyAppUpdate: (packagePath) => call<AppUpdateApply>('applyDesktopUpdate', packagePath),
   safeExit: () => call<null>('safeExit')
+}
+
+export function callDesktopApi<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
+  return call<T>(method, ...args)
 }
 
 async function call<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
