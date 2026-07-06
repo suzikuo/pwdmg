@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from pathlib import Path
 from typing import Any
 
 import webview
 
-from pwdmg_core.paths import DEFAULT_DESKTOP_CONFIG, DESKTOP_CONFIG_FILE, LEGACY_LOCAL_STORAGE_FILE, VAULT_FILE, ensure_app_dir
-
+from pwdmg_core.paths import (
+    DEFAULT_DESKTOP_CONFIG,
+    DESKTOP_CONFIG_FILE,
+    LEGACY_LOCAL_STORAGE_FILE,
+    VAULT_FILE,
+    ensure_app_dir,
+)
 
 _desktop_window: webview.Window | None = None
 _desktop_state: "DesktopWindowState | None" = None
@@ -76,7 +82,9 @@ class DesktopPasswordManagerApi:
     def readVaultEnvelope(self) -> dict[str, Any]:
         return self.api.readVaultEnvelope()
 
-    def writeVaultEnvelope(self, envelopeText: str, protectBackup: bool = False) -> dict[str, Any]:
+    def writeVaultEnvelope(
+        self, envelopeText: str, protectBackup: bool = False
+    ) -> dict[str, Any]:
         return self.api.writeVaultEnvelope(envelopeText, protectBackup)
 
     def readLegacyLocalStorage(self) -> dict[str, Any]:
@@ -137,7 +145,9 @@ class DesktopPasswordManagerApi:
         except Exception as exc:
             return {"ok": False, "code": "PLUGIN_LISTENER_ERROR", "message": str(exc)}
 
-    def enablePluginListener(self, extensionId: str, browsers: list[str] | None = None) -> dict[str, Any]:
+    def enablePluginListener(
+        self, extensionId: str, browsers: list[str] | None = None
+    ) -> dict[str, Any]:
         try:
             from pwdmg_core.native_install import enable_plugin_listener
 
@@ -154,10 +164,14 @@ class DesktopPasswordManagerApi:
             return {"ok": False, "code": "PLUGIN_LISTENER_ERROR", "message": str(exc)}
 
     def checkDesktopUpdate(self, manifestUrl: str) -> dict[str, Any]:
-        return self._call_result(lambda: self.updater.check(manifestUrl), "UPDATE_FAILED")
+        return self._call_result(
+            lambda: self.updater.check(manifestUrl), "UPDATE_FAILED"
+        )
 
     def downloadDesktopUpdate(self, manifestUrl: str) -> dict[str, Any]:
-        return self._call_result(lambda: self.updater.download(manifestUrl), "UPDATE_FAILED")
+        return self._call_result(
+            lambda: self.updater.download(manifestUrl), "UPDATE_FAILED"
+        )
 
     @staticmethod
     def _call_result(fn, code: str = "ERROR"):
@@ -209,8 +223,12 @@ def normalize_desktop_config(config: dict[str, Any]) -> dict[str, Any]:
 
     width = to_int(normalized.get("width"), DEFAULT_DESKTOP_CONFIG["width"])
     height = to_int(normalized.get("height"), DEFAULT_DESKTOP_CONFIG["height"])
-    x_position = to_int(normalized.get("x_position"), DEFAULT_DESKTOP_CONFIG["x_position"])
-    y_position = to_int(normalized.get("y_position"), DEFAULT_DESKTOP_CONFIG["y_position"])
+    x_position = to_int(
+        normalized.get("x_position"), DEFAULT_DESKTOP_CONFIG["x_position"]
+    )
+    y_position = to_int(
+        normalized.get("y_position"), DEFAULT_DESKTOP_CONFIG["y_position"]
+    )
 
     return {
         "appname": DEFAULT_DESKTOP_CONFIG["appname"],
@@ -234,8 +252,12 @@ def get_pywebview_startup_config(config: dict[str, Any]) -> dict[str, int]:
     return {
         "width": to_int(config.get("width"), DEFAULT_DESKTOP_CONFIG["width"]),
         "height": to_int(config.get("height"), DEFAULT_DESKTOP_CONFIG["height"]),
-        "x_position": to_int(config.get("x_position"), DEFAULT_DESKTOP_CONFIG["x_position"]),
-        "y_position": to_int(config.get("y_position"), DEFAULT_DESKTOP_CONFIG["y_position"]),
+        "x_position": to_int(
+            config.get("x_position"), DEFAULT_DESKTOP_CONFIG["x_position"]
+        ),
+        "y_position": to_int(
+            config.get("y_position"), DEFAULT_DESKTOP_CONFIG["y_position"]
+        ),
     }
 
 
@@ -254,7 +276,9 @@ def load_desktop_config() -> dict:
 
 def write_desktop_config(config: dict[str, Any]) -> None:
     ensure_app_dir()
-    DESKTOP_CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    DESKTOP_CONFIG_FILE.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 class DesktopWindowState:
@@ -313,13 +337,17 @@ class DesktopWindowState:
         write_desktop_config(self._config)
 
 
-def record_initial_desktop_config(window: webview.Window, _state: DesktopWindowState) -> None:
+def record_initial_desktop_config(
+    window: webview.Window, _state: DesktopWindowState
+) -> None:
     if not window.events.shown.wait(10):
         return
     window.events.closed.wait()
 
 
-def bind_desktop_config_events(window: webview.Window, state: DesktopWindowState) -> None:
+def bind_desktop_config_events(
+    window: webview.Window, state: DesktopWindowState
+) -> None:
     def on_resize(_width: int, _height: int) -> None:
         state.schedule_save_window(window)
 
@@ -334,16 +362,54 @@ def bind_desktop_config_events(window: webview.Window, state: DesktopWindowState
     window.events.closing += on_closing
 
 
+def missing_frontend_page(checked_paths: list[Path]) -> str:
+    ensure_app_dir()
+    page = ensure_app_dir() / "missing_frontend.html"
+    checked = "\n".join(f"<li>{path}</li>" for path in checked_paths)
+    page.write_text(
+        f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {{ margin: 0; background: #070b10; color: #d9e4f2; font: 14px/1.6 Segoe UI, sans-serif; }}
+    main {{ max-width: 760px; margin: 12vh auto; padding: 24px; }}
+    h1 {{ margin: 0 0 12px; font-size: 22px; }}
+    code, li {{ color: #9ed7ff; overflow-wrap: anywhere; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>前端资源未找到</h1>
+    <p>开发模式请先在 <code>front</code> 目录运行 <code>npm run build:desktop</code> 或 <code>npm run build</code> 生成桌面端静态资源。</p>
+    <p>打包模式请重新运行桌面端打包脚本，或确认 <code>_internal/front/dist/desktop/index.html</code> 与 exe 一起发布。</p>
+    <p>已检查路径：</p>
+    <ul>{checked}</ul>
+  </main>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    return str(page)
+
+
 def resolve_frontend_entry() -> str:
-    root = Path(__file__).resolve().parent
-    desktop_dist_entry = root / "front" / "dist" / "desktop" / "index.html"
-    legacy_dist_entry = root / "front" / "dist" / "index.html"
-    source_entry = root / "front" / "index.html"
-    if desktop_dist_entry.exists():
-        return str(desktop_dist_entry)
-    if legacy_dist_entry.exists():
-        return str(legacy_dist_entry)
-    return str(source_entry)
+    if getattr(sys, "frozen", False):
+        root = Path(sys.executable).resolve().parent / "_internal" / "front" / "dist"
+        candidates = [
+            root / "desktop" / "index.html",
+            root / "index.html",
+        ]
+    else:
+        root = Path(__file__).resolve().parent / "front" / "dist" / "desktop"
+        candidates = [root / "index.html"]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    checked_paths = candidates
+    return missing_frontend_page(checked_paths)
 
 
 def main() -> None:

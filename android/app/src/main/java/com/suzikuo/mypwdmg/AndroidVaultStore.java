@@ -643,6 +643,42 @@ final class AndroidVaultStore {
         return domain.equals(host) || domain.endsWith("." + host);
     }
 
+    private static boolean sameSiteAutofillDomainMatches(String hostname, String savedDomain) {
+        String host = normalizeDomain(hostname);
+        String domain = normalizeDomain(savedDomain);
+        String hostSite = siteDomain(host);
+        String domainSite = siteDomain(domain);
+        return !hostSite.isEmpty() && hostSite.equals(domainSite);
+    }
+
+    private static String siteDomain(String value) {
+        String host = normalizeDomain(value);
+        if (host.isEmpty()) return "";
+        String alias = knownServiceDomain(host);
+        if (!alias.isEmpty()) host = alias;
+        String[] parts = host.split("\\.");
+        if (parts.length < 2) return "";
+        if (parts.length >= 3 && isTwoPartPublicSuffix(parts[parts.length - 2] + "." + parts[parts.length - 1])) {
+            return parts[parts.length - 3] + "." + parts[parts.length - 2] + "." + parts[parts.length - 1];
+        }
+        return parts[parts.length - 2] + "." + parts[parts.length - 1];
+    }
+
+    private static boolean isTwoPartPublicSuffix(String suffix) {
+        return "com.cn".equals(suffix)
+            || "net.cn".equals(suffix)
+            || "org.cn".equals(suffix)
+            || "co.uk".equals(suffix)
+            || "com.au".equals(suffix)
+            || "co.jp".equals(suffix);
+    }
+
+    private static String knownServiceDomain(String value) {
+        String host = normalizeDomain(value);
+        if (host.contains("xiaoheihe")) return "xiaoheihe.cn";
+        return "";
+    }
+
     private static boolean wildcardDomainMatches(String host, String domain) {
         StringBuilder pattern = new StringBuilder("^");
         for (int index = 0; index < domain.length(); index += 1) {
@@ -691,7 +727,9 @@ final class AndroidVaultStore {
             JSONArray domains = entry.optJSONArray("domains");
             for (int index = 0; domains != null && index < domains.length(); index += 1) {
                 String domain = domains.optString(index);
-                if (domainMatches(host, domain) || relaxedAutofillDomainMatches(host, domain)) {
+                if (domainMatches(host, domain)
+                    || relaxedAutofillDomainMatches(host, domain)
+                    || sameSiteAutofillDomainMatches(host, domain)) {
                     matches.add(entry);
                     break;
                 }
@@ -798,6 +836,10 @@ final class AndroidVaultStore {
                 addRelaxedParentDomainMatches(host, candidateIds);
             }
 
+            if (candidateIds.isEmpty()) {
+                addSameSiteAutofillMatches(host, candidateIds);
+            }
+
             List<JSONObject> matches = new ArrayList<>();
             if (candidateIds.isEmpty()) return matches;
             for (JSONObject entry : loginEntries) {
@@ -846,6 +888,19 @@ final class AndroidVaultStore {
                 JSONArray domains = entry.optJSONArray("domains");
                 for (int index = 0; domains != null && index < domains.length(); index += 1) {
                     if (relaxedAutofillDomainMatches(host, domains.optString(index))) {
+                        String id = entry.optString("id");
+                        if (!id.isEmpty()) candidateIds.add(id);
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void addSameSiteAutofillMatches(String host, Set<String> candidateIds) {
+            for (JSONObject entry : loginEntries) {
+                JSONArray domains = entry.optJSONArray("domains");
+                for (int index = 0; domains != null && index < domains.length(); index += 1) {
+                    if (sameSiteAutofillDomainMatches(host, domains.optString(index))) {
                         String id = entry.optString("id");
                         if (!id.isEmpty()) candidateIds.add(id);
                         break;
