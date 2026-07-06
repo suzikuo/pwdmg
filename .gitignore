@@ -1,0 +1,40 @@
+# Python/local runtime
+/.env/
+/.venv/
+/.pytest_cache/
+/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# IDE/local machine config
+/.vscode/
+/.idea/
+/android/.idea/
+*.iml
+/local.properties
+/android/local.properties
+
+# Build output and generated files
+/build/
+/dist/
+/front/node_modules/
+/front/dist/
+/native-host/
+/.gradle/
+/android/.gradle/
+/android/.gradle-download-test/
+/android/build/
+/android/app/build/
+/bak/
+
+# Signing/secrets
+*.jks
+*.keystore
+!/android/app/debug.keystore
+
+# OS
+.DS_Store
+Thumbs.db
+

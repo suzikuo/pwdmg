@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Password</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>My Password</h1>
+      <p id="status">正在连接本地保险库...</p>
+      <form id="unlockForm">
+        <input id="password" type="password" placeholder="主密码，可留空" autocomplete="current-password" />
+        <button type="submit">解锁</button>
+      </form>
+      <button id="lockButton" class="secondary" type="button">锁定</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
