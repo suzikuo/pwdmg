@@ -13,8 +13,13 @@ const VAULT_KEY = 'vault'
 const BACKUPS_KEY = 'importBackups'
 const MAX_IMPORT_BACKUPS = 5
 const VAULT_PATH_LABEL = 'IndexedDB:mypwdmg-web-vault/vault'
+const PACKAGED_APP_VERSION = String(import.meta.env.PACKAGE_VERSION || '0.0.0')
 
 export const webStorageAdapter: VaultStorageAdapter = {
+  getAppInfo: async () => ok({
+    version: PACKAGED_APP_VERSION,
+    platform: 'web'
+  }),
   getStorageState: async () => guard(async () => {
     const envelope = await idbGet<Record<string, unknown>>(VAULT_KEY)
     return {

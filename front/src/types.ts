@@ -40,6 +40,12 @@ export interface AppState {
   passwordless?: boolean
 }
 
+export interface AppInfo {
+  version: string
+  versionCode?: number
+  platform: string
+}
+
 export interface PluginListenerState {
   supported: boolean
   hostName: string

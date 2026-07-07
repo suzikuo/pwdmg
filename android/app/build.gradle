@@ -15,9 +15,9 @@ android {
     defaultConfig {
         applicationId "com.suzikuo.mypwdmg"
         minSdk 26
-        targetSdk 35
-        versionCode 209
-        versionName "2.0.9"
+        targetSdk 34
+        versionCode 221
+        versionName "2.0.21"
     }
 
     buildFeatures {

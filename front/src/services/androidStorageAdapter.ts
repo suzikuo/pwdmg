@@ -1,5 +1,6 @@
 import type {
   ApiResult,
+  AppInfo,
   AppUpdateApply,
   AppUpdateCheck,
   AppUpdateDownload,
@@ -11,6 +12,7 @@ import { emptyPluginListenerState, fail, ok } from './apiTypes'
 import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
 
 export const androidStorageAdapter: VaultStorageAdapter = {
+  getAppInfo: () => call<AppInfo>('getAppInfo'),
   getStorageState: () => call<StorageState>('getStorageState'),
   readVaultEnvelope: () => call<string>('readVaultEnvelope'),
   writeVaultEnvelope: (envelopeText, protectBackup = false) => call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup),

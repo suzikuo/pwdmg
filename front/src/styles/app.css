@@ -79,6 +79,25 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#app,
+.app-shell {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+select,
+[contenteditable]:not([contenteditable='false']),
+.van-field__control {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -663,8 +682,19 @@ body.is-entry-pointer-drag .entry-drop-zone {
   contain: layout paint;
 }
 
-.detail-sheet.is-expanded,
-.editor-popup.is-expanded {
+.editor-popup {
+  --editor-row-height: 56px;
+  --editor-textarea-height: 84px;
+  --editor-label-width: clamp(72px, 22vw, 104px);
+  height: 100vh !important;
+  height: 100dvh !important;
+  max-height: 100vh !important;
+  max-height: 100dvh !important;
+  min-height: 100vh;
+  border-radius: 0;
+}
+
+.detail-sheet.is-expanded {
   height: var(--sheet-viewport-height);
   max-height: var(--sheet-viewport-height);
   border-radius: 0;
@@ -683,6 +713,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .is-expanded > .sheet-inner {
@@ -690,23 +721,50 @@ body.is-entry-pointer-drag .entry-drop-zone {
   padding-top: max(8px, env(safe-area-inset-top));
 }
 
-.sheet-handle {
-  width: 44px;
-  height: 20px;
-  border-radius: 999px;
-  margin: -2px auto 4px;
-  display: grid;
-  place-items: center;
-  touch-action: none;
-  cursor: ns-resize;
+.editor-popup .sheet-inner {
+  overflow: hidden;
+  height: 100%;
+  max-height: none;
+  padding: 0;
+  max-width: none;
 }
 
-.sheet-handle::before {
-  content: "";
-  width: 42px;
-  height: 4px;
-  border-radius: inherit;
-  background: var(--border-soft);
+.editor-popup .van-nav-bar {
+  flex: 0 0 auto;
+  min-height: calc(48px + env(safe-area-inset-top));
+}
+
+.sheet-toolbar {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 0 0 auto;
+  padding: 0 0 4px;
+}
+
+.sheet-expand-button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 0;
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--panel-bg-muted), transparent 12%);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+  cursor: pointer;
+}
+
+.sheet-expand-button .van-icon {
+  font-size: 18px;
+}
+
+.sheet-expand-button:active {
+  transform: scale(0.96);
+  color: var(--brand-strong);
+  border-color: color-mix(in srgb, var(--brand), transparent 48%);
 }
 
 .detail-header {
@@ -867,16 +925,118 @@ body.is-entry-pointer-drag .entry-drop-zone {
   gap: 0;
   flex: 1 1 auto;
   min-height: 0;
-  padding: 4px 0 calc(20px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  align-content: start;
+  padding: 8px 0 16px;
+  scroll-padding: 16px 0 24px;
+}
+
+.editor-field.van-cell,
+.editor-field.van-field {
+  display: flex;
+  align-items: center;
+  min-height: var(--editor-row-height);
+  padding: 0 16px;
+  overflow: visible;
+  font-size: var(--app-font-md);
+  line-height: 24px;
+}
+
+.editor-field.van-field::after {
+  right: 16px;
+  left: 16px;
+}
+
+.editor-field .van-field__label {
+  width: var(--editor-label-width);
+  min-width: var(--editor-label-width);
+  height: var(--editor-row-height);
+  display: flex;
+  align-items: center;
+  margin-right: 12px;
+  line-height: 24px;
+  color: var(--text-muted);
+  overflow: visible;
+}
+
+.editor-field .van-field__value,
+.editor-field .van-field__body {
+  min-width: 0;
+  min-height: 32px;
+  overflow: visible;
+}
+
+.editor-field .van-field__body {
+  align-items: center;
+}
+
+.editor-field .van-field__control {
+  min-height: 32px;
+  padding: 4px 0;
+  overflow: visible;
+  line-height: 24px;
+  font-size: var(--app-font-md);
+}
+
+.editor-field-single .van-field__control {
+  height: 32px;
+}
+
+.editor-field-area.van-field {
+  align-items: flex-start;
+  min-height: var(--editor-textarea-height);
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.editor-field-area .van-field__label {
+  height: auto;
+  min-height: 32px;
+  align-items: flex-start;
+  padding-top: 4px;
+}
+
+.editor-field-area .van-field__control {
+  height: calc(var(--editor-textarea-height) - 20px);
+  min-height: calc(var(--editor-textarea-height) - 20px);
+  overflow-y: auto;
+  resize: none;
+}
+
+.editor-submit-bar {
+  flex: 0 0 auto;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border-soft);
+  background: var(--panel-bg);
+}
+
+.editor-submit-bar .van-button {
+  height: 48px;
+  margin: 0;
+}
+
+.editor-form::-webkit-scrollbar {
+  width: 6px;
+}
+
+.editor-form::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted), transparent 58%);
 }
 
 .account-source-field {
   display: grid;
-  grid-template-columns: var(--van-field-label-width, 6.2em) minmax(0, 1fr);
+  grid-template-columns: var(--editor-label-width, var(--van-field-label-width, 6.2em)) minmax(0, 1fr);
   align-items: center;
   gap: 12px;
+  min-height: var(--editor-row-height);
   min-width: 0;
-  padding: var(--van-cell-vertical-padding) var(--van-cell-horizontal-padding);
+  padding: 0 16px;
   color: var(--text-main);
   background: var(--panel-bg);
 }

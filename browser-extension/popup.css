@@ -173,6 +173,7 @@ h1 {
 
 .unlock-form[hidden],
 #lockButton[hidden],
+#showPanelButton[hidden],
 .match-list:empty {
   display: none;
 }
@@ -215,6 +216,19 @@ button {
 
 button:hover {
   filter: brightness(1.07);
+}
+
+.primary-action {
+  width: 100%;
+  min-height: 38px;
+  color: #03120f;
+  box-shadow: 0 12px 24px rgba(94, 234, 212, 0.16);
+}
+
+.primary-action span {
+  margin-left: 8px;
+  opacity: 0.68;
+  font-size: 11px;
 }
 
 .match-list {
@@ -302,9 +316,35 @@ button:hover {
   font-size: 11.5px;
 }
 
+.auto-toggle-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.auto-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px solid rgba(94, 234, 212, 0.14);
+  border-radius: 8px;
+  color: #cfe7ea;
+  background: rgba(15, 23, 28, 0.56);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.auto-toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: #5eead4;
+}
+
 .popup-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
 }
 

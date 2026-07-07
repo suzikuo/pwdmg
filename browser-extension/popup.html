@@ -1,45 +1,61 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Password</title>
-    <link rel="stylesheet" href="popup.css" />
-  </head>
-  <body>
-    <main class="popup-shell">
-      <header class="popup-header">
-        <div class="brand-mark" aria-hidden="true">MP</div>
-        <div class="header-copy">
-          <h1>My Password</h1>
-          <p id="siteHost">读取当前页面中</p>
-        </div>
-        <span id="stateBadge" class="state-badge" data-state="checking">检测中</span>
-      </header>
 
-      <section class="status-panel" aria-live="polite">
-        <div class="status-line">
-          <span class="status-dot" aria-hidden="true"></span>
-          <p id="status">正在连接本地保险库...</p>
-        </div>
-        <p id="matchInfo" class="match-info"></p>
-      </section>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Password</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
 
-      <form id="unlockForm" class="unlock-form">
-        <label for="password">主密码</label>
-        <div class="password-row">
-          <input id="password" type="password" placeholder="输入主密码" autocomplete="current-password" />
-          <button id="unlockButton" type="submit">解锁</button>
-        </div>
-      </form>
+<body>
+  <main class="popup-shell">
+    <header class="popup-header">
+      <div class="brand-mark" aria-hidden="true">MP</div>
+      <div class="header-copy">
+        <h1>My Password</h1>
+        <p id="siteHost">读取当前页面中</p>
+      </div>
+      <span id="stateBadge" class="state-badge" data-state="checking">检测中</span>
+    </header>
 
-      <div id="matchList" class="match-list" aria-label="当前网站匹配账号"></div>
+    <section class="status-panel" aria-live="polite">
+      <div class="status-line">
+        <span class="status-dot" aria-hidden="true"></span>
+        <p id="status">正在连接本地保险库...</p>
+      </div>
+      <p id="matchInfo" class="match-info"></p>
+    </section>
 
-      <footer class="popup-actions">
-        <button id="refreshButton" class="secondary" type="button">刷新</button>
-        <button id="lockButton" class="secondary danger" type="button">锁定</button>
-      </footer>
-    </main>
-    <script src="popup.js"></script>
-  </body>
+    <button id="showPanelButton" class="primary-action" type="button">页面弹窗 <span>Alt+T</span></button>
+
+    <form id="unlockForm" class="unlock-form">
+      <label for="password">主密码</label>
+      <div class="password-row">
+        <input id="password" type="password" placeholder="输入主密码" autocomplete="current-password" />
+        <button id="unlockButton" type="submit">解锁</button>
+      </div>
+    </form>
+
+    <div id="matchList" class="match-list" aria-label="当前网站匹配账号"></div>
+
+    <div class="auto-toggle-group">
+      <label class="auto-toggle">
+        <input id="autoFillToggle" type="checkbox" />
+        <span>自动填充</span>
+      </label>
+      <label class="auto-toggle">
+        <input id="autoSaveToggle" type="checkbox" />
+        <span>自动保存</span>
+      </label>
+    </div>
+
+    <footer class="popup-actions">
+      <button id="refreshButton" class="secondary" type="button">刷新</button>
+      <button id="lockButton" class="secondary danger" type="button">锁定</button>
+    </footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+
 </html>

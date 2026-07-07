@@ -5,6 +5,7 @@ import type {
   AppUpdateDownload,
   AppUpdateProgressHandler,
   ApiResult,
+  AppInfo,
   AppState,
   PluginListenerState,
   VaultBackupExport,
@@ -23,6 +24,7 @@ export type StartupData = {
 }
 
 export interface PasswordManagerApiAdapter {
+  getAppInfo: () => Promise<ApiResult<AppInfo>>
   getStartupData: () => Promise<ApiResult<StartupData>>
   getState: () => Promise<ApiResult<AppState>>
   createVault: (password: string, importLegacy: boolean) => Promise<ApiResult<CreateVaultResult>>

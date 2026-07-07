@@ -9,6 +9,8 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.service.autofill.Dataset;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -16,6 +18,7 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillManager;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -38,6 +41,8 @@ public class AutofillPickerActivity extends Activity {
     private AndroidVaultStore store;
     private PwdAutofillService.LoginFields fields;
     private JSONObject payload;
+    private JSONArray currentMatches;
+    private LinearLayout currentList;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -104,6 +109,9 @@ public class AutofillPickerActivity extends Activity {
         header.addView(close);
         root.addView(header);
 
+        EditText search = searchInput(initialSearchTerm(target));
+        root.addView(search);
+
         ScrollView scroll = new MaxHeightScrollView(this, Math.min(dp(420), getResources().getDisplayMetrics().heightPixels / 2));
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
@@ -114,14 +122,112 @@ public class AutofillPickerActivity extends Activity {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ));
 
-        for (int index = 0; index < matches.length(); index += 1) {
-            JSONObject match = matches.getJSONObject(index);
-            list.addView(rowFor(match));
-        }
+        currentMatches = matches;
+        currentList = list;
+        renderMatches(search.getText().toString());
+        search.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                renderMatches(s == null ? "" : s.toString());
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {}
+        });
 
         shell.addView(root);
         setContentView(shell);
         configureFloatingWindow();
+    }
+
+    private EditText searchInput(String initialValue) {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(initialValue);
+        input.setSelectAllOnFocus(false);
+        input.setHint("搜索账号、名称、域名");
+        input.setTextSize(15);
+        input.setTextColor(Color.rgb(29, 33, 41));
+        input.setHintTextColor(Color.rgb(142, 149, 160));
+        input.setPadding(dp(12), 0, dp(12), 0);
+
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Color.WHITE);
+        background.setCornerRadius(dp(10));
+        background.setStroke(dp(1), Color.rgb(224, 228, 235));
+        input.setBackground(background);
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(42)
+        );
+        params.setMargins(0, dp(12), 0, 0);
+        input.setLayoutParams(params);
+        return input;
+    }
+
+    private void renderMatches(String query) {
+        if (currentList == null || currentMatches == null) return;
+        currentList.removeAllViews();
+        String term = normalizeSearch(query);
+        int visible = 0;
+        for (int index = 0; index < currentMatches.length(); index += 1) {
+            JSONObject match = currentMatches.optJSONObject(index);
+            if (match == null || !matchesQuery(match, term)) continue;
+            currentList.addView(rowFor(match));
+            visible += 1;
+        }
+        if (visible == 0) {
+            TextView empty = text("没有匹配账号", 14, Color.rgb(116, 124, 135), Typeface.NORMAL);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(0, dp(18), 0, dp(10));
+            currentList.addView(empty);
+        }
+    }
+
+    private boolean matchesQuery(JSONObject match, String term) {
+        if (term.isEmpty()) return true;
+        return searchText(match).contains(term);
+    }
+
+    private String searchText(JSONObject match) {
+        StringBuilder builder = new StringBuilder();
+        append(builder, match.optString("title"));
+        append(builder, match.optString("username"));
+        append(builder, match.optString("email"));
+        append(builder, match.optString("phone"));
+        JSONArray domains = match.optJSONArray("domains");
+        for (int index = 0; domains != null && index < domains.length(); index += 1) {
+            append(builder, domains.optString(index));
+        }
+        return normalizeSearch(builder.toString());
+    }
+
+    private static void append(StringBuilder builder, String value) {
+        if (value != null) builder.append(value).append(' ');
+    }
+
+    private String initialSearchTerm(String target) {
+        String normalized = normalizeSearch(target);
+        if (normalized.isEmpty()) return "";
+        if (normalized.contains("xiaoheihe")) return "xiaoheihe";
+        int schemeIndex = normalized.indexOf("://");
+        if (schemeIndex >= 0) normalized = normalized.substring(schemeIndex + 3);
+        int slashIndex = normalized.indexOf('/');
+        if (slashIndex >= 0) normalized = normalized.substring(0, slashIndex);
+        String[] parts = normalized.split("\\.");
+        if (parts.length >= 2) return parts[parts.length - 2];
+        int packageIndex = normalized.lastIndexOf('.');
+        return packageIndex >= 0 && packageIndex < normalized.length() - 1
+            ? normalized.substring(packageIndex + 1)
+            : normalized;
+    }
+
+    private static String normalizeSearch(String value) {
+        return value == null ? "" : value.trim().toLowerCase();
     }
 
     private View rowFor(JSONObject match) {

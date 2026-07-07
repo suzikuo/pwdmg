@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ HTTP_TIMEOUT_SECONDS = 20
 WINDOWS_ASSET_KEYS = ("windows", "win64", "win")
 HEX_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json"
+PACKAGED_HOST_EXE = "My Password Host.exe"
 
 
 class UpdateError(Exception):
@@ -49,6 +51,8 @@ class DesktopUpdateService:
             raise UpdateError("Already on the latest version")
 
         asset = update["asset"]
+        cached_package = self.update_dir / safe_file_name(asset["fileName"])
+        self._cleanup_update_dir(keep=cached_package)
         package_path = self._download_asset(
             url=asset["url"],
             expected_sha256=asset["sha256"],
@@ -74,6 +78,7 @@ class DesktopUpdateService:
         if not is_relative_to(package, update_root):
             raise UpdateError("Update package must be downloaded by this app before it can be applied")
 
+        self._cleanup_update_dir(keep=package)
         exe_path = Path(sys.executable).resolve()
         install_dir = exe_path.parent
         script_path = self._write_apply_script(package, install_dir, exe_path.name)
@@ -85,6 +90,37 @@ class DesktopUpdateService:
             "installDir": str(install_dir),
             "willRestart": True,
         }
+
+    def _cleanup_update_dir(self, keep: Path | None = None) -> None:
+        self.update_dir.mkdir(parents=True, exist_ok=True)
+        update_root = self.update_dir.resolve()
+        keep_path = keep.resolve() if keep else None
+        for child in self.update_dir.iterdir():
+            try:
+                child_path = child.resolve()
+            except OSError:
+                continue
+            if keep_path and child_path == keep_path:
+                continue
+            if not is_relative_to(child_path, update_root):
+                continue
+            name = child.name
+            should_delete = (
+                name.startswith("apply-")
+                or name.startswith("backup-")
+                or (name.startswith("apply-update-") and name.endswith(".ps1"))
+                or name.endswith(".tmp")
+                or name.lower().endswith(".zip")
+            )
+            if not should_delete:
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except OSError:
+                pass
 
     def _normalize_manifest_url(self, manifest_url: str) -> str:
         value = (manifest_url or "").strip() or DEFAULT_UPDATE_MANIFEST_URL
@@ -199,6 +235,7 @@ class DesktopUpdateService:
         script_path = self.update_dir / f"apply-update-{stamp}.ps1"
         work_dir = self.update_dir / f"apply-{stamp}"
         backup_dir = self.update_dir / f"backup-{stamp}"
+        log_path = self.update_dir / f"apply-update-{stamp}.log"
         pid = os.getpid()
 
         script = f"""$ErrorActionPreference = 'Stop'
@@ -206,47 +243,200 @@ $ProcessIdToWait = {pid}
 $PackagePath = {ps_quote(str(package))}
 $InstallDir = {ps_quote(str(install_dir))}
 $ExeName = {ps_quote(exe_name)}
+$HostExeName = {ps_quote(PACKAGED_HOST_EXE)}
+$HostName = 'com.suzikuo.mypwdmg'
+$ChromeHostKey = "HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts\\$HostName"
+$EdgeHostKey = "HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\$HostName"
 $WorkDir = {ps_quote(str(work_dir))}
 $BackupDir = {ps_quote(str(backup_dir))}
+$UpdateDir = {ps_quote(str(self.update_dir))}
+$LogPath = {ps_quote(str(log_path))}
 
-if ($ProcessIdToWait -gt 0) {{
-    $Deadline = (Get-Date).AddSeconds(120)
-    while (Get-Process -Id $ProcessIdToWait -ErrorAction SilentlyContinue) {{
-        if ((Get-Date) -gt $Deadline) {{
-            throw "Timed out waiting for current app process to exit"
+function Resolve-FullPath {{
+    param([string] $Path)
+    return [System.IO.Path]::GetFullPath($Path)
+}}
+
+function Assert-UnderPath {{
+    param([string] $Path, [string] $Root, [string] $Label)
+    $FullPath = Resolve-FullPath $Path
+    $FullRoot = (Resolve-FullPath $Root).TrimEnd('\\')
+    if ($FullPath -ne $FullRoot -and -not $FullPath.StartsWith($FullRoot + '\\', [System.StringComparison]::OrdinalIgnoreCase)) {{
+        throw "$Label is outside allowed directory: $FullPath"
+    }}
+    return $FullPath
+}}
+
+function Assert-DeleteTarget {{
+    param([string] $Path, [string] $Root, [string] $Label)
+    $FullPath = Assert-UnderPath $Path $Root $Label
+    $FullRoot = (Resolve-FullPath $Root).TrimEnd('\\')
+    if ($FullPath.TrimEnd('\\') -eq $FullRoot) {{
+        throw "$Label cannot be the root directory: $FullPath"
+    }}
+    return $FullPath
+}}
+
+function Write-UpdateLog {{
+    param([string] $Message)
+    $Line = "$(Get-Date -Format o) $Message"
+    Add-Content -LiteralPath $LogPath -Value $Line -Encoding UTF8
+}}
+
+function Stop-ImageName {{
+    param([string] $ImageName)
+    if (-not $ImageName) {{ return }}
+    $ImageBase = [System.IO.Path]::GetFileNameWithoutExtension($ImageName)
+    $Processes = Get-Process -Name $ImageBase -ErrorAction SilentlyContinue
+    foreach ($Process in $Processes) {{
+        try {{
+            Write-UpdateLog "Stopping $ImageName pid=$($Process.Id)"
+            Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+        }} catch {{
+            Write-UpdateLog "Could not stop $ImageName pid=$($Process.Id): $($_.Exception.Message)"
         }}
-        Start-Sleep -Milliseconds 250
     }}
 }}
-Start-Sleep -Milliseconds 800
 
-if (Test-Path -LiteralPath $WorkDir) {{
-    Remove-Item -LiteralPath $WorkDir -Recurse -Force
-}}
-New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
-New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
-
-Expand-Archive -LiteralPath $PackagePath -DestinationPath $WorkDir -Force
-$PayloadDir = $WorkDir
-if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir $ExeName))) {{
-    $Candidate = Get-ChildItem -LiteralPath $WorkDir -Directory | Where-Object {{
-        Test-Path -LiteralPath (Join-Path $_.FullName $ExeName)
-    }} | Select-Object -First 1
-    if ($null -ne $Candidate) {{
-        $PayloadDir = $Candidate.FullName
+function Get-DefaultRegistryValue {{
+    param([string] $Path)
+    try {{
+        if (-not (Test-Path -LiteralPath $Path)) {{ return $null }}
+        return (Get-Item -LiteralPath $Path).GetValue('')
+    }} catch {{
+        Write-UpdateLog "Could not read registry ${Path}: $($_.Exception.Message)"
+        return $null
     }}
 }}
-if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir $ExeName))) {{
-    throw "Update package does not contain $ExeName"
+
+function Disable-NativeHostRegistration {{
+    param([string] $Path)
+    try {{
+        if (Test-Path -LiteralPath $Path) {{
+            Write-UpdateLog "Disabling native host registration: $Path"
+            Remove-Item -LiteralPath $Path -Recurse -Force
+        }}
+    }} catch {{
+        Write-UpdateLog "Could not disable native host registration ${Path}: $($_.Exception.Message)"
+    }}
 }}
 
-$CurrentExe = Join-Path $InstallDir $ExeName
-if (Test-Path -LiteralPath $CurrentExe) {{
-    Copy-Item -LiteralPath $CurrentExe -Destination (Join-Path $BackupDir $ExeName) -Force
+function Restore-NativeHostRegistration {{
+    param([string] $Path, [object] $Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string] $Value)) {{ return }}
+    try {{
+        Write-UpdateLog "Restoring native host registration: $Path"
+        New-Item -Path $Path -Force | Out-Null
+        Set-Item -LiteralPath $Path -Value ([string] $Value)
+    }} catch {{
+        Write-UpdateLog "Could not restore native host registration ${Path}: $($_.Exception.Message)"
+    }}
 }}
 
-Copy-Item -Path (Join-Path $PayloadDir '*') -Destination $InstallDir -Recurse -Force
-Start-Process -FilePath (Join-Path $InstallDir $ExeName)
+function Start-UpdatedApp {{
+    $UpdatedExe = Join-Path $InstallDir $ExeName
+    if (-not (Test-Path -LiteralPath $UpdatedExe -PathType Leaf)) {{
+        throw "Updated executable was not found: $UpdatedExe"
+    }}
+    try {{
+        Write-UpdateLog "Starting updated app with Start-Process: $UpdatedExe"
+        Start-Process -FilePath $UpdatedExe -WorkingDirectory $InstallDir -ErrorAction Stop
+        Write-UpdateLog "Start-Process returned successfully"
+    }} catch {{
+        Write-UpdateLog "Start-Process failed: $($_.Exception.Message)"
+        Write-UpdateLog "Starting updated app with cmd fallback"
+        $StartArgs = '/c start "" "' + $UpdatedExe + '"'
+        Start-Process -FilePath 'cmd.exe' -ArgumentList $StartArgs -WorkingDirectory $InstallDir -WindowStyle Hidden -ErrorAction Stop
+        Write-UpdateLog "cmd fallback returned successfully"
+    }}
+}}
+
+try {{
+    Write-UpdateLog "Update started"
+    $InstallDir = Resolve-FullPath $InstallDir
+    $UpdateDir = Resolve-FullPath $UpdateDir
+    $PackagePath = Assert-UnderPath $PackagePath $UpdateDir 'PackagePath'
+    $WorkDir = Assert-DeleteTarget $WorkDir $UpdateDir 'WorkDir'
+    $BackupDir = Assert-DeleteTarget $BackupDir $UpdateDir 'BackupDir'
+    $LogPath = Assert-UnderPath $LogPath $UpdateDir 'LogPath'
+    if (-not (Test-Path -LiteralPath (Join-Path $InstallDir $ExeName))) {{
+        throw "InstallDir does not contain $ExeName"
+    }}
+    $ChromeHostValue = Get-DefaultRegistryValue $ChromeHostKey
+    $EdgeHostValue = Get-DefaultRegistryValue $EdgeHostKey
+    Disable-NativeHostRegistration $ChromeHostKey
+    Disable-NativeHostRegistration $EdgeHostKey
+    Stop-ImageName $HostExeName
+
+    if ($ProcessIdToWait -gt 0) {{
+        $Deadline = (Get-Date).AddSeconds(120)
+        while (Get-Process -Id $ProcessIdToWait -ErrorAction SilentlyContinue) {{
+            if ((Get-Date) -gt $Deadline) {{
+                throw "Timed out waiting for current app process to exit"
+            }}
+            Start-Sleep -Milliseconds 250
+        }}
+    }}
+    Start-Sleep -Milliseconds 800
+    Stop-ImageName $HostExeName
+
+    if (Test-Path -LiteralPath $WorkDir) {{
+        Remove-Item -LiteralPath (Assert-DeleteTarget $WorkDir $UpdateDir 'WorkDir') -Recurse -Force
+    }}
+    if (Test-Path -LiteralPath $BackupDir) {{
+        Remove-Item -LiteralPath (Assert-DeleteTarget $BackupDir $UpdateDir 'BackupDir') -Recurse -Force
+    }}
+    New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+
+    Expand-Archive -LiteralPath $PackagePath -DestinationPath $WorkDir -Force
+    $PayloadDir = $WorkDir
+    if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir $ExeName))) {{
+        $Candidate = Get-ChildItem -LiteralPath $WorkDir -Directory | Where-Object {{
+            Test-Path -LiteralPath (Join-Path $_.FullName $ExeName)
+        }} | Select-Object -First 1
+        if ($null -ne $Candidate) {{
+            $PayloadDir = $Candidate.FullName
+        }}
+    }}
+    if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir $ExeName))) {{
+        throw "Update package does not contain $ExeName"
+    }}
+    $PayloadDir = Assert-UnderPath $PayloadDir $WorkDir 'PayloadDir'
+
+    Copy-Item -Path (Join-Path $InstallDir '*') -Destination $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $PayloadDir -Force | ForEach-Object {{
+        $Target = Join-Path $InstallDir $_.Name
+        if (Test-Path -LiteralPath $Target) {{
+            Remove-Item -LiteralPath (Assert-DeleteTarget $Target $InstallDir 'Install target') -Recurse -Force
+        }}
+        Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force
+    }}
+
+    Restore-NativeHostRegistration $ChromeHostKey $ChromeHostValue
+    Restore-NativeHostRegistration $EdgeHostKey $EdgeHostValue
+    Write-UpdateLog "Update copied, restarting"
+    Start-UpdatedApp
+
+    Get-ChildItem -LiteralPath $UpdateDir -Force | Where-Object {{
+        $Candidate = Assert-UnderPath $_.FullName $UpdateDir 'Update cleanup target'
+        $_.FullName -ne $LogPath -and
+        (
+            $_.Name -like 'apply-*' -or
+            $_.Name -like 'backup-*' -or
+            $_.Name -like 'apply-update-*.ps1' -or
+            $_.Name -like '*.tmp' -or
+            $_.Name -like '*.zip'
+        )
+    }} | ForEach-Object {{
+        Remove-Item -LiteralPath (Assert-DeleteTarget $_.FullName $UpdateDir 'Update cleanup target') -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+}} catch {{
+    Restore-NativeHostRegistration $ChromeHostKey $ChromeHostValue
+    Restore-NativeHostRegistration $EdgeHostKey $EdgeHostValue
+    Write-UpdateLog "Update failed: $($_.Exception.Message)"
+    throw
+}}
 """
         script_path.write_text(script, encoding="utf-8")
         return script_path

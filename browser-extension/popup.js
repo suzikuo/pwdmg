@@ -6,10 +6,15 @@ const form = document.getElementById('unlockForm')
 const passwordInput = document.getElementById('password')
 const lockButton = document.getElementById('lockButton')
 const refreshButton = document.getElementById('refreshButton')
+const showPanelButton = document.getElementById('showPanelButton')
+const autoFillToggle = document.getElementById('autoFillToggle')
+const autoSaveToggle = document.getElementById('autoSaveToggle')
 const matchListEl = document.getElementById('matchList')
 
 let activeTab = null
 let activeHost = ''
+let autoFillEnabled = true
+let autoSaveEnabled = true
 
 function send(message) {
   return new Promise((resolve) => {
@@ -32,7 +37,27 @@ function sendToActiveTab(message) {
     }
     chrome.tabs.sendMessage(activeTab.id, message, (response) => {
       const error = chrome.runtime.lastError
-      resolve(error ? { ok: false, message: String(error.message || error) } : (response || { ok: true }))
+      if (!error) {
+        resolve(response || { ok: true })
+        return
+      }
+      if (!/receiving end does not exist|could not establish connection/i.test(String(error.message || error))) {
+        resolve({ ok: false, message: String(error.message || error) })
+        return
+      }
+      chrome.scripting.insertCSS({ target: { tabId: activeTab.id }, files: ['content.css'] }, () => {
+        chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['content.js'] }, () => {
+          const injectError = chrome.runtime.lastError
+          if (injectError) {
+            resolve({ ok: false, message: String(injectError.message || injectError) })
+            return
+          }
+          chrome.tabs.sendMessage(activeTab.id, message, (retryResponse) => {
+            const retryError = chrome.runtime.lastError
+            resolve(retryError ? { ok: false, message: String(retryError.message || retryError) } : (retryResponse || { ok: true }))
+          })
+        })
+      })
     })
   })
 }
@@ -59,6 +84,30 @@ async function refreshActiveTab() {
   await sendToActiveTab({ type: 'MYPWDMG_REFRESH' })
 }
 
+async function loadAutoSettings() {
+  const response = await send({ type: 'MYPWDMG_GET_AUTO_SETTINGS' })
+  autoFillEnabled = response?.data?.autoFillEnabled !== false
+  autoSaveEnabled = response?.data?.autoSaveEnabled !== false
+  autoFillToggle.checked = autoFillEnabled
+  autoSaveToggle.checked = autoSaveEnabled
+}
+
+async function setAutoSettings(nextSettings) {
+  const response = await send({ type: 'MYPWDMG_SET_AUTO_SETTINGS', settings: nextSettings })
+  if (!response?.ok) {
+    autoFillToggle.checked = autoFillEnabled
+    autoSaveToggle.checked = autoSaveEnabled
+    statusEl.textContent = response?.message || '切换自动设置失败。'
+    return
+  }
+  autoFillEnabled = response.data?.autoFillEnabled !== false
+  autoSaveEnabled = response.data?.autoSaveEnabled !== false
+  autoFillToggle.checked = autoFillEnabled
+  autoSaveToggle.checked = autoSaveEnabled
+  statusEl.textContent = `自动填充${autoFillEnabled ? '已开启' : '已关闭'}，自动保存${autoSaveEnabled ? '已开启' : '已关闭'}。`
+  await refreshActiveTab()
+}
+
 function setBadge(text, state) {
   stateBadgeEl.textContent = text
   stateBadgeEl.dataset.state = state
@@ -71,6 +120,7 @@ function showLocked(message = '请输入主密码解锁插件。') {
   matchListEl.innerHTML = ''
   form.hidden = false
   lockButton.hidden = true
+  showPanelButton.hidden = true
   window.setTimeout(() => passwordInput.focus(), 20)
 }
 
@@ -78,6 +128,7 @@ function showUnlocked() {
   setBadge('已解锁', 'unlocked')
   form.hidden = true
   lockButton.hidden = false
+  showPanelButton.hidden = !activeHost
 }
 
 function showUnavailable(message, state = 'error') {
@@ -87,6 +138,7 @@ function showUnavailable(message, state = 'error') {
   matchListEl.innerHTML = ''
   form.hidden = true
   lockButton.hidden = true
+  showPanelButton.hidden = true
 }
 
 async function unlock(password, silent = false) {
@@ -113,11 +165,12 @@ async function loadMatches() {
     statusEl.textContent = '当前页面不是可填充的网站。'
     matchInfoEl.textContent = ''
     matchListEl.innerHTML = ''
+    showPanelButton.hidden = true
     return
   }
 
   statusEl.textContent = '已连接本地保险库。'
-  matchInfoEl.textContent = '正在查询当前站点...'
+  matchInfoEl.textContent = autoFillEnabled ? '正在查询当前站点...' : '自动填充已关闭，下面账号仍可手动填充。'
   const response = await send({ type: 'MYPWDMG_QUERY_MATCHES', hostname: activeHost })
   if (!response?.ok) {
     if (response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
@@ -176,10 +229,12 @@ function escapeAttr(value) {
 async function loadState() {
   form.hidden = true
   lockButton.hidden = true
+  showPanelButton.hidden = true
   matchListEl.innerHTML = ''
   setBadge('检测中', 'checking')
 
   await getActiveTab()
+  await loadAutoSettings()
   const response = await send({ type: 'MYPWDMG_STATE' })
   if (!response?.ok) {
     showUnavailable(response?.message || '无法连接本地 Native Host。')
@@ -226,12 +281,33 @@ refreshButton.addEventListener('click', async () => {
   await loadState()
 })
 
+autoFillToggle.addEventListener('change', async () => {
+  await setAutoSettings({ autoFillEnabled: autoFillToggle.checked })
+})
+
+autoSaveToggle.addEventListener('change', async () => {
+  await setAutoSettings({ autoSaveEnabled: autoSaveToggle.checked })
+})
+
+showPanelButton.addEventListener('click', async () => {
+  showPanelButton.disabled = true
+  showPanelButton.textContent = '...'
+  const response = await sendToActiveTab({ type: 'MYPWDMG_SHOW_PANEL' })
+  if (!response?.ok) {
+    showPanelButton.disabled = false
+    showPanelButton.textContent = '页面弹窗'
+    statusEl.textContent = response?.message || '无法在当前页面显示弹窗。'
+    return
+  }
+  window.close()
+})
+
 matchListEl.addEventListener('click', async (event) => {
   const button = event.target?.closest?.('.fill-button')
   if (!button) return
   button.disabled = true
   button.textContent = '...'
-  const response = await sendToActiveTab({ type: 'MYPWDMG_FILL_ENTRY', entryId: button.getAttribute('data-entry-id') })
+  const response = await sendToActiveTab({ type: 'MYPWDMG_FILL_ENTRY', entryId: button.getAttribute('data-entry-id'), manual: true })
   if (!response?.ok) {
     button.disabled = false
     button.textContent = '填充'

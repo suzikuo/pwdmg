@@ -5,6 +5,7 @@ import type {
   AppUpdateDownload,
   AppUpdateProgressHandler,
   ApiResult,
+  AppInfo,
   PluginListenerState
 } from '../types'
 
@@ -21,6 +22,7 @@ export type WriteEnvelopeResult = {
 }
 
 export interface VaultStorageAdapter {
+  getAppInfo: () => Promise<ApiResult<AppInfo>>
   getStorageState: () => Promise<ApiResult<StorageState>>
   readVaultEnvelope: () => Promise<ApiResult<string>>
   writeVaultEnvelope: (envelopeText: string, protectBackup?: boolean) => Promise<ApiResult<WriteEnvelopeResult>>

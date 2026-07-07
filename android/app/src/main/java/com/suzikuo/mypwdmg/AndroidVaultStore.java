@@ -39,7 +39,7 @@ final class AndroidVaultStore {
     private static final String SOURCE_PHONE = "phone";
     private static final byte[] AAD = "mypwdmg-vault-v1".getBytes(StandardCharsets.UTF_8);
     private static final int DEFAULT_ITERATIONS = 390000;
-    private static final int SESSION_MILLIS = 10 * 60 * 1000;
+    private static final long UNLOCKED_EXPIRES_AT = 253402300799000L;
     private static final int MAX_IMPORT_BACKUPS = 5;
 
     private final SecureRandom random = new SecureRandom();
@@ -274,6 +274,229 @@ final class AndroidVaultStore {
             .put("totp", totp);
     }
 
+    synchronized JSONObject saveCapturedLogin(JSONObject capture) throws Exception {
+        JSONObject sourcePayload = requirePayload();
+        JSONObject normalized = normalizeCapture(capture);
+        if (normalized.optString("password").isEmpty()) {
+            throw new IllegalArgumentException("Captured password is empty");
+        }
+        if (identityValues(normalized).isEmpty()) {
+            throw new IllegalArgumentException("Captured account is empty");
+        }
+
+        JSONObject candidate = findCaptureCandidate(sourcePayload, normalized);
+        JSONObject entry;
+        String action;
+        if (candidate != null) {
+            entry = candidate;
+            if (entry.optString("password").equals(normalized.optString("password"))) {
+                refreshSession();
+                return new JSONObject()
+                    .put("action", "skipped")
+                    .put("entry", matchSummary(entry, entry.optJSONArray("domains")));
+            }
+            applyCaptureUpdate(entry, normalized);
+            action = "updated";
+        } else {
+            entry = entryFromCapture(normalized);
+            prependEntry(sourcePayload, entry);
+            action = "created";
+        }
+
+        sourcePayload.put("updatedAt", nowSeconds());
+        setPayload(normalizePayload(sourcePayload));
+        writeEnvelope(encryptWithCurrentKey(payload));
+        refreshSession();
+        return new JSONObject()
+            .put("action", action)
+            .put("entry", matchSummary(entry, entry.optJSONArray("domains")));
+    }
+
+    private JSONObject normalizeCapture(JSONObject capture) throws JSONException {
+        String title = cleanCaptureText(capture.optString("title"));
+        String hostname = normalizeDomain(firstNotEmpty(
+            capture.optString("hostname"),
+            capture.optString("domain"),
+            capture.optString("url")
+        ));
+        String accountKind = normalizeCaptureAccountKind(capture.optString("accountKind"));
+        String accountValue = cleanCaptureText(firstNotEmpty(capture.optString("account"), capture.optString("accountValue")));
+        String username = cleanCaptureText(capture.optString("username"));
+        String email = cleanCaptureText(capture.optString("email"));
+        String phone = cleanCaptureText(capture.optString("phone"));
+
+        if (!accountValue.isEmpty()) {
+            if (PwdAutofillService.ACCOUNT_KIND_EMAIL.equals(accountKind) && email.isEmpty()) {
+                email = accountValue;
+            } else if (PwdAutofillService.ACCOUNT_KIND_PHONE.equals(accountKind) && phone.isEmpty()) {
+                phone = accountValue;
+            } else if (PwdAutofillService.ACCOUNT_KIND_USERNAME.equals(accountKind) && username.isEmpty()) {
+                username = accountValue;
+            } else if (username.isEmpty() && email.isEmpty() && phone.isEmpty()) {
+                if (looksLikeEmail(accountValue)) email = accountValue;
+                else if (looksLikePhone(accountValue)) phone = accountValue;
+                else username = accountValue;
+            }
+        }
+
+        String loginAccountSource = SOURCE_AUTO;
+        if (SOURCE_USERNAME.equals(accountKind) || SOURCE_EMAIL.equals(accountKind) || SOURCE_PHONE.equals(accountKind)) {
+            loginAccountSource = accountKind;
+        }
+
+        return new JSONObject()
+            .put("title", firstNotEmpty(title, PwdAutofillService.titleForTarget(hostname), "Untitled"))
+            .put("hostname", hostname)
+            .put("username", username)
+            .put("email", email)
+            .put("phone", phone)
+            .put("password", cleanCaptureText(capture.optString("password"), 4096))
+            .put("accountKind", accountKind)
+            .put("loginAccountSource", loginAccountSource);
+    }
+
+    private JSONObject findCaptureCandidate(JSONObject sourcePayload, JSONObject capture) {
+        List<JSONObject> candidates = capture.optString("hostname").isEmpty()
+            ? indexedLoginEntries(sourcePayload)
+            : matchingLoginEntries(sourcePayload, capture.optString("hostname"));
+        JSONObject fallback = null;
+        for (JSONObject entry : candidates) {
+            if (!accountMatchesCapture(entry, capture)) continue;
+            if (entry.optString("password").equals(capture.optString("password"))) return entry;
+            if (fallback == null) fallback = entry;
+        }
+        return fallback;
+    }
+
+    private static boolean accountMatchesCapture(JSONObject entry, JSONObject capture) {
+        Set<String> captureValues = identityValues(capture);
+        if (captureValues.isEmpty()) return false;
+        Set<String> entryValues = new HashSet<>();
+        addIdentityValue(entryValues, entry.optString("username"));
+        addIdentityValue(entryValues, entry.optString("email"));
+        addIdentityValue(entryValues, entry.optString("phone"));
+        for (String value : captureValues) {
+            if (entryValues.contains(value)) return true;
+        }
+        return false;
+    }
+
+    private static Set<String> identityValues(JSONObject source) {
+        Set<String> values = new HashSet<>();
+        addIdentityValue(values, source.optString("username"));
+        addIdentityValue(values, source.optString("email"));
+        addIdentityValue(values, source.optString("phone"));
+        return values;
+    }
+
+    private static void addIdentityValue(Set<String> values, String value) {
+        String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        if (!normalized.isEmpty()) values.add(normalized);
+    }
+
+    private static void applyCaptureUpdate(JSONObject entry, JSONObject capture) throws JSONException {
+        String hostname = capture.optString("hostname");
+        if (!hostname.isEmpty()) {
+            JSONArray domains = entry.optJSONArray("domains");
+            if (domains == null) {
+                domains = new JSONArray();
+                entry.put("domains", domains);
+            }
+            boolean hasDomain = false;
+            for (int index = 0; index < domains.length(); index += 1) {
+                if (domainMatches(hostname, domains.optString(index))) {
+                    hasDomain = true;
+                    break;
+                }
+            }
+            if (!hasDomain) domains.put(hostname);
+        }
+
+        if (entry.optString("title").isEmpty() || "Untitled".equals(entry.optString("title"))) {
+            entry.put("title", capture.optString("title"));
+        }
+        if (!capture.optString("username").isEmpty() && entry.optString("username").isEmpty()) {
+            entry.put("username", capture.optString("username"));
+        }
+        if (!capture.optString("email").isEmpty() && entry.optString("email").isEmpty()) {
+            entry.put("email", capture.optString("email"));
+        }
+        if (!capture.optString("phone").isEmpty() && entry.optString("phone").isEmpty()) {
+            entry.put("phone", capture.optString("phone"));
+        }
+        if (!SOURCE_USERNAME.equals(entry.optString("loginAccountSource"))
+            && !SOURCE_EMAIL.equals(entry.optString("loginAccountSource"))
+            && !SOURCE_PHONE.equals(entry.optString("loginAccountSource"))) {
+            entry.put("loginAccountSource", capture.optString("loginAccountSource", SOURCE_AUTO));
+        }
+        entry.put("password", capture.optString("password"));
+    }
+
+    private static JSONObject entryFromCapture(JSONObject capture) throws JSONException {
+        JSONArray domains = new JSONArray();
+        if (!capture.optString("hostname").isEmpty()) domains.put(capture.optString("hostname"));
+        return new JSONObject()
+            .put("id", UUID.randomUUID().toString())
+            .put("kind", "login")
+            .put("title", firstNotEmpty(capture.optString("title"), capture.optString("hostname"), "Untitled"))
+            .put("domains", domains)
+            .put("username", capture.optString("username"))
+            .put("email", capture.optString("email"))
+            .put("password", capture.optString("password"))
+            .put("phone", capture.optString("phone"))
+            .put("loginAccountSource", normalizeLoginAccountSource(capture.optString("loginAccountSource")))
+            .put("note", "")
+            .put("totpSecret", "")
+            .put("children", new JSONArray());
+    }
+
+    private static void prependEntry(JSONObject sourcePayload, JSONObject entry) throws JSONException {
+        JSONArray entries = sourcePayload.optJSONArray("entries");
+        JSONArray nextEntries = new JSONArray();
+        nextEntries.put(entry);
+        for (int index = 0; entries != null && index < entries.length(); index += 1) {
+            nextEntries.put(entries.get(index));
+        }
+        sourcePayload.put("entries", nextEntries);
+    }
+
+    private static String normalizeCaptureAccountKind(String value) {
+        if (PwdAutofillService.ACCOUNT_KIND_USERNAME.equals(value)) return PwdAutofillService.ACCOUNT_KIND_USERNAME;
+        if (PwdAutofillService.ACCOUNT_KIND_EMAIL.equals(value)) return PwdAutofillService.ACCOUNT_KIND_EMAIL;
+        if (PwdAutofillService.ACCOUNT_KIND_PHONE.equals(value)) return PwdAutofillService.ACCOUNT_KIND_PHONE;
+        return PwdAutofillService.ACCOUNT_KIND_GENERIC;
+    }
+
+    private static String cleanCaptureText(String value) {
+        return cleanCaptureText(value, 512);
+    }
+
+    private static String cleanCaptureText(String value, int maxLength) {
+        if (value == null) return "";
+        String text = value.replace("\u0000", "").trim();
+        return text.length() > maxLength ? text.substring(0, maxLength) : text;
+    }
+
+    private static boolean looksLikeEmail(String value) {
+        int at = value.indexOf('@');
+        return at > 0 && value.indexOf('.', at) > at + 1;
+    }
+
+    private static boolean looksLikePhone(String value) {
+        int digits = 0;
+        for (int index = 0; index < value.length(); index += 1) {
+            if (Character.isDigit(value.charAt(index))) digits += 1;
+        }
+        return digits >= 6 && digits >= Math.max(1, value.trim().length() - 4);
+    }
+
+    private static String firstNotEmpty(String... values) {
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) return value.trim();
+        }
+        return "";
+    }
+
     private JSONObject requirePayload() throws LockedException {
         if (!isUnlocked() || payload == null || key == null) {
             lock();
@@ -283,11 +506,11 @@ final class AndroidVaultStore {
     }
 
     private boolean isUnlocked() {
-        return payload != null && key != null && System.currentTimeMillis() < expiresAt;
+        return payload != null && key != null && expiresAt > 0;
     }
 
     private void refreshSession() {
-        expiresAt = System.currentTimeMillis() + SESSION_MILLIS;
+        expiresAt = UNLOCKED_EXPIRES_AT;
     }
 
     private void writeNewEnvelope(String password, JSONObject nextPayload) throws Exception {

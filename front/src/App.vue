@@ -76,7 +76,7 @@
       </header>
 
       <div v-if="searchOpen || keyword" class="search-strip">
-        <van-search v-model="keyword" shape="round" placeholder="搜索标题、账号、域名" />
+        <van-search ref="searchInput" v-model="keyword" shape="round" placeholder="搜索标题、账号、域名" />
       </div>
       <div v-if="dragMode" class="drag-mode-strip">
         <van-icon name="sort" />
@@ -140,7 +140,16 @@
 
     <van-popup v-model:show="detailOpen" position="bottom" round class="detail-sheet" :class="{ 'is-expanded': detailSheetExpanded }" :duration="0.12" lazy-render>
       <div class="sheet-inner" v-if="selectedEntry">
-        <div class="sheet-handle" @pointerdown="startSheetHandleDrag($event, 'detail')"></div>
+        <div class="sheet-toolbar">
+          <button
+            class="sheet-expand-button"
+            type="button"
+            :aria-label="detailSheetExpanded ? '还原详情面板' : '最大化详情面板'"
+            @click="toggleSheetExpanded('detail')"
+          >
+            <van-icon :name="detailSheetExpanded ? 'shrink' : 'expand-o'" />
+          </button>
+        </div>
         <DetailContent
           :entry="selectedEntry"
           :show-password="showPassword"
@@ -165,18 +174,17 @@
       @select="handleCreateAction"
     />
 
-    <van-popup v-model:show="editorOpen" position="bottom" round class="editor-popup" :class="{ 'is-expanded': editorSheetExpanded }" :duration="0.12" lazy-render>
+    <van-popup v-model:show="editorOpen" position="bottom" class="editor-popup" :duration="0.12" lazy-render>
       <div class="sheet-inner" @focusin="scrollFocusedEditorFieldIntoView">
-        <div class="sheet-handle" @pointerdown="startSheetHandleDrag($event, 'editor')"></div>
         <van-nav-bar safe-area-inset-top :title="editingId ? '编辑条目' : '新建条目'" left-arrow @click-left="editorOpen = false" />
-        <van-form class="editor-form" @submit="saveEntry">
-          <van-field v-model="form.title" label="名称" placeholder="例如 Github" :rules="[{ required: true }]" />
-          <van-field v-if="form.kind === 'login'" v-model="domainText" label="域名" type="textarea" autosize placeholder="github.com，多行或逗号分隔" />
+        <van-form id="entry-editor-form" class="editor-form" @submit="saveEntry">
+          <van-field class="editor-field editor-field-single" v-model="form.title" label="名称" placeholder="例如 Github" :rules="[{ required: true }]" />
+          <van-field class="editor-field editor-field-area" v-if="form.kind === 'login'" v-model="domainText" label="域名" type="textarea" placeholder="github.com，多行或逗号分隔" />
           <template v-if="form.kind === 'login'">
-            <van-field v-model="form.username" label="账号" autocomplete="username" placeholder="用户名/账号名" />
-            <van-field v-model="form.email" label="邮箱" type="email" autocomplete="email" placeholder="邮箱地址" />
-            <van-field v-model="form.password" label="密码" type="password" autocomplete="current-password" placeholder="密码" />
-            <van-field v-model="form.phone" label="手机" autocomplete="tel" placeholder="手机号" />
+            <van-field class="editor-field editor-field-single" v-model="form.username" label="账号" autocomplete="username" placeholder="用户名/账号名" />
+            <van-field class="editor-field editor-field-single" v-model="form.email" label="邮箱" type="email" autocomplete="email" placeholder="邮箱地址" />
+            <van-field class="editor-field editor-field-single" v-model="form.password" label="密码" type="password" autocomplete="current-password" placeholder="密码" />
+            <van-field class="editor-field editor-field-single" v-model="form.phone" label="手机" autocomplete="tel" placeholder="手机号" />
             <div class="account-source-field">
               <span>自动填充账号</span>
               <van-radio-group v-model="form.loginAccountSource" class="account-source-options" direction="horizontal">
@@ -185,8 +193,8 @@
                 </van-radio>
               </van-radio-group>
             </div>
-            <van-field v-model="form.totpSecret" label="TOTP" placeholder="Base32 密钥" />
-            <van-field v-model="form.note" label="备注" type="textarea" autosize placeholder="安全问题、登录提示等" />
+            <van-field class="editor-field editor-field-single" v-model="form.totpSecret" label="TOTP" placeholder="Base32 密钥" />
+            <van-field class="editor-field editor-field-area" v-model="form.note" label="备注" type="textarea" placeholder="安全问题、登录提示等" />
             <div v-if="editingId && form.totpSecret" class="totp-box">
               <span>{{ totpCode || '------' }}</span>
               <button class="inline-icon-button" type="button" aria-label="刷新验证码" @click.prevent="refreshTotp()">
@@ -194,8 +202,10 @@
               </button>
             </div>
           </template>
-          <van-button block type="primary" native-type="submit" :loading="busy">保存</van-button>
         </van-form>
+        <div class="editor-submit-bar">
+          <van-button block type="primary" native-type="submit" form="entry-editor-form" :loading="busy">保存</van-button>
+        </div>
       </div>
     </van-popup>
 
@@ -205,7 +215,7 @@
           <div class="brand-mark drawer-mark">PM</div>
           <div>
             <strong>My Password</strong>
-            <span>{{ stats.logins }} 登录 · {{ stats.folders }} 分组</span>
+            <span>v{{ appVersion }} · {{ stats.logins }} 登录 · {{ stats.folders }} 分组</span>
           </div>
         </div>
 
@@ -431,7 +441,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { showConfirmDialog, showFailToast, showSuccessToast, showToast } from 'vant'
 import DetailContent from './components/DetailContent.vue'
 import EntryList from './components/EntryList.vue'
@@ -440,6 +450,7 @@ import { api } from './services/api'
 import { generateTotp } from './services/totp'
 import type {
   AndroidAutofillState,
+  ApiResult,
   AppState,
   AppUpdateCheck,
   AppUpdateProgress,
@@ -457,6 +468,12 @@ type MoveEntryPayload = {
   targetParentId: string
   targetIndex: number
 }
+type AndroidAutofillLaunchContext = {
+  active: boolean
+  target?: string
+  searchTerm?: string
+  includeAll?: boolean
+}
 
 const LOGIN_ACCOUNT_SOURCES = new Set<LoginAccountSource>(['auto', 'username', 'email', 'phone'])
 
@@ -468,6 +485,8 @@ const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
 const DEFAULT_UPDATE_MANIFEST_URL = 'https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json'
 const VERSIONED_DEFAULT_MANIFEST_URL_PATTERN =
   /^https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/download\/[^/]+\/update-manifest\.json$/i
+const packagedAppVersion = String(import.meta.env.PACKAGE_VERSION || '0.0.0')
+const appVersion = ref(packagedAppVersion)
 const UI_SCALE_BASE = 0.92
 const UI_SCALE_MIN = 0.5
 const UI_SCALE_MAX = 1.3
@@ -477,6 +496,7 @@ const TOTP_PERIOD_SECONDS = 30
 const BACK_EXIT_INTERVAL = 1600
 const EXTERNAL_VAULT_REFRESH_DELAY_MS = 180
 const EXTERNAL_VAULT_REFRESH_MIN_INTERVAL_MS = 900
+const TEXT_EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .van-field__control'
 
 const state = reactive<AppState>({
   hasVault: false,
@@ -510,7 +530,6 @@ const keyword = ref('')
 const vault = ref<VaultPayload | null>(null)
 const editorOpen = ref(false)
 const detailOpen = ref(false)
-const editorSheetExpanded = ref(false)
 const detailSheetExpanded = ref(false)
 const drawerOpen = ref(false)
 const createSheetOpen = ref(false)
@@ -532,6 +551,7 @@ const totpCode = ref('')
 const selectedEntry = ref<VaultEntry | null>(null)
 const pluginListener = ref<PluginListenerState | null>(null)
 const androidAutofill = ref<AndroidAutofillState | null>(null)
+const androidAutofillLaunch = ref<AndroidAutofillLaunchContext | null>(null)
 const showPassword = ref(false)
 const totpRemaining = ref(TOTP_PERIOD_SECONDS)
 const totpRequestId = ref(0)
@@ -539,6 +559,7 @@ const isWide = ref(false)
 const isDrawerWide = ref(false)
 const paneWidth = ref(loadPaneWidth())
 const workspaceGrid = ref<HTMLElement | null>(null)
+const searchInput = ref<{ focus?: () => void } | null>(null)
 const theme = ref<ThemeMode>((localStorage.getItem('mypwdmg.theme') as ThemeMode) || defaultTheme())
 const form = reactive<VaultEntry>(emptyEntry('login'))
 const settings = reactive({
@@ -645,7 +666,6 @@ let lastBackRequestAt = 0
 let externalVaultRefreshTimer = 0
 let lastExternalVaultRefreshAt = 0
 let externalVaultRefreshing = false
-let sheetDrag: { kind: 'detail' | 'editor'; startY: number; pointerId: number; expanded: boolean } | null = null
 
 onMounted(() => {
   applyTheme()
@@ -660,12 +680,14 @@ onMounted(() => {
   window.addEventListener('resize', clampPaneToViewport)
   window.addEventListener('pointerdown', closeTopMenusOnOutside, true)
   window.addEventListener('focus', loadAndroidAutofillState)
+  window.addEventListener('focus', resetAndroidInstallBusy)
   window.addEventListener('focus', scheduleExternalVaultRefresh)
+  document.addEventListener('contextmenu', suppressNonEditableSelection)
+  document.addEventListener('selectstart', suppressNonEditableSelection)
   document.addEventListener('visibilitychange', handleVisibilityChange)
-  window.visualViewport?.addEventListener('resize', updateEditorViewportHeight)
-  window.visualViewport?.addEventListener('scroll', updateEditorViewportHeight)
   window.__mypwdmgHandleNativeBack = handleNativeBack
-  updateEditorViewportHeight()
+  loadAppInfo()
+  loadAndroidAutofillLaunchContext()
   loadState()
   loadAndroidAutofillState()
 })
@@ -675,9 +697,6 @@ watch(drawerOpen, (open) => {
 })
 watch(detailOpen, (open) => {
   if (!open) detailSheetExpanded.value = false
-})
-watch(editorOpen, (open) => {
-  if (!open) editorSheetExpanded.value = false
 })
 watch(keyword, (value) => {
   if (value.trim()) dragMode.value = false
@@ -690,11 +709,12 @@ onUnmounted(() => {
   window.removeEventListener('resize', clampPaneToViewport)
   window.removeEventListener('pointerdown', closeTopMenusOnOutside, true)
   window.removeEventListener('focus', loadAndroidAutofillState)
+  window.removeEventListener('focus', resetAndroidInstallBusy)
   window.removeEventListener('focus', scheduleExternalVaultRefresh)
+  document.removeEventListener('contextmenu', suppressNonEditableSelection)
+  document.removeEventListener('selectstart', suppressNonEditableSelection)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (externalVaultRefreshTimer) window.clearTimeout(externalVaultRefreshTimer)
-  window.visualViewport?.removeEventListener('resize', updateEditorViewportHeight)
-  window.visualViewport?.removeEventListener('scroll', updateEditorViewportHeight)
   delete window.__mypwdmgHandleNativeBack
   stopPaneResize()
   stopTotpTimer()
@@ -765,64 +785,43 @@ function blurActiveElement() {
 
 function scrollFocusedEditorFieldIntoView(event: FocusEvent) {
   if (!editorOpen.value) return
-  updateEditorViewportHeight()
   const target = event.target as HTMLElement | null
   const field = target?.closest?.('.van-field') as HTMLElement | null
   const element = field || target
   if (!element) return
-  window.setTimeout(() => element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' }), 80)
-  window.setTimeout(() => element.scrollIntoView({ block: 'center', inline: 'nearest' }), 260)
+  const scroller = element.closest('.editor-form') as HTMLElement | null
+  if (!scroller) return
+  window.setTimeout(() => scrollEditorElementIntoView(scroller, element, 'smooth'), 80)
+  window.setTimeout(() => scrollEditorElementIntoView(scroller, element, 'auto'), 260)
 }
 
-function updateEditorViewportHeight() {
-  const viewportHeight = window.visualViewport?.height || window.innerHeight
-  const maxHeight = Math.max(280, Math.floor(viewportHeight - 10))
-  document.documentElement.style.setProperty('--sheet-viewport-height', `${Math.floor(viewportHeight)}px`)
-  document.documentElement.style.setProperty('--editor-popup-max-height', `${maxHeight}px`)
+function scrollEditorElementIntoView(scroller: HTMLElement, element: HTMLElement, behavior: ScrollBehavior) {
+  const scrollerRect = scroller.getBoundingClientRect()
+  const elementRect = element.getBoundingClientRect()
+  const usableScrollerHeight = Math.max(120, scroller.clientHeight)
+  const centeredTop = scroller.scrollTop
+    + elementRect.top
+    - scrollerRect.top
+    - Math.max(0, (usableScrollerHeight - elementRect.height) / 2)
+  scroller.scrollTo({
+    top: Math.max(0, centeredTop),
+    behavior
+  })
 }
 
-function startSheetHandleDrag(event: PointerEvent, kind: 'detail' | 'editor') {
-  if (event.button > 0) return
-  event.preventDefault()
-  sheetDrag = {
-    kind,
-    startY: event.clientY,
-    pointerId: event.pointerId,
-    expanded: kind === 'detail' ? detailSheetExpanded.value : editorSheetExpanded.value
-  }
-  ;(event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId)
-  window.addEventListener('pointermove', handleSheetHandleDrag, { passive: false })
-  window.addEventListener('pointerup', stopSheetHandleDrag)
-  window.addEventListener('pointercancel', stopSheetHandleDrag)
+function suppressNonEditableSelection(event: Event) {
+  if (!isTextEditableTarget(event.target)) event.preventDefault()
 }
 
-function handleSheetHandleDrag(event: PointerEvent) {
-  if (!sheetDrag || event.pointerId !== sheetDrag.pointerId) return
-  const deltaY = event.clientY - sheetDrag.startY
-  if (deltaY < -26) {
-    setSheetExpanded(sheetDrag.kind, true)
-    sheetDrag.expanded = true
-    event.preventDefault()
-    return
-  }
-  if (deltaY > 34 && sheetDrag.expanded) {
-    setSheetExpanded(sheetDrag.kind, false)
-    sheetDrag.expanded = false
-    event.preventDefault()
-  }
+function isTextEditableTarget(target: EventTarget | null) {
+  let element: Element | null = null
+  if (target instanceof Element) element = target
+  else if (target instanceof Node) element = target.parentElement
+  return Boolean(element?.closest(TEXT_EDITABLE_SELECTOR))
 }
 
-function stopSheetHandleDrag() {
-  if (!sheetDrag) return
-  sheetDrag = null
-  window.removeEventListener('pointermove', handleSheetHandleDrag)
-  window.removeEventListener('pointerup', stopSheetHandleDrag)
-  window.removeEventListener('pointercancel', stopSheetHandleDrag)
-}
-
-function setSheetExpanded(kind: 'detail' | 'editor', expanded: boolean) {
-  if (kind === 'detail') detailSheetExpanded.value = expanded
-  else editorSheetExpanded.value = expanded
+function toggleSheetExpanded(kind: 'detail' | 'editor') {
+  if (kind === 'detail') detailSheetExpanded.value = !detailSheetExpanded.value
 }
 
 async function loadState() {
@@ -837,6 +836,7 @@ async function loadState() {
         vault.value = result.data.vault
         syncSettings(vault.value.settings)
         state.locked = false
+        applyAndroidAutofillSearch()
       } else if (state.hasVault) {
         if (state.locked && state.passwordless) shouldAutoUnlock = true
         else if (!state.locked) await loadUnlockedVault()
@@ -855,6 +855,12 @@ async function loadState() {
   }
 }
 
+async function loadAppInfo() {
+  const result = await api.getAppInfo()
+  const version = String(result.data?.version || '').trim()
+  if (result.ok && version) appVersion.value = version
+}
+
 async function createVault() {
   if (newPassword.value !== confirmPassword.value) return showFailToast('两次密码不一致')
   busy.value = true
@@ -865,6 +871,7 @@ async function createVault() {
   syncSettings(vault.value.settings)
   state.hasVault = true
   state.locked = false
+  applyAndroidAutofillSearch()
   showSuccessToast(result.data.migrated ? `已迁移 ${result.data.migrated} 条` : '保险库已创建')
 }
 
@@ -884,6 +891,7 @@ async function unlockWithPassword(candidate: string, silent = false) {
   syncSettings(vault.value.settings)
   state.locked = false
   password.value = ''
+  applyAndroidAutofillSearch()
   return true
 }
 
@@ -896,6 +904,7 @@ async function loadUnlockedVault() {
   vault.value = result.data
   syncSettings(vault.value.settings)
   state.locked = false
+  applyAndroidAutofillSearch()
   return true
 }
 
@@ -1057,6 +1066,14 @@ async function safeExit() {
 
 function openView(entry: VaultEntry) {
   if (entry.kind !== 'login') return
+  if (androidAutofillLaunch.value?.active) {
+    completeAndroidAutofill(entry)
+    return
+  }
+  showEntryDetail(entry)
+}
+
+function showEntryDetail(entry: VaultEntry) {
   selectedEntry.value = entry
   showPassword.value = false
   totpCode.value = ''
@@ -1248,6 +1265,13 @@ function formatUpdateProgress(progress: AppUpdateProgress) {
   return progress.message || '正在检查更新'
 }
 
+function resetAndroidInstallBusy() {
+  if (updateBusy.value === 'apply' && updatePlatform.value === 'android') {
+    updateBusy.value = ''
+    updateStatus.value = downloadedUpdatePath.value ? '安装未完成，可再次打开安装器' : updateStatus.value
+  }
+}
+
 async function applyAppUpdate() {
   if (updateBusy.value || !downloadedUpdatePath.value) return
   const isAndroidUpdate = updatePlatform.value === 'android'
@@ -1256,7 +1280,7 @@ async function applyAppUpdate() {
       title: isAndroidUpdate ? '安装 Android 更新' : '安装更新',
       message: isAndroidUpdate
         ? '将打开系统安装器。Android 会要求你确认安装，安装完成后重新打开应用即可。继续吗？'
-        : '应用会关闭，后台更新脚本会替换程序文件并重新启动。继续吗？',
+        : '将临时关闭浏览器插件 Host，关闭当前桌面端，覆盖当前安装目录里的程序文件，然后自动重启。更新脚本只会清理更新缓存目录，不会删除保险库数据。继续吗？',
       confirmButtonText: isAndroidUpdate ? '打开安装器' : '安装并重启',
       confirmButtonColor: '#ee0a24'
     })
@@ -1279,6 +1303,9 @@ async function applyAppUpdate() {
   }
   updateStatus.value = isAndroidUpdate ? '已打开系统安装器' : '正在关闭并安装更新'
   showSuccessToast(isAndroidUpdate ? '请在系统安装器中确认' : '正在安装更新')
+  if (isAndroidUpdate || result.data?.willRestart === false) {
+    updateBusy.value = ''
+  }
 }
 
 async function saveSettings() {
@@ -1326,6 +1353,50 @@ async function loadPluginListenerState() {
 async function loadAndroidAutofillState() {
   const result = await api.getAndroidAutofillState()
   if (result.ok && result.data) androidAutofill.value = result.data
+}
+
+async function loadAndroidAutofillLaunchContext() {
+  const result = await androidBridgeCall<AndroidAutofillLaunchContext>('getAutofillLaunchContext')
+  if (!result.ok || !result.data?.active) return
+  androidAutofillLaunch.value = result.data
+  applyAndroidAutofillSearch()
+}
+
+function applyAndroidAutofillSearch() {
+  const context = androidAutofillLaunch.value
+  if (!context?.active) return
+  const term = String(context.searchTerm || context.target || '').trim()
+  if (!term) return
+  keyword.value = term
+  searchOpen.value = true
+  dragMode.value = false
+  detailOpen.value = false
+  drawerOpen.value = false
+}
+
+async function completeAndroidAutofill(entry: VaultEntry) {
+  const result = await androidBridgeCall<{ filled: boolean }>('completeAutofillWithEntry', entry.id)
+  if (!result.ok) {
+    androidAutofillLaunch.value = null
+    showFailToast(result.message || '自动填充失败')
+    showEntryDetail(entry)
+    return
+  }
+  showSuccessToast('已发送到自动填充')
+}
+
+async function androidBridgeCall<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
+  const nativeApi = window.androidPasswordApi
+  if (!nativeApi?.[method]) return { ok: false, code: 'ANDROID_API_NOT_READY', message: 'Android 本地 API 未就绪。' }
+  try {
+    return JSON.parse(String(nativeApi[method](...args))) as ApiResult<T>
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'ANDROID_API_ERROR',
+      message: error instanceof Error ? error.message : String(error)
+    }
+  }
 }
 
 async function openAndroidAutofillSettings() {
@@ -1819,6 +1890,11 @@ function defaultTheme(): ThemeMode {
 function applyTheme() {
   document.documentElement.dataset.theme = theme.value
   localStorage.setItem('mypwdmg.theme', theme.value)
+  syncAndroidSystemBarsTheme()
+}
+
+function syncAndroidSystemBarsTheme() {
+  androidBridgeCall('setSystemBarsTheme', theme.value)
 }
 
 function setTheme(next: ThemeMode) {
@@ -1915,6 +1991,7 @@ function toggleSearch() {
   }
   dragMode.value = false
   searchOpen.value = true
+  nextTick(() => searchInput.value?.focus?.())
 }
 
 function openDrawer() {

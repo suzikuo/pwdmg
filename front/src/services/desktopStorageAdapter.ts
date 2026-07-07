@@ -1,4 +1,4 @@
-import type { ApiResult, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, PluginListenerState } from '../types'
+import type { ApiResult, AppInfo, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, PluginListenerState } from '../types'
 import { fail, ok } from './apiTypes'
 import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
 
@@ -7,6 +7,7 @@ const pywebviewWaitMs = import.meta.env.DEV ? 600 : 15000
 let pyApiReadyPromise: Promise<ReturnType<typeof pyApi>> | null = null
 
 export const desktopStorageAdapter: VaultStorageAdapter = {
+  getAppInfo: () => call<AppInfo>('getAppInfo'),
   getStorageState: () => call<StorageState>('getStorageState'),
   readVaultEnvelope: () => call<string>('readVaultEnvelope'),
   writeVaultEnvelope: (envelopeText, protectBackup = false) => call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup),

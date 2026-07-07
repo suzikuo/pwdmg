@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -15,6 +16,7 @@ from pwdmg_core.paths import (
     VAULT_FILE,
     ensure_app_dir,
 )
+from pwdmg_core.version import APP_VERSION
 
 _desktop_window: webview.Window | None = None
 _desktop_state: "DesktopWindowState | None" = None
@@ -78,6 +80,16 @@ class DesktopPasswordManagerApi:
         if self._api is None:
             return self._call_result(lightweight_storage_state)
         return self.api.getStorageState()
+
+    def getAppInfo(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "data": {
+                "version": APP_VERSION,
+                "platform": "desktop",
+                "packaged": bool(getattr(sys, "frozen", False)),
+            },
+        }
 
     def readVaultEnvelope(self) -> dict[str, Any]:
         return self.api.readVaultEnvelope()
@@ -187,10 +199,17 @@ class DesktopPasswordManagerApi:
             state = _desktop_state
             if window is not None and state is not None:
                 state.save_window(window)
-            if window is not None:
-                timer = threading.Timer(0.2, window.destroy)
-                timer.daemon = True
-                timer.start()
+
+            def exit_for_update() -> None:
+                try:
+                    if window is not None:
+                        window.destroy()
+                finally:
+                    os._exit(0)
+
+            timer = threading.Timer(0.2, exit_for_update)
+            timer.daemon = True
+            timer.start()
             return {"ok": True, "data": data}
         except Exception as exc:
             return {"ok": False, "code": "UPDATE_FAILED", "message": str(exc)}

@@ -58,6 +58,24 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
+    public String getAppInfo() {
+        return result(() -> new JSONObject()
+            .put("version", BuildConfig.VERSION_NAME)
+            .put("versionCode", BuildConfig.VERSION_CODE)
+            .put("platform", "android"));
+    }
+
+    @JavascriptInterface
+    public String setSystemBarsTheme(String theme) {
+        return result(() -> {
+            if (activity instanceof MainActivity) {
+                activity.runOnUiThread(() -> ((MainActivity) activity).applySystemBarsTheme(theme));
+            }
+            return new JSONObject().put("theme", theme == null ? "" : theme);
+        });
+    }
+
+    @JavascriptInterface
     public String readVaultEnvelope() {
         return result(() -> store.readVaultEnvelope());
     }
@@ -92,6 +110,7 @@ public final class AndroidPasswordBridge {
 
     private void checkAndHandleAutofillAuth() {
         if (!(activity instanceof MainActivity)) return;
+        if (activity.getIntent().getBooleanExtra(MainActivity.EXTRA_AUTOFILL_PICKER, false)) return;
         AssistStructure structure = ((MainActivity) activity).getAutofillStructure();
         if (structure == null) return;
 
@@ -472,6 +491,39 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
+    public String getAutofillLaunchContext() {
+        return result(this::autofillLaunchContext);
+    }
+
+    @JavascriptInterface
+    public String completeAutofillWithEntry(String entryId) {
+        return result(() -> {
+            if (!activity.getIntent().getBooleanExtra(MainActivity.EXTRA_AUTOFILL_PICKER, false)) {
+                throw new IllegalStateException("Not an autofill picker launch");
+            }
+            PwdAutofillService.LoginFields fields = autofillFieldsFromIntent(activity.getIntent());
+            if (!fields.hasFillableFields()) {
+                throw new IllegalStateException("No fillable fields");
+            }
+
+            JSONObject payload = store.getVault();
+            JSONObject fill = store.getFillPayloadFromPayload(payload, entryId);
+            JSONObject match = findAutofillMatch(payload, fields, entryId);
+            if (match == null) match = fill;
+            Dataset dataset = PwdAutofillService.buildDataset(activity, fields, match, fill, PwdAutofillService.labelFor(match));
+            if (dataset == null) {
+                throw new IllegalStateException("No dataset was built");
+            }
+
+            Intent result = new Intent();
+            result.putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, dataset);
+            activity.setResult(Activity.RESULT_OK, result);
+            activity.runOnUiThread(activity::finish);
+            return new JSONObject().put("filled", true);
+        });
+    }
+
+    @JavascriptInterface
     public String generateTotp(String entryId) {
         return result(() -> store.generateTotp(entryId));
     }
@@ -569,6 +621,49 @@ public final class AndroidPasswordBridge {
             .put("enabled", enabled)
             .put("serviceName", new ComponentName(activity, PwdAutofillService.class).flattenToString())
             .put("settingsAvailable", supported);
+    }
+
+    private JSONObject autofillLaunchContext() throws Exception {
+        Intent intent = activity.getIntent();
+        boolean active = intent.getBooleanExtra(MainActivity.EXTRA_AUTOFILL_PICKER, false);
+        if (!active) return new JSONObject().put("active", false);
+        PwdAutofillService.LoginFields fields = autofillFieldsFromIntent(intent);
+        String target = intent.getStringExtra(AutofillPickerActivity.EXTRA_TARGET);
+        if (target == null || target.trim().isEmpty()) target = fields.hostnameOrPackage();
+        boolean includeAll = intent.getBooleanExtra(AutofillPickerActivity.EXTRA_INCLUDE_ALL, fields.shouldFallbackToAllMatches());
+        boolean targetIsOnlyBrowserPackage = includeAll && (fields.hostname == null || fields.hostname.trim().isEmpty());
+        return new JSONObject()
+            .put("active", true)
+            .put("target", target)
+            .put("searchTerm", targetIsOnlyBrowserPackage ? "" : PwdAutofillService.searchTermForTarget(target))
+            .put("includeAll", includeAll);
+    }
+
+    private PwdAutofillService.LoginFields autofillFieldsFromIntent(Intent intent) {
+        PwdAutofillService.LoginFields fields = new PwdAutofillService.LoginFields();
+        fields.hostname = intent.getStringExtra(AutofillPickerActivity.EXTRA_HOSTNAME);
+        fields.targetPackageName = intent.getStringExtra(AutofillPickerActivity.EXTRA_TARGET_PACKAGE);
+        fields.usernameId = (AutofillId) intent.getParcelableExtra(AutofillPickerActivity.EXTRA_USERNAME_ID);
+        fields.passwordId = (AutofillId) intent.getParcelableExtra(AutofillPickerActivity.EXTRA_PASSWORD_ID);
+        fields.otpId = (AutofillId) intent.getParcelableExtra(AutofillPickerActivity.EXTRA_OTP_ID);
+        fields.usernameKind = intent.getStringExtra(AutofillPickerActivity.EXTRA_ACCOUNT_KIND);
+        if (fields.usernameKind == null || fields.usernameKind.trim().isEmpty()) {
+            fields.usernameKind = PwdAutofillService.ACCOUNT_KIND_GENERIC;
+        }
+        return fields;
+    }
+
+    private JSONObject findAutofillMatch(JSONObject payload, PwdAutofillService.LoginFields fields, String entryId) throws Exception {
+        Intent intent = activity.getIntent();
+        String target = intent.getStringExtra(AutofillPickerActivity.EXTRA_TARGET);
+        if (target == null || target.trim().isEmpty()) target = fields.hostnameOrPackage();
+        boolean includeAll = intent.getBooleanExtra(AutofillPickerActivity.EXTRA_INCLUDE_ALL, fields.shouldFallbackToAllMatches());
+        JSONArray matches = store.queryMatchesFromPayload(payload, target, includeAll);
+        for (int index = 0; index < matches.length(); index += 1) {
+            JSONObject match = matches.getJSONObject(index);
+            if (entryId.equals(match.optString("id"))) return match;
+        }
+        return null;
     }
 
     private String result(BridgeCall call) {

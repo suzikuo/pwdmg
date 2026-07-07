@@ -16,7 +16,8 @@ from .totp import generate_totp
 from .vault_index import VaultIndex
 
 
-SESSION_SECONDS = 10 * 60
+SESSION_SECONDS = 0
+UNLOCKED_EXPIRES_AT = 253402300799
 MAX_LOCAL_IMPORT_BACKUPS = 5
 LOCAL_IMPORT_BACKUP_PREFIX = "vault-before-cloud-download-"
 LOCAL_IMPORT_BACKUP_SUFFIX = ".json"
@@ -388,10 +389,15 @@ class VaultService:
             return 0
 
     def _is_unlocked(self) -> bool:
-        return self._payload is not None and self._key is not None and time.time() < self._expires_at
+        if self._payload is None or self._key is None:
+            return False
+        return self.session_seconds <= 0 or time.time() < self._expires_at
 
     def _refresh_session(self) -> None:
-        self._expires_at = time.time() + self.session_seconds
+        if self.session_seconds <= 0:
+            self._expires_at = float(UNLOCKED_EXPIRES_AT)
+        else:
+            self._expires_at = time.time() + self.session_seconds
 
     def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized = {

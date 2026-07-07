@@ -8,7 +8,7 @@ import { cloneVaultPayload, defaultVaultPayload, normalizeVaultPayload, nowSecon
 import { decryptPayload, decryptPayloadWithKey, encryptPayload, encryptPayloadWithKey, validateEnvelope, type VaultKey } from './vaultCrypto'
 import { webStorageAdapter } from './webStorageAdapter'
 
-const SESSION_SECONDS = 10 * 60
+const UNLOCKED_EXPIRES_AT = Number.MAX_SAFE_INTEGER
 
 let payload: VaultPayload | null = null
 let vaultKey: VaultKey | null = null
@@ -16,6 +16,7 @@ let passwordless = false
 let expiresAt = 0
 
 export const api: PasswordManagerApiAdapter = {
+  getAppInfo: () => selectedStorage().getAppInfo(),
   getStartupData: () => getStartupData(),
   getState: () => nativeVaultCall('getState', () => guard(getState)),
   createVault: (password, importLegacy) => nativeVaultCall('createVault', () => guard(() => createVault(password, importLegacy)), password, importLegacy),
@@ -223,11 +224,11 @@ function storageMode() {
 }
 
 function isUnlocked() {
-  return Boolean(payload && vaultKey && Date.now() < expiresAt)
+  return Boolean(payload && vaultKey && expiresAt > 0)
 }
 
 function refreshSession() {
-  expiresAt = Date.now() + SESSION_SECONDS * 1000
+  expiresAt = UNLOCKED_EXPIRES_AT
 }
 
 async function cacheNativeSession(password: string) {

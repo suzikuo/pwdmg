@@ -3,6 +3,10 @@ const REQUEST_TIMEOUT_MS = 15000
 const SAVE_CAPTURE_TTL_MS = 5 * 60 * 1000
 const QUERY_CACHE_TTL_MS = 8000
 const QUERY_CACHE_MAX = 64
+const CONTEXT_MENU_SHOW_PANEL_ID = 'mypwdmg-show-panel'
+const LEGACY_AUTO_FILL_SAVE_ENABLED_KEY = 'autoFillSaveEnabled'
+const AUTO_FILL_ENABLED_KEY = 'autoFillEnabled'
+const AUTO_SAVE_ENABLED_KEY = 'autoSaveEnabled'
 
 let port = null
 let nextId = 1
@@ -60,7 +64,7 @@ function nativeCall(method, params = {}) {
 
 async function refreshActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-  if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: 'MYPWDMG_REFRESH' }).catch(() => {})
+  if (tab?.id) sendMessageToTab(tab.id, { type: 'MYPWDMG_REFRESH' }).catch(() => {})
 }
 
 function prunePendingCaptures() {
@@ -92,6 +96,74 @@ function clearQueryCache() {
   queryCacheVersion += 1
   queryCache.clear()
   inflightQueryMatches.clear()
+}
+
+function storageGet(defaults) {
+  return new Promise((resolve) => chrome.storage.local.get(defaults, resolve))
+}
+
+function storageSet(values) {
+  return new Promise((resolve) => chrome.storage.local.set(values, resolve))
+}
+
+async function getAutoSettings() {
+  const values = await storageGet({
+    [LEGACY_AUTO_FILL_SAVE_ENABLED_KEY]: true,
+    [AUTO_FILL_ENABLED_KEY]: null,
+    [AUTO_SAVE_ENABLED_KEY]: null
+  })
+  const legacyEnabled = values[LEGACY_AUTO_FILL_SAVE_ENABLED_KEY] !== false
+  return {
+    autoFillEnabled: values[AUTO_FILL_ENABLED_KEY] === null ? legacyEnabled : values[AUTO_FILL_ENABLED_KEY] !== false,
+    autoSaveEnabled: values[AUTO_SAVE_ENABLED_KEY] === null ? legacyEnabled : values[AUTO_SAVE_ENABLED_KEY] !== false
+  }
+}
+
+async function setAutoSettings(next = {}) {
+  const current = await getAutoSettings()
+  const values = {
+    [AUTO_FILL_ENABLED_KEY]: next.autoFillEnabled === undefined ? current.autoFillEnabled : next.autoFillEnabled !== false,
+    [AUTO_SAVE_ENABLED_KEY]: next.autoSaveEnabled === undefined ? current.autoSaveEnabled : next.autoSaveEnabled !== false
+  }
+  await storageSet(values)
+  const settings = await getAutoSettings()
+  broadcastAutoSettings(settings).catch(() => {})
+  return settings
+}
+
+async function broadcastAutoSettings(settings = null) {
+  const nextSettings = settings || await getAutoSettings()
+  const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] })
+  await Promise.all(tabs.map((tab) => (
+    tab?.id
+      ? sendMessageToTab(tab.id, { type: 'MYPWDMG_AUTO_SETTINGS_CHANGED', settings: nextSettings }).catch(() => {})
+      : Promise.resolve()
+  )))
+}
+
+function receivingEndMissing(error) {
+  return /receiving end does not exist|could not establish connection/i.test(String(error?.message || error || ''))
+}
+
+async function ensureContentScript(tabId) {
+  await chrome.scripting.insertCSS({
+    target: { tabId },
+    files: ['content.css']
+  }).catch(() => {})
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content.js']
+  })
+}
+
+async function sendMessageToTab(tabId, message) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message)
+  } catch (error) {
+    if (!receivingEndMissing(error)) throw error
+    await ensureContentScript(tabId)
+    return chrome.tabs.sendMessage(tabId, message)
+  }
 }
 
 function newToken() {
@@ -132,7 +204,7 @@ async function activeTabId() {
 
 function notifyTabCaptureReady(tabId) {
   if (!tabId) return
-  chrome.tabs.sendMessage(tabId, { type: 'MYPWDMG_CAPTURE_READY' }).catch(() => {})
+  sendMessageToTab(tabId, { type: 'MYPWDMG_CAPTURE_READY' }).catch(() => {})
 }
 
 function queryCacheKey(hostname = '') {
@@ -289,6 +361,42 @@ function dismissPreparedCapture(token) {
   return { ok: true, data: null }
 }
 
+function setupContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: CONTEXT_MENU_SHOW_PANEL_ID,
+      title: 'My Password 页面弹窗',
+      contexts: ['editable', 'page', 'selection'],
+      documentUrlPatterns: ['http://*/*', 'https://*/*']
+    })
+  })
+}
+
+async function showPanelInTab(tabId = 0, source = 'contextMenu') {
+  if (!tabId) return
+  await sendMessageToTab(tabId, { type: 'MYPWDMG_SHOW_PANEL', source }).catch(() => {})
+}
+
+async function showPanelInActiveTab(source = 'command') {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  await showPanelInTab(tab?.id || 0, source)
+}
+
+chrome.runtime.onInstalled.addListener(setupContextMenus)
+chrome.runtime.onStartup?.addListener(setupContextMenus)
+setupContextMenus()
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === CONTEXT_MENU_SHOW_PANEL_ID) {
+    showPanelInTab(tab?.id || 0, 'contextMenu')
+    return
+  }
+})
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'show-panel') showPanelInActiveTab('command').catch(() => {})
+})
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ;(async () => {
     if (message?.type === 'MYPWDMG_QUERY_MATCHES') {
@@ -316,6 +424,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return
     }
     if (message?.type === 'MYPWDMG_PREPARE_CAPTURE') {
+      const settings = await getAutoSettings()
+      if (!settings.autoSaveEnabled) {
+        sendResponse({ ok: true, data: { shouldPrompt: false } })
+        return
+      }
       sendResponse(await prepareCapturedLogin(message.capture || {}, sender?.tab?.id || 0))
       return
     }
@@ -324,6 +437,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return
     }
     if (message?.type === 'MYPWDMG_TAKE_SAVE_PROMPT') {
+      const settings = await getAutoSettings()
+      if (!settings.autoSaveEnabled) {
+        sendResponse({ ok: true, data: null })
+        return
+      }
       sendResponse(takePreparedPrompt(sender?.tab?.id || 0, message.hostname || ''))
       return
     }
@@ -337,6 +455,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === 'MYPWDMG_STATE') {
       sendResponse(await nativeCall('getState'))
+      return
+    }
+    if (message?.type === 'MYPWDMG_GET_AUTO_SETTINGS') {
+      sendResponse({ ok: true, data: await getAutoSettings() })
+      return
+    }
+    if (message?.type === 'MYPWDMG_SET_AUTO_SETTINGS') {
+      sendResponse({ ok: true, data: await setAutoSettings(message.settings || {}) })
       return
     }
     sendResponse({ ok: false, code: 'UNKNOWN_MESSAGE', message: 'Unknown extension message.' })
