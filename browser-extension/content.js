@@ -41,6 +41,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let contextMenuInputAt = 0
   let autoFillEnabled = true
   let autoSaveEnabled = true
+  let manualPanelShortcut = parseShortcut(SHOW_PANEL_SHORTCUT)
   const completedSaveTokens = new Set()
   const extensionFilledPasswords = new Map()
 
@@ -86,6 +87,56 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms))
+  }
+
+  function parseShortcut(value) {
+    const parts = String(value || SHOW_PANEL_SHORTCUT).split('+').map((part) => part.trim()).filter(Boolean)
+    const shortcut = {
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+      code: ''
+    }
+    for (const part of parts) {
+      const lower = part.toLowerCase()
+      if (lower === 'ctrl' || lower === 'control') shortcut.ctrlKey = true
+      else if (lower === 'alt' || lower === 'option') shortcut.altKey = true
+      else if (lower === 'shift') shortcut.shiftKey = true
+      else if (lower === 'meta' || lower === 'cmd' || lower === 'command' || lower === 'win') shortcut.metaKey = true
+      else shortcut.code = shortcutCode(part)
+    }
+    if (!shortcut.code || (!shortcut.ctrlKey && !shortcut.altKey && !shortcut.metaKey)) {
+      return parseShortcut(SHOW_PANEL_SHORTCUT)
+    }
+    return shortcut
+  }
+
+  function shortcutCode(value) {
+    const key = String(value || '').trim()
+    if (/^[a-z]$/i.test(key)) return `Key${key.toUpperCase()}`
+    if (/^[0-9]$/.test(key)) return `Digit${key}`
+    if (/^F([1-9]|1[0-2])$/i.test(key)) return key.toUpperCase()
+    const aliases = {
+      Space: 'Space',
+      Escape: 'Escape',
+      Esc: 'Escape',
+      Enter: 'Enter',
+      Return: 'Enter',
+      Tab: 'Tab',
+      Backquote: 'Backquote',
+      Minus: 'Minus',
+      Equal: 'Equal',
+      Comma: 'Comma',
+      Period: 'Period',
+      Slash: 'Slash',
+      Semicolon: 'Semicolon',
+      Quote: 'Quote',
+      BracketLeft: 'BracketLeft',
+      BracketRight: 'BracketRight',
+      Backslash: 'Backslash'
+    }
+    return aliases[key] || ''
   }
 
   function fieldId(input) {
@@ -372,6 +423,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   function applyAutoSettings(settings = {}) {
     autoFillEnabled = settings.autoFillEnabled !== false
     autoSaveEnabled = settings.autoSaveEnabled !== false
+    manualPanelShortcut = parseShortcut(settings.manualPanelShortcut || SHOW_PANEL_SHORTCUT)
     if (!autoFillEnabled && !panelManualMode) removeRoot()
   }
 
@@ -905,7 +957,11 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function isShowPanelShortcut(event) {
-    return event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyP'
+    return event.altKey === manualPanelShortcut.altKey
+      && event.shiftKey === manualPanelShortcut.shiftKey
+      && event.ctrlKey === manualPanelShortcut.ctrlKey
+      && event.metaKey === manualPanelShortcut.metaKey
+      && event.code === manualPanelShortcut.code
   }
 
   function handleShowPanelShortcut(event) {

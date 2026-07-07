@@ -9,12 +9,16 @@ const refreshButton = document.getElementById('refreshButton')
 const showPanelButton = document.getElementById('showPanelButton')
 const autoFillToggle = document.getElementById('autoFillToggle')
 const autoSaveToggle = document.getElementById('autoSaveToggle')
+const shortcutInput = document.getElementById('shortcutInput')
+const resetShortcutButton = document.getElementById('resetShortcutButton')
 const matchListEl = document.getElementById('matchList')
 
+const DEFAULT_MANUAL_PANEL_SHORTCUT = 'Alt+T'
 let activeTab = null
 let activeHost = ''
 let autoFillEnabled = true
 let autoSaveEnabled = true
+let manualPanelShortcut = DEFAULT_MANUAL_PANEL_SHORTCUT
 
 function send(message) {
   return new Promise((resolve) => {
@@ -88,8 +92,11 @@ async function loadAutoSettings() {
   const response = await send({ type: 'MYPWDMG_GET_AUTO_SETTINGS' })
   autoFillEnabled = response?.data?.autoFillEnabled !== false
   autoSaveEnabled = response?.data?.autoSaveEnabled !== false
+  manualPanelShortcut = response?.data?.manualPanelShortcut || DEFAULT_MANUAL_PANEL_SHORTCUT
   autoFillToggle.checked = autoFillEnabled
   autoSaveToggle.checked = autoSaveEnabled
+  shortcutInput.value = manualPanelShortcut
+  updateShowPanelShortcutLabel()
 }
 
 async function setAutoSettings(nextSettings) {
@@ -102,8 +109,11 @@ async function setAutoSettings(nextSettings) {
   }
   autoFillEnabled = response.data?.autoFillEnabled !== false
   autoSaveEnabled = response.data?.autoSaveEnabled !== false
+  manualPanelShortcut = response.data?.manualPanelShortcut || DEFAULT_MANUAL_PANEL_SHORTCUT
   autoFillToggle.checked = autoFillEnabled
   autoSaveToggle.checked = autoSaveEnabled
+  shortcutInput.value = manualPanelShortcut
+  updateShowPanelShortcutLabel()
   statusEl.textContent = `自动填充${autoFillEnabled ? '已开启' : '已关闭'}，自动保存${autoSaveEnabled ? '已开启' : '已关闭'}。`
   await refreshActiveTab()
 }
@@ -111,6 +121,47 @@ async function setAutoSettings(nextSettings) {
 function setBadge(text, state) {
   stateBadgeEl.textContent = text
   stateBadgeEl.dataset.state = state
+}
+
+function updateShowPanelShortcutLabel() {
+  showPanelButton.innerHTML = `页面弹窗 <span>${escapeHtml(manualPanelShortcut)}</span>`
+}
+
+function shortcutFromEvent(event) {
+  const key = shortcutKeyFromEvent(event)
+  if (!key) return ''
+  const parts = []
+  if (event.ctrlKey) parts.push('Ctrl')
+  if (event.altKey) parts.push('Alt')
+  if (event.shiftKey) parts.push('Shift')
+  if (event.metaKey) parts.push('Meta')
+  parts.push(key)
+  if (!event.ctrlKey && !event.altKey && !event.metaKey) return ''
+  return parts.join('+')
+}
+
+function shortcutKeyFromEvent(event) {
+  if (/^Key[A-Z]$/.test(event.code)) return event.code.slice(3)
+  if (/^Digit[0-9]$/.test(event.code)) return event.code.slice(5)
+  if (/^F([1-9]|1[0-2])$/.test(event.code)) return event.code
+  const aliases = {
+    Space: 'Space',
+    Escape: 'Escape',
+    Enter: 'Enter',
+    Tab: 'Tab',
+    Backquote: 'Backquote',
+    Minus: 'Minus',
+    Equal: 'Equal',
+    Comma: 'Comma',
+    Period: 'Period',
+    Slash: 'Slash',
+    Semicolon: 'Semicolon',
+    Quote: 'Quote',
+    BracketLeft: 'BracketLeft',
+    BracketRight: 'BracketRight',
+    Backslash: 'Backslash'
+  }
+  return aliases[event.code] || ''
 }
 
 function showLocked(message = '请输入主密码解锁插件。') {
@@ -287,6 +338,30 @@ autoFillToggle.addEventListener('change', async () => {
 
 autoSaveToggle.addEventListener('change', async () => {
   await setAutoSettings({ autoSaveEnabled: autoSaveToggle.checked })
+})
+
+shortcutInput.addEventListener('focus', () => {
+  shortcutInput.value = '按下组合键'
+})
+
+shortcutInput.addEventListener('blur', () => {
+  shortcutInput.value = manualPanelShortcut
+})
+
+shortcutInput.addEventListener('keydown', async (event) => {
+  event.preventDefault()
+  event.stopPropagation()
+  const shortcut = shortcutFromEvent(event)
+  if (!shortcut) {
+    shortcutInput.value = '需要 Ctrl/Alt/Meta + 按键'
+    return
+  }
+  shortcutInput.value = shortcut
+  await setAutoSettings({ manualPanelShortcut: shortcut })
+})
+
+resetShortcutButton.addEventListener('click', async () => {
+  await setAutoSettings({ manualPanelShortcut: DEFAULT_MANUAL_PANEL_SHORTCUT })
 })
 
 showPanelButton.addEventListener('click', async () => {

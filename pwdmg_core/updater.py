@@ -438,8 +438,19 @@ try {{
     throw
 }}
 """
+        script = sanitize_powershell_variable_colons(script)
         script_path.write_text(script, encoding="utf-8")
         return script_path
+
+
+def sanitize_powershell_variable_colons(script: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name.lower() in {"env", "script", "global", "local", "private", "using", "variable"}:
+            return match.group(0)
+        return f"${{{name}}}:"
+
+    return re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*):", replace, script)
 
 
 def fetch_url(url: str, max_bytes: int) -> bytes:

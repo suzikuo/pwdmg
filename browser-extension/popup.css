@@ -342,6 +342,44 @@ button:hover {
   accent-color: #5eead4;
 }
 
+.shortcut-setting {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(94, 234, 212, 0.14);
+  border-radius: 8px;
+  background: rgba(15, 23, 28, 0.46);
+}
+
+.shortcut-setting label {
+  color: #cfe7ea;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 58px;
+  gap: 7px;
+}
+
+.shortcut-row input {
+  height: 32px;
+  cursor: pointer;
+}
+
+.shortcut-row button {
+  height: 32px;
+  font-size: 11.5px;
+}
+
+.shortcut-setting p {
+  margin: 0;
+  color: #7f98a2;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .popup-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

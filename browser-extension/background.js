@@ -7,6 +7,8 @@ const CONTEXT_MENU_SHOW_PANEL_ID = 'mypwdmg-show-panel'
 const LEGACY_AUTO_FILL_SAVE_ENABLED_KEY = 'autoFillSaveEnabled'
 const AUTO_FILL_ENABLED_KEY = 'autoFillEnabled'
 const AUTO_SAVE_ENABLED_KEY = 'autoSaveEnabled'
+const MANUAL_PANEL_SHORTCUT_KEY = 'manualPanelShortcut'
+const DEFAULT_MANUAL_PANEL_SHORTCUT = 'Alt+T'
 
 let port = null
 let nextId = 1
@@ -106,16 +108,70 @@ function storageSet(values) {
   return new Promise((resolve) => chrome.storage.local.set(values, resolve))
 }
 
+function normalizeShortcut(value, fallback = DEFAULT_MANUAL_PANEL_SHORTCUT) {
+  const raw = String(value || '').trim()
+  const parts = raw.split('+').map((part) => part.trim()).filter(Boolean)
+  let ctrl = false
+  let alt = false
+  let shift = false
+  let meta = false
+  let key = ''
+
+  for (const part of parts) {
+    const lower = part.toLowerCase()
+    if (lower === 'ctrl' || lower === 'control') ctrl = true
+    else if (lower === 'alt' || lower === 'option') alt = true
+    else if (lower === 'shift') shift = true
+    else if (lower === 'meta' || lower === 'cmd' || lower === 'command' || lower === 'win') meta = true
+    else key = normalizeShortcutKey(part)
+  }
+
+  if (!key || (!ctrl && !alt && !meta)) return fallback
+  return [
+    ctrl ? 'Ctrl' : '',
+    alt ? 'Alt' : '',
+    shift ? 'Shift' : '',
+    meta ? 'Meta' : '',
+    key
+  ].filter(Boolean).join('+')
+}
+
+function normalizeShortcutKey(value) {
+  const key = String(value || '').trim()
+  if (/^[a-z]$/i.test(key)) return key.toUpperCase()
+  if (/^[0-9]$/.test(key)) return key
+  const lower = key.toLowerCase()
+  if (/^f([1-9]|1[0-2])$/.test(lower)) return lower.toUpperCase()
+  if (lower === 'space') return 'Space'
+  if (lower === 'escape' || lower === 'esc') return 'Escape'
+  if (lower === 'enter' || lower === 'return') return 'Enter'
+  if (lower === 'tab') return 'Tab'
+  if (lower === 'backquote') return 'Backquote'
+  if (lower === 'minus') return 'Minus'
+  if (lower === 'equal') return 'Equal'
+  if (lower === 'comma') return 'Comma'
+  if (lower === 'period') return 'Period'
+  if (lower === 'slash') return 'Slash'
+  if (lower === 'semicolon') return 'Semicolon'
+  if (lower === 'quote') return 'Quote'
+  if (lower === 'bracketleft') return 'BracketLeft'
+  if (lower === 'bracketright') return 'BracketRight'
+  if (lower === 'backslash') return 'Backslash'
+  return ''
+}
+
 async function getAutoSettings() {
   const values = await storageGet({
     [LEGACY_AUTO_FILL_SAVE_ENABLED_KEY]: true,
     [AUTO_FILL_ENABLED_KEY]: null,
-    [AUTO_SAVE_ENABLED_KEY]: null
+    [AUTO_SAVE_ENABLED_KEY]: null,
+    [MANUAL_PANEL_SHORTCUT_KEY]: DEFAULT_MANUAL_PANEL_SHORTCUT
   })
   const legacyEnabled = values[LEGACY_AUTO_FILL_SAVE_ENABLED_KEY] !== false
   return {
     autoFillEnabled: values[AUTO_FILL_ENABLED_KEY] === null ? legacyEnabled : values[AUTO_FILL_ENABLED_KEY] !== false,
-    autoSaveEnabled: values[AUTO_SAVE_ENABLED_KEY] === null ? legacyEnabled : values[AUTO_SAVE_ENABLED_KEY] !== false
+    autoSaveEnabled: values[AUTO_SAVE_ENABLED_KEY] === null ? legacyEnabled : values[AUTO_SAVE_ENABLED_KEY] !== false,
+    manualPanelShortcut: normalizeShortcut(values[MANUAL_PANEL_SHORTCUT_KEY])
   }
 }
 
@@ -123,7 +179,10 @@ async function setAutoSettings(next = {}) {
   const current = await getAutoSettings()
   const values = {
     [AUTO_FILL_ENABLED_KEY]: next.autoFillEnabled === undefined ? current.autoFillEnabled : next.autoFillEnabled !== false,
-    [AUTO_SAVE_ENABLED_KEY]: next.autoSaveEnabled === undefined ? current.autoSaveEnabled : next.autoSaveEnabled !== false
+    [AUTO_SAVE_ENABLED_KEY]: next.autoSaveEnabled === undefined ? current.autoSaveEnabled : next.autoSaveEnabled !== false,
+    [MANUAL_PANEL_SHORTCUT_KEY]: next.manualPanelShortcut === undefined
+      ? current.manualPanelShortcut
+      : normalizeShortcut(next.manualPanelShortcut, current.manualPanelShortcut)
   }
   await storageSet(values)
   const settings = await getAutoSettings()

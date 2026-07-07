@@ -215,7 +215,7 @@
           <div class="brand-mark drawer-mark">PM</div>
           <div>
             <strong>My Password</strong>
-            <span>v{{ appVersion }} · {{ stats.logins }} 登录 · {{ stats.folders }} 分组</span>
+            <span>v{{ displayAppVersion }} · {{ stats.logins }} 登录 · {{ stats.folders }} 分组</span>
           </div>
         </div>
 
@@ -485,8 +485,9 @@ const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
 const DEFAULT_UPDATE_MANIFEST_URL = 'https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json'
 const VERSIONED_DEFAULT_MANIFEST_URL_PATTERN =
   /^https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/download\/[^/]+\/update-manifest\.json$/i
-const packagedAppVersion = String(import.meta.env.PACKAGE_VERSION || '0.0.0')
-const appVersion = ref(packagedAppVersion)
+const packagedAppVersion = String(import.meta.env.PACKAGE_VERSION || '').trim()
+const appVersion = ref('')
+const displayAppVersion = computed(() => appVersion.value || packagedAppVersion || '0.0.0')
 const UI_SCALE_BASE = 0.92
 const UI_SCALE_MIN = 0.5
 const UI_SCALE_MAX = 1.3
@@ -857,8 +858,12 @@ async function loadState() {
 
 async function loadAppInfo() {
   const result = await api.getAppInfo()
-  const version = String(result.data?.version || '').trim()
-  if (result.ok && version) appVersion.value = version
+  if (result.ok) syncAppVersion(result.data?.version)
+}
+
+function syncAppVersion(value: unknown) {
+  const version = String(value || '').trim()
+  if (version) appVersion.value = version
 }
 
 async function createVault() {
@@ -1212,6 +1217,7 @@ async function checkAppUpdate() {
       return
     }
     updateInfo.value = result.data
+    syncAppVersion(result.data.currentVersion)
     updateStatus.value = result.data.updateAvailable
       ? `发现新版本 ${result.data.latestVersion}`
       : '当前已是最新版本'
@@ -1237,6 +1243,7 @@ async function downloadAppUpdate() {
       return
     }
     updateInfo.value = result.data.update
+    syncAppVersion(result.data.update.currentVersion)
     downloadedUpdatePath.value = result.data.packagePath
     updateStatus.value = `更新包已下载并校验通过，大小 ${formatBytes(result.data.size)}`
     showSuccessToast('更新包已下载')
@@ -1998,6 +2005,7 @@ function openDrawer() {
   createMenuOpen.value = false
   moreMenuOpen.value = false
   drawerOpen.value = true
+  loadAppInfo()
   if (drawerSection.value === 'settings') loadPluginListenerState()
   loadAndroidAutofillState()
   if (!isDrawerWide.value) drawerDetailOpen.value = false
