@@ -28,6 +28,8 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $ReleaseModeSelectedInteractively = $false
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Show-Help {
     Write-Host "Usage:"
@@ -268,6 +270,9 @@ $ManifestPath = Join-Path $RootPath "release\update-manifest.json"
 $DefaultAndroidKeystore = Join-Path $RootPath "pwdmg-release.jks"
 $ShouldIncludeAndroid = -not $DesktopOnly
 $ShouldPublish = $PublishOnly -or -not $NoPublish
+$WindowsDesktopExcludedRelativePaths = @(
+    "_internal\webview\lib\pywebview-android.jar"
+)
 
 function Read-Text {
     param([string] $Path)
@@ -309,6 +314,49 @@ function Require-ReleaseFile {
     }
 }
 
+function New-ZipArchiveFromDirectory {
+    param(
+        [string] $SourceDir,
+        [string] $DestinationPath,
+        [string[]] $ExcludedRelativePaths = @()
+    )
+
+    $SourceFull = [System.IO.Path]::GetFullPath($SourceDir).TrimEnd("\")
+    $DestinationFull = [System.IO.Path]::GetFullPath($DestinationPath)
+    if ($DestinationFull.StartsWith($SourceFull + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Destination archive must not be inside source directory: $DestinationFull"
+    }
+    $DestinationParent = Split-Path -Parent $DestinationFull
+    if (-not (Test-Path -LiteralPath $DestinationParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $DestinationParent | Out-Null
+    }
+    if (Test-Path -LiteralPath $DestinationFull) {
+        Remove-Item -LiteralPath $DestinationFull -Force
+    }
+
+    $Archive = [System.IO.Compression.ZipFile]::Open(
+        $DestinationFull,
+        [System.IO.Compression.ZipArchiveMode]::Create
+    )
+    try {
+        Get-ChildItem -LiteralPath $SourceFull -Recurse -File | ForEach-Object {
+            $RelativePath = $_.FullName.Substring($SourceFull.Length).TrimStart("\")
+            if ($ExcludedRelativePaths -notcontains $RelativePath) {
+                $EntryName = $RelativePath -replace "\\", "/"
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $Archive,
+                    $_.FullName,
+                    $EntryName,
+                    [System.IO.Compression.CompressionLevel]::Optimal
+                ) | Out-Null
+            }
+        }
+    }
+    finally {
+        $Archive.Dispose()
+    }
+}
+
 function Ensure-DesktopArchive {
     if (Test-Path -LiteralPath $ArchivePath -PathType Leaf) {
         return
@@ -325,10 +373,7 @@ function Ensure-DesktopArchive {
     }
 
     Write-Host "Desktop archive was not produced by package_desktop.ps1; creating it from staged files."
-    if (-not (Test-Path -LiteralPath (Split-Path -Parent $ArchivePath))) {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $ArchivePath) | Out-Null
-    }
-    Compress-Archive -Path (Join-Path $DesktopStageDir "*") -DestinationPath $ArchivePath -Force
+    New-ZipArchiveFromDirectory $DesktopStageDir $ArchivePath $WindowsDesktopExcludedRelativePaths
     Require-ReleaseFile $ArchivePath
 }
 
@@ -474,6 +519,29 @@ function Resolve-KeytoolPath {
     return ""
 }
 
+function Test-AndroidKeystorePassword {
+    param([string] $StorePassword)
+
+    if (-not $StorePassword) {
+        return $false
+    }
+
+    $Keytool = Resolve-KeytoolPath
+    if (-not $Keytool) {
+        throw "keytool.exe was not found. Set JAVA_HOME to a JDK/JBR or install Java before building Android releases."
+    }
+
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Keytool -list -keystore $env:MYPWDMG_ANDROID_KEYSTORE -storepass $StorePassword > $null 2>&1
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+}
+
 function Get-AndroidKeystoreAliases {
     if (-not $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD) {
         return @()
@@ -555,6 +623,21 @@ function Ensure-AndroidSigningEnvironment {
 
     if (-not $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD -and -not [Console]::IsInputRedirected) {
         $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD = Read-SecretText "Android keystore password"
+    }
+    if (-not (Test-AndroidKeystorePassword $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD)) {
+        if ([Console]::IsInputRedirected) {
+            throw "Android keystore password is incorrect for $env:MYPWDMG_ANDROID_KEYSTORE. Set MYPWDMG_ANDROID_KEYSTORE_PASSWORD to the correct value and try again."
+        }
+
+        Write-Host "Android keystore password was rejected by keytool." -ForegroundColor Yellow
+        $RetryCount = 0
+        while ($RetryCount -lt 2 -and -not (Test-AndroidKeystorePassword $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD)) {
+            $RetryCount += 1
+            $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD = Read-SecretText "Android keystore password"
+        }
+        if (-not (Test-AndroidKeystorePassword $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD)) {
+            throw "Android keystore password is incorrect for $env:MYPWDMG_ANDROID_KEYSTORE."
+        }
     }
     Ensure-AndroidKeyAlias
     if (-not $env:MYPWDMG_ANDROID_KEY_PASSWORD -and -not [Console]::IsInputRedirected) {

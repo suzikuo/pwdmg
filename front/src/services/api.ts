@@ -26,6 +26,8 @@ export const api: PasswordManagerApiAdapter = {
   saveVault: (nextPayload) => nativeVaultCall('saveVault', () => guard(() => saveVault(nextPayload)), nextPayload),
   changePassword: (newPassword) => nativeVaultCall('changePassword', () => guard(() => changePassword(newPassword)), newPassword),
   exportVaultBackup: () => nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
+  exportVaultBackupForPayload: (nextPayload) => nativeVaultCall('exportVaultBackupForPayload', () => guard(() => exportVaultBackupForPayload(nextPayload)), nextPayload),
+  previewVaultBackup: (envelopeText) => nativeVaultCall('previewVaultBackup', () => guard(() => previewVaultBackup(envelopeText)), envelopeText),
   importVaultBackup: (envelopeText) => nativeVaultCall('importVaultBackup', () => guard(() => importVaultBackup(envelopeText)), envelopeText),
   getPluginListenerState: () => selectedStorage().getPluginListenerState(),
   enablePluginListener: (extensionId, browsers) => selectedStorage().enablePluginListener(extensionId, browsers),
@@ -62,7 +64,7 @@ function nativeVaultCall<T>(method: string, webFallback: () => Promise<ApiResult
 }
 
 function androidArgs(method: string, args: unknown[]) {
-  if (method === 'saveVault') return [JSON.stringify(args[0])]
+  if (method === 'saveVault' || method === 'exportVaultBackupForPayload') return [JSON.stringify(args[0])]
   return args
 }
 
@@ -163,6 +165,28 @@ async function exportVaultBackup(): Promise<VaultBackupExport> {
     vaultPath: unwrap(await selectedStorage().getStorageState()).vaultPath,
     updatedAt: nowSeconds()
   }
+}
+
+async function exportVaultBackupForPayload(nextPayload: VaultPayload): Promise<VaultBackupExport> {
+  await requirePayload()
+  if (!vaultKey) throw new Error('Vault is locked')
+  const normalized = normalizeVaultPayload({ ...nextPayload, updatedAt: nowSeconds() })
+  const envelope = await encryptPayloadWithKey(vaultKey, normalized)
+  envelope.passwordless = passwordless
+  return {
+    content: JSON.stringify(envelope, null, 2),
+    vaultPath: unwrap(await selectedStorage().getStorageState()).vaultPath,
+    updatedAt: normalized.updatedAt
+  }
+}
+
+async function previewVaultBackup(envelopeText: string): Promise<VaultPayload> {
+  await requirePayload()
+  if (!vaultKey) throw new Error('Vault is locked')
+  const envelope = validateEnvelope(JSON.parse(envelopeText))
+  const decrypted = await decryptPayloadWithKey(vaultKey, envelope)
+  refreshSession()
+  return cloneVaultPayload(normalizeVaultPayload(decrypted))
 }
 
 async function importVaultBackup(envelopeText: string): Promise<VaultBackupImport> {

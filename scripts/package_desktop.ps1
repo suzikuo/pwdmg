@@ -11,6 +11,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Show-Help {
     Write-Host "Usage: powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1 [options]"
@@ -51,6 +53,9 @@ $GuiDistDir = Join-Path $DistDir "My Password"
 $GuiExe = Join-Path $GuiDistDir "My Password.exe"
 $LegacyGuiExe = Join-Path $DistDir "My Password.exe"
 $OptionalHostExe = Join-Path $DistDir "My Password Host.exe"
+$WindowsDesktopExcludedRelativePaths = @(
+    "_internal\webview\lib\pywebview-android.jar"
+)
 
 function Assert-InRepo {
     param([string] $Path)
@@ -66,6 +71,78 @@ function Remove-InRepo {
     $Full = Assert-InRepo $Path
     if (Test-Path -LiteralPath $Full) {
         Remove-Item -LiteralPath $Full -Recurse -Force
+    }
+}
+
+function New-ZipArchiveFromDirectory {
+    param(
+        [string] $SourceDir,
+        [string] $DestinationPath,
+        [string[]] $ExcludedRelativePaths = @()
+    )
+
+    $SourceFull = [System.IO.Path]::GetFullPath($SourceDir).TrimEnd("\")
+    $DestinationFull = [System.IO.Path]::GetFullPath($DestinationPath)
+    if ($DestinationFull.StartsWith($SourceFull + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Destination archive must not be inside source directory: $DestinationFull"
+    }
+    $DestinationParent = Split-Path -Parent $DestinationFull
+    if (-not (Test-Path -LiteralPath $DestinationParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $DestinationParent | Out-Null
+    }
+    if (Test-Path -LiteralPath $DestinationFull) {
+        Remove-Item -LiteralPath $DestinationFull -Force
+    }
+
+    $Archive = [System.IO.Compression.ZipFile]::Open(
+        $DestinationFull,
+        [System.IO.Compression.ZipArchiveMode]::Create
+    )
+    try {
+        Get-ChildItem -LiteralPath $SourceFull -Recurse -File | ForEach-Object {
+            $RelativePath = $_.FullName.Substring($SourceFull.Length).TrimStart("\")
+            if ($ExcludedRelativePaths -notcontains $RelativePath) {
+                $EntryName = $RelativePath -replace "\\", "/"
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $Archive,
+                    $_.FullName,
+                    $EntryName,
+                    [System.IO.Compression.CompressionLevel]::Optimal
+                ) | Out-Null
+            }
+        }
+    }
+    finally {
+        $Archive.Dispose()
+    }
+}
+
+function Copy-DirectoryContents {
+    param(
+        [string] $SourceDir,
+        [string] $DestinationDir,
+        [string[]] $ExcludedRelativePaths = @()
+    )
+
+    $SourceFull = [System.IO.Path]::GetFullPath($SourceDir).TrimEnd("\")
+    $DestinationFull = [System.IO.Path]::GetFullPath($DestinationDir).TrimEnd("\")
+    Get-ChildItem -LiteralPath $SourceFull -Recurse -Force | ForEach-Object {
+        $RelativePath = $_.FullName.Substring($SourceFull.Length).TrimStart("\")
+        if ($ExcludedRelativePaths -notcontains $RelativePath) {
+            $TargetPath = Join-Path $DestinationFull $RelativePath
+            if ($_.PSIsContainer) {
+                if (-not (Test-Path -LiteralPath $TargetPath -PathType Container)) {
+                    New-Item -ItemType Directory -Path $TargetPath | Out-Null
+                }
+            }
+            else {
+                $TargetParent = Split-Path -Parent $TargetPath
+                if (-not (Test-Path -LiteralPath $TargetParent -PathType Container)) {
+                    New-Item -ItemType Directory -Path $TargetParent | Out-Null
+                }
+                Copy-Item -LiteralPath $_.FullName -Destination $TargetPath -Force
+            }
+        }
     }
 }
 
@@ -211,7 +288,7 @@ Invoke-Step "Staging desktop release" {
         New-Item -ItemType Directory -Path $ReleaseRoot | Out-Null
     }
     New-Item -ItemType Directory -Path $StageDir | Out-Null
-    Copy-Item -Path (Join-Path $GuiDistDir "*") -Destination $StageDir -Recurse -Force
+    Copy-DirectoryContents $GuiDistDir $StageDir $WindowsDesktopExcludedRelativePaths
     $IncludesHostExe = $IncludeNativeHost -and (Test-Path -LiteralPath $OptionalHostExe -PathType Leaf)
     if ($IncludesHostExe) {
         Copy-Item -LiteralPath $OptionalHostExe -Destination $StageDir -Force
@@ -246,7 +323,7 @@ if (-not $NoZip) {
         if (Test-Path -LiteralPath $ArchivePath) {
             Remove-Item -LiteralPath $ArchivePath -Force
         }
-        Compress-Archive -Path (Join-Path $StageDir "*") -DestinationPath $ArchivePath -Force
+        New-ZipArchiveFromDirectory $StageDir $ArchivePath $WindowsDesktopExcludedRelativePaths
         Require-File $ArchivePath "Release archive was not produced: $ArchivePath"
     }
 }

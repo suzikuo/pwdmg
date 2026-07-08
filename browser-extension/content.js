@@ -6,6 +6,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   const MUTATION_DEBOUNCE_MS = 900
   const SAVE_PROMPT_DELAY_MS = 900
   const CAPTURE_CLICK_WINDOW_MS = 800
+  const RECENT_INPUT_CAPTURE_TTL_MS = 15000
   const FILL_CAPTURE_SUPPRESS_MS = 2500
   const INPUT_SELECTOR = 'input, textarea'
   const ACTION_CONTROL_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]'
@@ -30,6 +31,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let panelPinned = false
   let panelDrag = null
   let lastSubmitCapture = null
+  let lastInputCapture = null
   let savePromptTimer = 0
   let pendingSave = null
   let lastOtpAutoFillKey = ''
@@ -869,6 +871,31 @@ if (!window.__mypwdmgContentScriptLoaded) {
     prepareSavePrompt(captureInfo, SAVE_PROMPT_DELAY_MS).catch(() => { })
   }
 
+  function sameCapture(left, right) {
+    if (!left?.capture || !right?.capture) return false
+    return left.capture.hostname === right.capture.hostname
+      && left.capture.account === right.capture.account
+      && left.capture.accountKind === right.capture.accountKind
+      && left.capture.password === right.capture.password
+  }
+
+  function rememberInputCapture(target) {
+    if (!autoSaveEnabled) return
+    const input = target instanceof Element ? inputFromEventTarget(target) : null
+    if (!input) return
+    if (!isPasswordInput(input) && !isUsernameInput(input)) return
+    const scope = input.closest('form') || scopeForFocusedInput(input) || document
+    const captureInfo = captureLoginFromScope(scope, input)
+    if (captureInfo) lastInputCapture = { ...captureInfo, at: Date.now() }
+  }
+
+  function recentInputCaptureFor(scope, anchor) {
+    if (!lastInputCapture || Date.now() - lastInputCapture.at > RECENT_INPUT_CAPTURE_TTL_MS) return null
+    const fresh = captureLoginFromScope(scope, anchor)
+    if (fresh) return fresh
+    return lastInputCapture
+  }
+
   async function prepareSavePrompt(captureInfo, renderDelay = 0) {
     if (!autoSaveEnabled) return
     if (!captureInfo?.capture?.password) return
@@ -932,12 +959,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
     const form = control.closest('form') || document
     if (scopeLooksLikeNonLoginSecretEditor(form)) return
-    const captureInfo = captureLoginFromScope(form, control)
+    const captureInfo = recentInputCaptureFor(form, control)
     if (!captureInfo) return
-    window.setTimeout(() => {
-      if (lastSubmitCapture && Date.now() - lastSubmitCapture.at <= CAPTURE_CLICK_WINDOW_MS) return
-      scheduleSaveCapture({ ...captureInfo, at: Date.now() })
-    }, 0)
+    if (lastSubmitCapture && Date.now() - lastSubmitCapture.at <= CAPTURE_CLICK_WINDOW_MS && sameCapture(lastSubmitCapture, captureInfo)) return
+    scheduleSaveCapture({ ...captureInfo, at: Date.now() })
   }
 
   function handleEnterCapture(event) {
@@ -948,12 +973,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (['button', 'submit', 'checkbox', 'radio', 'file', 'hidden'].includes(type)) return
     const form = target.closest('form') || document
     if (scopeLooksLikeNonLoginSecretEditor(form)) return
-    const captureInfo = captureLoginFromScope(form, target)
+    const captureInfo = recentInputCaptureFor(form, target)
     if (!captureInfo) return
-    window.setTimeout(() => {
-      if (lastSubmitCapture && Date.now() - lastSubmitCapture.at <= CAPTURE_CLICK_WINDOW_MS) return
-      scheduleSaveCapture({ ...captureInfo, at: Date.now() })
-    }, 0)
+    if (lastSubmitCapture && Date.now() - lastSubmitCapture.at <= CAPTURE_CLICK_WINDOW_MS && sameCapture(lastSubmitCapture, captureInfo)) return
+    scheduleSaveCapture({ ...captureInfo, at: Date.now() })
   }
 
   function isShowPanelShortcut(event) {
@@ -1026,8 +1049,9 @@ if (!window.__mypwdmgContentScriptLoaded) {
   document.addEventListener('focusin', () => scheduleQuery(false), true)
   document.addEventListener('input', (event) => {
     const target = event.target instanceof Element ? event.target : null
-    if (!target || !isPasswordInput(target) || !event.isTrusted) return
-    extensionFilledPasswords.delete(fieldId(target))
+    if (!target || !event.isTrusted) return
+    if (isPasswordInput(target)) extensionFilledPasswords.delete(fieldId(target))
+    rememberInputCapture(target)
   }, true)
   document.addEventListener('keydown', (event) => {
     if (handleShowPanelShortcut(event)) return

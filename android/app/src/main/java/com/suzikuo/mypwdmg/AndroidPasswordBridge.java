@@ -476,6 +476,16 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
+    public String exportVaultBackupForPayload(String payloadJson) {
+        return result(() -> store.exportBackupForPayload(new JSONObject(payloadJson)));
+    }
+
+    @JavascriptInterface
+    public String previewVaultBackup(String envelopeText) {
+        return result(() -> store.previewBackup(envelopeText));
+    }
+
+    @JavascriptInterface
     public String importVaultBackup(String envelopeText) {
         return result(() -> store.importBackup(envelopeText));
     }

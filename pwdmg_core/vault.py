@@ -43,6 +43,8 @@ def default_payload(entries: List[Dict[str, Any]] | None = None) -> Dict[str, An
                 "accessKeySecret": "",
                 "region": "",
                 "objectName": "mypwdmg-vault.json",
+                "autoSync": False,
+                "autoSyncIntervalMinutes": 1,
             }
         },
         "updatedAt": int(time.time()),

@@ -4,6 +4,8 @@ import 'vant/lib/index.css'
 import App from './App.vue'
 import './styles/app.css'
 
+let appMounted = false
+
 function errorMessage(error: unknown) {
   if (error instanceof Error) return `${error.name}: ${error.message}`
   return String(error || 'Unknown startup error')
@@ -34,15 +36,24 @@ function escapeHtml(value: string) {
 }
 
 window.addEventListener('error', (event) => {
+  if (appMounted) {
+    console.error('Unhandled application error:', event.error || event.message)
+    return
+  }
   renderStartupError(event.error || event.message)
 })
 
 window.addEventListener('unhandledrejection', (event) => {
+  if (appMounted) {
+    console.error('Unhandled application rejection:', event.reason)
+    return
+  }
   renderStartupError(event.reason)
 })
 
 try {
   createApp(App).use(Vant).mount('#app')
+  appMounted = true
 } catch (error) {
   renderStartupError(error)
   throw error

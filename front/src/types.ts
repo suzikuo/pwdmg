@@ -45,6 +45,8 @@ export interface VaultPayload {
       accessKeySecret: string
       region: string
       objectName: string
+      autoSync: boolean
+      autoSyncIntervalMinutes: number
     }
   }
   updatedAt: number

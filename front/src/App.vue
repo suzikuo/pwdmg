@@ -146,18 +146,8 @@
       </div>
     </section>
 
-    <van-popup v-model:show="detailOpen" position="bottom" round class="detail-sheet" :class="{ 'is-expanded': detailSheetExpanded }" :duration="0.12" lazy-render>
+    <van-popup v-model:show="detailOpen" position="bottom" round class="detail-sheet" :duration="0.12" lazy-render>
       <div class="sheet-inner" v-if="selectedEntry">
-        <div class="sheet-toolbar">
-          <button
-            class="sheet-expand-button"
-            type="button"
-            :aria-label="detailSheetExpanded ? '还原详情面板' : '最大化详情面板'"
-            @click="toggleSheetExpanded('detail')"
-          >
-            <van-icon :name="detailSheetExpanded ? 'shrink' : 'expand-o'" />
-          </button>
-        </div>
         <DetailContent
           :entry="selectedEntry"
           :show-password="showPassword"
@@ -409,13 +399,30 @@
           </div>
         </section>
         <section v-else-if="drawerSection === 'backup'" class="drawer-panel">
-          <p class="settings-note">上传会覆盖固定云端文件；备份会直接上传一个带日期的云端文件，不在本地留存。下载会覆盖本机保险库。</p>
+          <p class="settings-note">上传/下载会先校验新增、修改、删除项；备份会直接上传一个带日期的云端文件，不在本地留存。</p>
           <van-form @submit="saveSettings">
             <van-field v-model="settings.oss.bucketName" label="Bucket" placeholder="OSS Bucket 名称" />
             <van-field v-model="settings.oss.accessKeyId" label="Key ID" placeholder="AccessKey ID" />
             <van-field v-model="settings.oss.accessKeySecret" label="Key Secret" type="password" placeholder="AccessKey Secret" />
             <van-field v-model="settings.oss.region" label="Region" placeholder="oss-cn-hangzhou" />
             <van-field v-model="settings.oss.objectName" label="文件名" placeholder="mypwdmg-vault.json" />
+            <van-cell center title="自动同步数据" label="保存后上传校验，回到前台下载校验">
+              <template #right-icon>
+                <van-switch v-model="settings.oss.autoSync" size="22" />
+              </template>
+            </van-cell>
+            <van-cell center title="同步间隔" label="自动下载校验最小间隔（分钟）">
+              <template #right-icon>
+                <van-stepper
+                  :model-value="settings.oss.autoSyncIntervalMinutes"
+                  :min="AUTO_CLOUD_SYNC_INTERVAL_MIN_MINUTES"
+                  :max="AUTO_CLOUD_SYNC_INTERVAL_MAX_MINUTES"
+                  integer
+                  button-size="24px"
+                  @update:model-value="setAutoSyncIntervalMinutes"
+                />
+              </template>
+            </van-cell>
             <van-button block type="primary" native-type="submit">保存云配置</van-button>
           </van-form>
           <div class="backup-actions">
@@ -452,6 +459,45 @@
             </button>
           </div>
           <p v-if="backupStatus" class="settings-note">{{ backupStatus }}</p>
+          <div class="cloud-sync-log-panel">
+            <div class="cloud-sync-log-head">
+              <div>
+                <strong>同步记录</strong>
+                <span>最多保留 {{ cloudSyncLogLimit }} 条</span>
+              </div>
+              <div class="cloud-sync-log-controls">
+                <van-stepper
+                  :model-value="cloudSyncLogLimit"
+                  :min="CLOUD_SYNC_LOG_LIMIT_MIN"
+                  :max="CLOUD_SYNC_LOG_LIMIT_MAX"
+                  integer
+                  button-size="24px"
+                  @update:model-value="setCloudSyncLogLimit"
+                />
+                <van-button size="small" plain type="default" :disabled="cloudSyncLogs.length === 0" @click="clearCloudSyncLogs">清空</van-button>
+              </div>
+            </div>
+            <div v-if="cloudSyncLogs.length" class="cloud-sync-log-list">
+              <div
+                v-for="item in cloudSyncLogs"
+                :key="item.id"
+                class="cloud-sync-log-item"
+                :class="`is-${item.status}`"
+              >
+                <div class="cloud-sync-log-main">
+                  <span class="cloud-sync-log-badge">{{ cloudSyncDirectionLabel(item.direction) }}</span>
+                  <strong>{{ cloudSyncLogTitle(item) }}</strong>
+                  <small>{{ formatDateTime(new Date(item.at).toISOString()) }} · {{ item.automatic ? '自动' : '手动' }}</small>
+                </div>
+                <div class="cloud-sync-log-meta">
+                  <span>{{ cloudSyncLogStatusLabel(item.status) }}</span>
+                  <small>{{ cloudSyncLogSummary(item) }}</small>
+                  <small>{{ item.objectName }}</small>
+                </div>
+              </div>
+            </div>
+            <van-empty v-else image="search" description="暂无同步记录" />
+          </div>
         </section>
         <section v-else-if="drawerSection === 'system'" class="drawer-panel system-panel">
           <div class="system-group-list">
@@ -505,6 +551,58 @@
           <van-button block type="primary" native-type="submit" :loading="busy">保存修改</van-button>
         </van-form>
       </div>
+    </van-popup>
+
+    <van-popup v-model:show="cloudSyncReviewOpen" position="bottom" class="cloud-sync-popup" :duration="0.14" lazy-render>
+      <section v-if="cloudSyncPreview" class="cloud-sync-shell">
+        <van-nav-bar safe-area-inset-top :title="cloudSyncReviewTitle" left-arrow @click-left="closeCloudSyncReview" />
+        <div class="cloud-sync-body">
+          <div class="cloud-sync-target">
+            <span>{{ cloudSyncPreview.direction === 'download' ? '云端到本机' : '本机到云端' }}</span>
+            <strong>{{ cloudSyncPreview.objectName }}</strong>
+          </div>
+          <div class="cloud-sync-summary">
+            <div>
+              <span>新增</span>
+              <strong>{{ cloudSyncDiffCounts.added }}</strong>
+            </div>
+            <div>
+              <span>修改</span>
+              <strong>{{ cloudSyncDiffCounts.modified }}</strong>
+            </div>
+            <div>
+              <span>删除</span>
+              <strong>{{ cloudSyncDiffCounts.deleted }}</strong>
+            </div>
+          </div>
+          <div class="cloud-sync-actions">
+            <van-button size="small" plain type="default" @click="setAllCloudSyncDiffs(true)">全选</van-button>
+            <van-button size="small" plain type="default" @click="setAllCloudSyncDiffs(false)">全不选</van-button>
+          </div>
+          <div v-if="cloudSyncPreview.items.length" class="cloud-sync-list">
+            <label
+              v-for="item in cloudSyncPreview.items"
+              :key="`${item.changeType}:${item.id}`"
+              class="cloud-sync-item"
+              :class="`is-${item.changeType}`"
+            >
+              <input v-model="item.checked" type="checkbox" />
+              <span class="cloud-sync-tag">{{ cloudSyncChangeLabel(item.changeType) }}</span>
+              <span class="cloud-sync-copy">
+                <strong>{{ item.path }}</strong>
+                <small>{{ item.changes.length ? item.changes.join(' · ') : cloudSyncEntryLabel(item) }}</small>
+              </span>
+            </label>
+          </div>
+          <van-empty v-else image="search" description="两端条目一致" />
+        </div>
+        <div class="cloud-sync-footer">
+          <span>已选 {{ cloudSyncSelectedCount }} 项</span>
+          <van-button size="small" type="primary" :disabled="cloudSyncSelectedCount === 0" :loading="cloudBusy" @click="applyCloudSyncPreview">
+            {{ cloudSyncReviewActionText }}
+          </van-button>
+        </div>
+      </section>
     </van-popup>
 
     <van-popup v-if="showPluginSettings" v-model:show="pluginDetailOpen" position="right" class="plugin-detail-popup" :duration="0.16" lazy-render>
@@ -592,6 +690,70 @@ type CloudBackupInfo = {
   size: number
   lastModified: string
 }
+type CloudSyncDirection = 'upload' | 'download'
+type CloudSyncChangeType = 'added' | 'modified' | 'deleted'
+type EntryIndexMeta = {
+  entry: VaultEntry
+  parentId: string
+  index: number
+  path: string
+  ancestorIds: string[]
+}
+type CloudSyncDiffItem = {
+  id: string
+  changeType: CloudSyncChangeType
+  entryKind: EntryKind
+  title: string
+  path: string
+  checked: boolean
+  changes: string[]
+  changeKeys: CloudSyncChangeField[]
+  sourceParentId: string
+  sourceIndex: number
+}
+type CloudSyncChangeField =
+  | 'position'
+  | 'kind'
+  | 'title'
+  | 'status'
+  | 'statusReason'
+  | 'deletedAt'
+  | 'domains'
+  | 'username'
+  | 'email'
+  | 'password'
+  | 'phone'
+  | 'loginAccountSource'
+  | 'note'
+  | 'totpSecret'
+type CloudSyncEntryChangeField = Exclude<CloudSyncChangeField, 'position'>
+type CloudSyncChangeDetail = {
+  key: CloudSyncChangeField
+  label: string
+}
+type CloudSyncPreview = {
+  direction: CloudSyncDirection
+  objectName: string
+  sourcePayload: VaultPayload
+  basePayload: VaultPayload
+  items: CloudSyncDiffItem[]
+  automatic: boolean
+}
+type CloudSyncLogStatus = 'started' | 'success' | 'review' | 'error' | 'skipped'
+type CloudSyncLogEntry = {
+  id: string
+  at: number
+  direction: CloudSyncDirection | 'backup'
+  automatic: boolean
+  status: CloudSyncLogStatus
+  objectName: string
+  message: string
+  added: number
+  modified: number
+  deleted: number
+  selected: number
+  total: number
+}
 
 const LOGIN_ACCOUNT_SOURCES = new Set<LoginAccountSource>(['auto', 'username', 'email', 'phone'])
 const ENTRY_STATUSES = new Set<EntryStatus>(['active', 'disabled', 'trashed'])
@@ -601,6 +763,56 @@ const PANE_WIDTH_KEY = 'mypwdmg.desktopPaneWidth'
 const UI_SCALE_KEY = 'mypwdmg.uiScaleLevel.v2'
 const FONT_SIZE_KEY = 'mypwdmg.fontSizePercent'
 const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
+const CLOUD_SYNC_LOGS_KEY = 'mypwdmg.cloudSyncLogs.v1'
+const CLOUD_SYNC_LOG_LIMIT_KEY = 'mypwdmg.cloudSyncLogLimit'
+const CLOUD_SYNC_LOG_LIMIT_DEFAULT = 50
+const CLOUD_SYNC_LOG_LIMIT_MIN = 10
+const CLOUD_SYNC_LOG_LIMIT_MAX = 200
+const AUTO_CLOUD_SYNC_INTERVAL_DEFAULT_MINUTES = 1
+const AUTO_CLOUD_SYNC_INTERVAL_MIN_MINUTES = 1
+const AUTO_CLOUD_SYNC_INTERVAL_MAX_MINUTES = 1440
+const CLOUD_SYNC_CHANGE_LABELS: Record<CloudSyncChangeField, string> = {
+  position: '位置',
+  kind: '类型',
+  title: '名称',
+  status: '状态',
+  statusReason: '状态说明',
+  deletedAt: '删除时间',
+  domains: '域名',
+  username: '账号',
+  email: '邮箱',
+  password: '密码',
+  phone: '手机',
+  loginAccountSource: '自动填充账号',
+  note: '备注',
+  totpSecret: 'TOTP'
+}
+const CLOUD_SYNC_ENTRY_CHANGE_FIELDS: CloudSyncEntryChangeField[] = [
+  'kind',
+  'title',
+  'status',
+  'statusReason',
+  'deletedAt',
+  'domains',
+  'username',
+  'email',
+  'password',
+  'phone',
+  'loginAccountSource',
+  'note',
+  'totpSecret'
+]
+const CLOUD_SYNC_MANUAL_REVIEW_FIELDS = new Set<CloudSyncChangeField>([
+  'kind',
+  'status',
+  'deletedAt',
+  'username',
+  'email',
+  'password',
+  'phone',
+  'loginAccountSource',
+  'totpSecret'
+])
 const DEFAULT_UPDATE_MANIFEST_URL = 'https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json'
 const VERSIONED_DEFAULT_MANIFEST_URL_PATTERN =
   /^https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/download\/[^/]+\/update-manifest\.json$/i
@@ -616,6 +828,8 @@ const TOTP_PERIOD_SECONDS = 30
 const BACK_EXIT_INTERVAL = 1600
 const EXTERNAL_VAULT_REFRESH_DELAY_MS = 180
 const EXTERNAL_VAULT_REFRESH_MIN_INTERVAL_MS = 900
+const AUTO_CLOUD_SYNC_UPLOAD_DELAY_MS = 700
+const AUTO_CLOUD_SYNC_DOWNLOAD_DELAY_MS = 1200
 const TEXT_EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .van-field__control'
 
 const state = reactive<AppState>({
@@ -650,7 +864,6 @@ const keyword = ref('')
 const vault = ref<VaultPayload | null>(null)
 const editorOpen = ref(false)
 const detailOpen = ref(false)
-const detailSheetExpanded = ref(false)
 const drawerOpen = ref(false)
 const createSheetOpen = ref(false)
 const entryContextMenuOpen = ref(false)
@@ -680,6 +893,10 @@ const androidAutofillLaunch = ref<AndroidAutofillLaunchContext | null>(null)
 const cloudInfo = ref<CloudBackupInfo | null>(null)
 const cloudBackups = ref<CloudBackupInfo[]>([])
 const selectedCloudObjectName = ref('')
+const cloudSyncReviewOpen = ref(false)
+const cloudSyncPreview = ref<CloudSyncPreview | null>(null)
+const cloudSyncLogs = ref<CloudSyncLogEntry[]>(loadCloudSyncLogs())
+const cloudSyncLogLimit = ref(loadCloudSyncLogLimit())
 const showPassword = ref(false)
 const totpRemaining = ref(TOTP_PERIOD_SECONDS)
 const totpRequestId = ref(0)
@@ -696,7 +913,9 @@ const settings = reactive({
     accessKeyId: '',
     accessKeySecret: '',
     region: '',
-    objectName: DEFAULT_OSS_OBJECT_NAME
+    objectName: DEFAULT_OSS_OBJECT_NAME,
+    autoSync: false,
+    autoSyncIntervalMinutes: AUTO_CLOUD_SYNC_INTERVAL_DEFAULT_MINUTES
   }
 })
 const createActions = [
@@ -844,11 +1063,32 @@ const systemGroupEntries = computed(() => {
   const status: EntryStatus = systemGroupKey.value === 'archived' ? 'disabled' : 'trashed'
   return collectSystemGroupEntries(vault.value?.entries || [], status)
 })
+const cloudSyncDiffCounts = computed(() => {
+  const items = cloudSyncPreview.value?.items || []
+  return {
+    added: items.filter((item) => item.changeType === 'added').length,
+    modified: items.filter((item) => item.changeType === 'modified').length,
+    deleted: items.filter((item) => item.changeType === 'deleted').length
+  }
+})
+const cloudSyncSelectedCount = computed(() => (cloudSyncPreview.value?.items || []).filter((item) => item.checked).length)
+const cloudSyncReviewTitle = computed(() => {
+  if (cloudSyncPreview.value?.direction === 'download') return '下载校验'
+  return '上传校验'
+})
+const cloudSyncReviewActionText = computed(() => {
+  const preview = cloudSyncPreview.value
+  if (!preview) return '应用'
+  return preview.direction === 'download' ? '下载勾选项' : '上传勾选项'
+})
 
 let desktopMediaQuery: MediaQueryList | null = null
 let drawerMediaQuery: MediaQueryList | null = null
 let resizingPane = false
 let totpTimer = 0
+let autoCloudUploadTimer = 0
+let autoCloudDownloadTimer = 0
+let lastAutoCloudDownloadCheckAt = 0
 let totpCurrentStep = -1
 let lastBackRequestAt = 0
 let externalVaultRefreshTimer = 0
@@ -872,6 +1112,7 @@ onMounted(() => {
   window.addEventListener('focus', loadAndroidAutofillState)
   window.addEventListener('focus', resetAndroidInstallBusy)
   window.addEventListener('focus', scheduleExternalVaultRefresh)
+  window.addEventListener('focus', scheduleAutoCloudDownloadCheck)
   document.addEventListener('selectstart', suppressNonEditableSelection)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   window.__mypwdmgHandleNativeBack = handleNativeBack
@@ -883,9 +1124,6 @@ onMounted(() => {
 
 watch(drawerOpen, (open) => {
   if (!open) drawerDetailOpen.value = false
-})
-watch(detailOpen, (open) => {
-  if (!open) detailSheetExpanded.value = false
 })
 watch(entryContextMenuOpen, (open) => {
   if (!open) contextEntryId.value = ''
@@ -905,9 +1143,12 @@ onUnmounted(() => {
   window.removeEventListener('focus', loadAndroidAutofillState)
   window.removeEventListener('focus', resetAndroidInstallBusy)
   window.removeEventListener('focus', scheduleExternalVaultRefresh)
+  window.removeEventListener('focus', scheduleAutoCloudDownloadCheck)
   document.removeEventListener('selectstart', suppressNonEditableSelection)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (externalVaultRefreshTimer) window.clearTimeout(externalVaultRefreshTimer)
+  if (autoCloudUploadTimer) window.clearTimeout(autoCloudUploadTimer)
+  if (autoCloudDownloadTimer) window.clearTimeout(autoCloudDownloadTimer)
   delete window.__mypwdmgHandleNativeBack
   stopPaneResize()
   stopTotpTimer()
@@ -928,6 +1169,10 @@ function handleNativeBack() {
 }
 
 function closeTopLayer() {
+  if (cloudSyncReviewOpen.value) {
+    closeCloudSyncReview()
+    return true
+  }
   if (pluginDetailOpen.value) {
     pluginDetailOpen.value = false
     return true
@@ -1017,10 +1262,6 @@ function isTextEditableTarget(target: EventTarget | null) {
   return Boolean(element?.closest(TEXT_EDITABLE_SELECTOR))
 }
 
-function toggleSheetExpanded(kind: 'detail' | 'editor') {
-  if (kind === 'detail') detailSheetExpanded.value = !detailSheetExpanded.value
-}
-
 async function loadState() {
   stateLoading.value = true
   stateError.value = ''
@@ -1034,6 +1275,7 @@ async function loadState() {
         syncSettings(vault.value.settings)
         state.locked = false
         applyAndroidAutofillSearch()
+        scheduleAutoCloudDownloadCheck(true)
       } else if (state.hasVault) {
         if (state.locked && state.passwordless) shouldAutoUnlock = true
         else if (!state.locked) await loadUnlockedVault()
@@ -1093,6 +1335,7 @@ async function unlockWithPassword(candidate: string, silent = false) {
   state.locked = false
   password.value = ''
   applyAndroidAutofillSearch()
+  scheduleAutoCloudDownloadCheck(true)
   return true
 }
 
@@ -1106,11 +1349,15 @@ async function loadUnlockedVault() {
   syncSettings(vault.value.settings)
   state.locked = false
   applyAndroidAutofillSearch()
+  scheduleAutoCloudDownloadCheck(true)
   return true
 }
 
 function handleVisibilityChange() {
-  if (document.visibilityState === 'visible') scheduleExternalVaultRefresh()
+  if (document.visibilityState === 'visible') {
+    scheduleExternalVaultRefresh()
+    scheduleAutoCloudDownloadCheck()
+  }
 }
 
 function scheduleExternalVaultRefresh() {
@@ -1355,6 +1602,7 @@ async function saveEntry() {
   syncSettings(vault.value.settings)
   selectedEntry.value = findEntry(vault.value.entries, entry.id)
   editorOpen.value = false
+  scheduleAutoCloudUpload()
   showSuccessToast('已保存')
 }
 
@@ -1393,6 +1641,7 @@ async function archiveEntry(entryId: string) {
   const result = await api.saveVault(payload)
   if (!result.ok || !result.data) return showFailToast(result.message || '归档失败')
   vault.value = result.data
+  scheduleAutoCloudUpload()
   if (selectedEntry.value && (selectedEntry.value.id === entryId || isDescendant(target, selectedEntry.value.id))) {
     clearSelectedEntry()
   }
@@ -1431,6 +1680,7 @@ async function trashEntry(entryId: string) {
   const result = await api.saveVault(payload)
   if (!result.ok || !result.data) return showFailToast(result.message || '删除失败')
   vault.value = result.data
+  scheduleAutoCloudUpload()
   if (shouldClearSelection) {
     selectedEntry.value = null
     detailOpen.value = false
@@ -1455,6 +1705,7 @@ async function restoreEntry(entryId: string) {
   const result = await api.saveVault(payload)
   if (!result.ok || !result.data) return showFailToast(result.message || '恢复失败')
   vault.value = result.data
+  scheduleAutoCloudUpload()
   selectedEntry.value = findEntry(vault.value.entries, entryId)
   if (selectedEntry.value && selectedEntry.value.kind === 'login') showEntryDetail(selectedEntry.value)
   showSuccessToast('已恢复')
@@ -1490,6 +1741,7 @@ async function purgeEntry(entryId: string) {
   const result = await api.saveVault(payload)
   if (!result.ok || !result.data) return showFailToast(result.message || '彻底删除失败')
   vault.value = result.data
+  scheduleAutoCloudUpload()
   if (shouldClearSelection) clearSelectedEntry()
   showSuccessToast('已彻底删除')
 }
@@ -1517,6 +1769,7 @@ async function moveEntry(payload: MoveEntryPayload) {
   const result = await api.saveVault(nextVault)
   if (!result.ok || !result.data) return showFailToast(result.message || '移动失败')
   vault.value = result.data
+  scheduleAutoCloudUpload()
   if (selectedEntry.value) selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
 }
 
@@ -1800,7 +2053,7 @@ async function disablePluginListener() {
   showSuccessToast('插件监听已关闭')
 }
 
-async function persistSettings(options: { closeDrawer?: boolean; toast?: boolean } = {}) {
+async function persistSettings(options: { closeDrawer?: boolean; toast?: boolean; skipAutoSync?: boolean } = {}) {
   if (!vault.value) return
   const payload = cloneVault()
   payload.settings = normalizeSettings(settings)
@@ -1813,11 +2066,15 @@ async function persistSettings(options: { closeDrawer?: boolean; toast?: boolean
   syncSettings(vault.value.settings)
   if (options.closeDrawer) drawerOpen.value = false
   if (options.toast) showSuccessToast('设置已保存')
+  if (!options.skipAutoSync) {
+    scheduleAutoCloudDownloadCheck(true)
+    scheduleAutoCloudUpload()
+  }
   return true
 }
 
 async function uploadCloudBackup() {
-  await uploadCloudVault(false)
+  await startCloudSyncReview('upload')
 }
 
 async function backupCloudVault() {
@@ -1830,7 +2087,7 @@ async function checkCloudBackupInfo() {
   cloudBusy.value = true
   backupStatus.value = ''
   try {
-    const saved = await persistSettings({ closeDrawer: false, toast: false })
+    const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
     if (!saved) return
     const client = createOssClient()
     const response = await client.getFileInfo(settings.oss.objectName)
@@ -1858,7 +2115,7 @@ async function refreshCloudBackupList() {
   cloudBusy.value = true
   backupStatus.value = ''
   try {
-    const saved = await persistSettings({ closeDrawer: false, toast: false })
+    const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
     if (!saved) return
     const client = createOssClient()
     const response = await client.listFiles(settings.oss.objectName, 50)
@@ -1915,10 +2172,17 @@ async function uploadCloudVault(asDatedBackup: boolean) {
   cloudBusy.value = true
   backupStatus.value = ''
   try {
-    const saved = await persistSettings({ closeDrawer: false, toast: false })
+    const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
     if (!saved) return
     const exported = await api.exportVaultBackup()
     if (!exported.ok || !exported.data) {
+      appendCloudSyncLog({
+        direction: 'backup',
+        automatic: false,
+        status: 'error',
+        objectName,
+        message: exported.message || '导出保险库失败'
+      })
       showFailToast(exported.message || '导出保险库失败')
       return
     }
@@ -1926,6 +2190,13 @@ async function uploadCloudVault(asDatedBackup: boolean) {
     const client = createOssClient()
     const response = await client.uploadFile(objectName, exported.data.content, 'application/json')
     if (response.status !== APIResponseStatus.Success) {
+      appendCloudSyncLog({
+        direction: 'backup',
+        automatic: false,
+        status: 'error',
+        objectName,
+        message: String(response.content || (asDatedBackup ? '备份失败' : '上传失败'))
+      })
       showFailToast(String(response.content || (asDatedBackup ? '备份失败' : '上传失败')))
       return
     }
@@ -1936,6 +2207,13 @@ async function uploadCloudVault(asDatedBackup: boolean) {
       size: exported.data.content.length,
       lastModified: new Date().toISOString()
     }
+    appendCloudSyncLog({
+      direction: 'backup',
+      automatic: false,
+      status: 'success',
+      objectName,
+      message: asDatedBackup ? '云端备份已创建' : '云端文件已上传'
+    })
     showSuccessToast(asDatedBackup ? '云端备份已创建' : '云端文件已上传')
   } finally {
     cloudBusy.value = false
@@ -1943,52 +2221,676 @@ async function uploadCloudVault(asDatedBackup: boolean) {
 }
 
 async function downloadCloudBackup() {
-  if (!vault.value || cloudBusy.value) return
-  if (!validateOssSettings()) return
-  const objectName = selectedCloudObjectName.value || settings.oss.objectName
+  await startCloudSyncReview('download')
+}
 
-  try {
-    await confirmTwice({
-      title: '下载云端备份',
-      message: `将从 OSS 下载 ${objectName}。继续吗？`,
-      secondTitle: '再次确认覆盖',
-      secondMessage: '下载后会覆盖本机保险库并锁定当前会话。覆盖前会先保留一份本地备份。',
-      confirmButtonText: '下载并覆盖'
-    })
-  } catch {
+function canScheduleAutoCloudSync() {
+  if (!vault.value || !settings.oss.autoSync || state.locked) return
+  if (cloudBusy.value || cloudSyncReviewOpen.value) return
+  if (!hasCompleteOssSettings()) {
+    backupStatus.value = '自动同步已开启，请补全 OSS 配置'
+    return
+  }
+  if (!crypto.subtle) return
+  return true
+}
+
+function scheduleAutoCloudUpload() {
+  if (!canScheduleAutoCloudSync()) return
+  if (autoCloudUploadTimer) window.clearTimeout(autoCloudUploadTimer)
+  autoCloudUploadTimer = window.setTimeout(() => {
+    autoCloudUploadTimer = 0
+    if (canScheduleAutoCloudSync()) startCloudSyncReview('upload', { automatic: true, skipPersist: true })
+  }, AUTO_CLOUD_SYNC_UPLOAD_DELAY_MS)
+}
+
+function scheduleAutoCloudDownloadCheck(forceOrEvent: boolean | Event = false) {
+  if (!canScheduleAutoCloudSync()) return
+  const force = forceOrEvent === true
+  const now = Date.now()
+  const elapsed = now - lastAutoCloudDownloadCheckAt
+  const minInterval = autoCloudDownloadMinIntervalMs()
+  const delay = force || elapsed >= minInterval
+    ? AUTO_CLOUD_SYNC_DOWNLOAD_DELAY_MS
+    : minInterval - elapsed
+
+  if (autoCloudDownloadTimer) window.clearTimeout(autoCloudDownloadTimer)
+  autoCloudDownloadTimer = window.setTimeout(() => {
+    autoCloudDownloadTimer = 0
+    lastAutoCloudDownloadCheckAt = Date.now()
+    if (canScheduleAutoCloudSync()) {
+      startCloudSyncReview('download', { automatic: true, skipPersist: true, objectName: settings.oss.objectName })
+    }
+  }, delay)
+}
+
+async function startCloudSyncReview(
+  direction: CloudSyncDirection,
+  options: { automatic?: boolean; skipPersist?: boolean; objectName?: string } = {}
+) {
+  if (!vault.value || cloudBusy.value) return
+  syncSettings(settings)
+  if (options.automatic) {
+    if (!hasCompleteOssSettings() || !crypto.subtle) return
+  } else if (!validateOssSettings()) {
     return
   }
 
+  const objectName = normalizeObjectName(
+    options.objectName ||
+    (direction === 'download' && !options.automatic ? selectedCloudObjectName.value || settings.oss.objectName : settings.oss.objectName)
+  )
+  appendCloudSyncLog({
+    direction,
+    automatic: options.automatic === true,
+    status: 'started',
+    objectName,
+    message: direction === 'download' ? '开始下载校验' : '开始上传校验'
+  })
+
   cloudBusy.value = true
-  backupStatus.value = ''
+  backupStatus.value = direction === 'download' ? '正在生成下载差异' : '正在生成上传差异'
   try {
-    const saved = await persistSettings({ closeDrawer: false, toast: false })
-    if (!saved) return
+    if (!options.skipPersist) {
+      const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
+      if (!saved || !vault.value) {
+        appendCloudSyncLog({
+          direction,
+          automatic: options.automatic === true,
+          status: 'error',
+          objectName,
+          message: '保存云配置失败'
+        })
+        return
+      }
+    }
+
+    const localPayload = clonePayload(vault.value)
     const client = createOssClient()
     const response = await client.downloadFile(objectName, 'text/plain')
-    if (response.status !== APIResponseStatus.Success || typeof response.content !== 'string') {
-      showFailToast(String(response.content || '下载失败'))
+    let remotePayload: VaultPayload | null = null
+
+    if (response.status === APIResponseStatus.Success && typeof response.content === 'string') {
+      const preview = await api.previewVaultBackup(response.content)
+      if (!preview.ok || !preview.data) {
+        if (!options.automatic) showFailToast(preview.message || '云端文件无法用当前会话解密')
+        backupStatus.value = '云端文件无法校验，请确认它来自当前保险库'
+        appendCloudSyncLog({
+          direction,
+          automatic: options.automatic === true,
+          status: 'error',
+          objectName,
+          message: preview.message || '云端文件无法用当前会话解密'
+        })
+        return
+      }
+      remotePayload = preview.data
+    } else if (response.status === APIResponseStatus.FileNotExist) {
+      if (direction === 'download') {
+        if (!options.automatic) showFailToast('云端文件不存在')
+        backupStatus.value = '云端文件不存在'
+        appendCloudSyncLog({
+          direction,
+          automatic: options.automatic === true,
+          status: 'skipped',
+          objectName,
+          message: '云端文件不存在'
+        })
+        return
+      }
+      remotePayload = emptyCloudPayload()
+    } else {
+      if (!options.automatic) showFailToast(String(response.content || '读取云端文件失败'))
+      appendCloudSyncLog({
+        direction,
+        automatic: options.automatic === true,
+        status: 'error',
+        objectName,
+        message: String(response.content || '读取云端文件失败')
+      })
+      return
+    }
+    if (!remotePayload) return
+
+    const sourcePayload = direction === 'download' ? remotePayload : localPayload
+    const basePayload = direction === 'download' ? localPayload : remotePayload
+    const items = buildCloudSyncDiff(sourcePayload, basePayload)
+    const preview: CloudSyncPreview = {
+      direction,
+      objectName,
+      sourcePayload,
+      basePayload,
+      items,
+      automatic: options.automatic === true
+    }
+    cloudSyncPreview.value = preview
+
+    if (!items.length) {
+      backupStatus.value = '两端条目一致'
+      if (!options.automatic) showToast('两端条目一致')
+      appendCloudSyncLog({
+        direction,
+        automatic: options.automatic === true,
+        status: 'success',
+        objectName,
+        message: '两端条目一致'
+      })
       return
     }
 
-    const imported = await api.importVaultBackup(response.content)
-    if (!imported.ok || !imported.data) {
-      showFailToast(imported.message || '导入备份失败')
+    if (options.automatic) {
+      const autoDecision = resolveAutoCloudSyncDecision(preview)
+      if (autoDecision.apply) {
+        await applyCloudSyncItems(preview, items, {
+          clearPreview: true,
+          showSuccess: false,
+          showErrors: false,
+          successMessage: autoDecision.message
+        })
+        return
+      }
+
+      cloudSyncReviewOpen.value = true
+      backupStatus.value = autoDecision.message
+      appendCloudSyncLog({
+        direction,
+        automatic: true,
+        status: 'review',
+        objectName,
+        message: autoDecision.message,
+        total: items.length,
+        ...cloudSyncDiffCountsForItems(items)
+      })
       return
     }
 
-    Object.assign(state, imported.data.state)
-    vault.value = null
-    selectedEntry.value = null
-    detailOpen.value = false
-    drawerOpen.value = false
-    stopTotpTimer()
-    backupStatus.value = imported.data.backupPath ? `本地覆盖前备份：${imported.data.backupPath}` : ''
-    selectedCloudObjectName.value = ''
-    showSuccessToast('已下载，请重新解锁')
+    cloudSyncReviewOpen.value = true
+    backupStatus.value = `发现 ${items.length} 项差异`
+    appendCloudSyncLog({
+      direction,
+      automatic: false,
+      status: 'review',
+      objectName,
+      message: `发现 ${items.length} 项差异`,
+      total: items.length,
+      ...cloudSyncDiffCountsForItems(items)
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || '同步校验失败')
+    if (!options.automatic) showFailToast(message)
+    appendCloudSyncLog({
+      direction,
+      automatic: options.automatic === true,
+      status: 'error',
+      objectName,
+      message
+    })
   } finally {
     cloudBusy.value = false
   }
+}
+
+async function applyCloudSyncPreview() {
+  const preview = cloudSyncPreview.value
+  if (!preview || cloudBusy.value) return
+  const selectedItems = preview.items.filter((item) => item.checked)
+  if (!selectedItems.length) return showToast('没有选中差异')
+
+  cloudBusy.value = true
+  try {
+    await applyCloudSyncItems(preview, selectedItems, {
+      closeReview: true,
+      showSuccess: true,
+      showErrors: true
+    })
+  } finally {
+    cloudBusy.value = false
+  }
+}
+
+type CloudSyncApplyOptions = {
+  closeReview?: boolean
+  clearPreview?: boolean
+  showSuccess?: boolean
+  showErrors?: boolean
+  successMessage?: string
+}
+
+async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: CloudSyncDiffItem[], options: CloudSyncApplyOptions = {}) {
+  backupStatus.value = preview.direction === 'download' ? '正在应用下载差异' : '正在应用上传差异'
+  try {
+    const nextPayload = clonePayload(preview.basePayload)
+    nextPayload.settings = normalizeSettings(settings)
+    for (const item of selectedItems) {
+      applyCloudSyncDiffItem(nextPayload.entries, preview.sourcePayload.entries, item)
+    }
+
+    if (preview.direction === 'download') {
+      const result = await api.saveVault(nextPayload)
+      if (!result.ok || !result.data) {
+        backupStatus.value = result.message || '应用下载差异失败'
+        appendCloudSyncLog({
+          direction: preview.direction,
+          automatic: preview.automatic,
+          status: 'error',
+          objectName: preview.objectName,
+          message: result.message || '应用下载差异失败',
+          selected: selectedItems.length,
+          total: preview.items.length,
+          ...cloudSyncDiffCountsForItems(selectedItems)
+        })
+        if (options.showErrors !== false) showFailToast(result.message || '应用下载差异失败')
+        if (options.clearPreview && cloudSyncPreview.value === preview) cloudSyncPreview.value = null
+        return false
+      }
+      vault.value = result.data
+      syncSettings(vault.value.settings)
+      if (selectedEntry.value) {
+        selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
+        if (!selectedEntry.value) clearSelectedEntry()
+      }
+      selectedCloudObjectName.value = ''
+      const message = options.successMessage || `已下载 ${selectedItems.length} 项差异`
+      backupStatus.value = message
+      appendCloudSyncLog({
+        direction: preview.direction,
+        automatic: preview.automatic,
+        status: 'success',
+        objectName: preview.objectName,
+        message,
+        selected: selectedItems.length,
+        total: preview.items.length,
+        ...cloudSyncDiffCountsForItems(selectedItems)
+      })
+      finishCloudSyncApplyPreview(preview, options)
+      if (options.showSuccess) showSuccessToast('下载差异已应用')
+      return true
+    }
+
+    const exported = await api.exportVaultBackupForPayload(nextPayload)
+    if (!exported.ok || !exported.data) {
+      backupStatus.value = exported.message || '生成上传内容失败'
+      appendCloudSyncLog({
+        direction: preview.direction,
+        automatic: preview.automatic,
+        status: 'error',
+        objectName: preview.objectName,
+        message: exported.message || '生成上传内容失败',
+        selected: selectedItems.length,
+        total: preview.items.length,
+        ...cloudSyncDiffCountsForItems(selectedItems)
+      })
+      if (options.showErrors !== false) showFailToast(exported.message || '生成上传内容失败')
+      if (options.clearPreview && cloudSyncPreview.value === preview) cloudSyncPreview.value = null
+      return false
+    }
+
+    const client = createOssClient()
+    const response = await client.uploadFile(preview.objectName, exported.data.content, 'application/json')
+    if (response.status !== APIResponseStatus.Success) {
+      backupStatus.value = String(response.content || '上传失败')
+      appendCloudSyncLog({
+        direction: preview.direction,
+        automatic: preview.automatic,
+        status: 'error',
+        objectName: preview.objectName,
+        message: String(response.content || '上传失败'),
+        selected: selectedItems.length,
+        total: preview.items.length,
+        ...cloudSyncDiffCountsForItems(selectedItems)
+      })
+      if (options.showErrors !== false) showFailToast(String(response.content || '上传失败'))
+      if (options.clearPreview && cloudSyncPreview.value === preview) cloudSyncPreview.value = null
+      return false
+    }
+    cloudInfo.value = {
+      name: preview.objectName,
+      exists: true,
+      size: exported.data.content.length,
+      lastModified: new Date().toISOString()
+    }
+    const message = options.successMessage || `已上传 ${selectedItems.length} 项差异`
+    backupStatus.value = options.successMessage || `已上传 ${selectedItems.length} 项差异到 ${settings.oss.bucketName}/${preview.objectName}`
+    appendCloudSyncLog({
+      direction: preview.direction,
+      automatic: preview.automatic,
+      status: 'success',
+      objectName: preview.objectName,
+      message,
+      selected: selectedItems.length,
+      total: preview.items.length,
+      ...cloudSyncDiffCountsForItems(selectedItems)
+    })
+    finishCloudSyncApplyPreview(preview, options)
+    if (options.showSuccess) showSuccessToast('上传差异已应用')
+    return true
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || '应用同步差异失败')
+    appendCloudSyncLog({
+      direction: preview.direction,
+      automatic: preview.automatic,
+      status: 'error',
+      objectName: preview.objectName,
+      message,
+      selected: selectedItems.length,
+      total: preview.items.length,
+      ...cloudSyncDiffCountsForItems(selectedItems)
+    })
+    if (options.showErrors !== false) showFailToast(message)
+    backupStatus.value = message
+    if (options.clearPreview && cloudSyncPreview.value === preview) cloudSyncPreview.value = null
+    return false
+  }
+}
+
+function finishCloudSyncApplyPreview(preview: CloudSyncPreview, options: CloudSyncApplyOptions) {
+  if (options.closeReview) {
+    closeCloudSyncReview()
+  } else if (options.clearPreview && cloudSyncPreview.value === preview) {
+    cloudSyncPreview.value = null
+  }
+}
+
+function closeCloudSyncReview() {
+  cloudSyncReviewOpen.value = false
+  cloudSyncPreview.value = null
+}
+
+function setAllCloudSyncDiffs(checked: boolean) {
+  for (const item of cloudSyncPreview.value?.items || []) item.checked = checked
+}
+
+function cloudSyncDiffCountsForItems(items: CloudSyncDiffItem[]) {
+  return {
+    added: items.filter((item) => item.changeType === 'added').length,
+    modified: items.filter((item) => item.changeType === 'modified').length,
+    deleted: items.filter((item) => item.changeType === 'deleted').length
+  }
+}
+
+function resolveAutoCloudSyncDecision(preview: CloudSyncPreview) {
+  const items = preview.items
+  const action = preview.direction === 'download' ? '下载' : '上传'
+  if (items.some((item) => item.changeType === 'deleted')) {
+    return { apply: false, message: '发现删除差异，等待手动确认' }
+  }
+
+  const manualFields = autoCloudSyncManualReviewLabels(items)
+  if (manualFields.length) {
+    return {
+      apply: false,
+      message: `发现关键字段变化（${manualFields.join('、')}），等待手动确认`
+    }
+  }
+
+  if (items.every((item) => item.changeType === 'added')) {
+    return { apply: true, message: `仅新增 ${items.length} 项，已自动${action}` }
+  }
+  return { apply: true, message: `低风险差异 ${items.length} 项，已自动${action}` }
+}
+
+function autoCloudSyncManualReviewLabels(items: CloudSyncDiffItem[]) {
+  const labels = new Set<string>()
+  for (const item of items) {
+    if (item.changeType !== 'modified') continue
+    for (const key of item.changeKeys) {
+      if (CLOUD_SYNC_MANUAL_REVIEW_FIELDS.has(key)) labels.add(CLOUD_SYNC_CHANGE_LABELS[key])
+    }
+  }
+  return [...labels]
+}
+
+function appendCloudSyncLog(input: Partial<CloudSyncLogEntry> & Pick<CloudSyncLogEntry, 'direction' | 'status' | 'objectName' | 'message'>) {
+  const entry: CloudSyncLogEntry = {
+    id: makeId(),
+    at: Date.now(),
+    direction: input.direction,
+    automatic: input.automatic === true,
+    status: input.status,
+    objectName: input.objectName,
+    message: input.message,
+    added: Number(input.added || 0),
+    modified: Number(input.modified || 0),
+    deleted: Number(input.deleted || 0),
+    selected: Number(input.selected || 0),
+    total: Number(input.total || 0)
+  }
+  cloudSyncLogs.value = [entry, ...cloudSyncLogs.value].slice(0, cloudSyncLogLimit.value)
+  persistCloudSyncLogs()
+}
+
+function loadCloudSyncLogs(): CloudSyncLogEntry[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CLOUD_SYNC_LOGS_KEY) || '[]')
+    if (!Array.isArray(raw)) return []
+    return raw.map(normalizeCloudSyncLog).filter(Boolean).slice(0, loadCloudSyncLogLimit()) as CloudSyncLogEntry[]
+  } catch {
+    return []
+  }
+}
+
+function normalizeCloudSyncLog(value: unknown): CloudSyncLogEntry | null {
+  const item = value as Partial<CloudSyncLogEntry>
+  if (!item || typeof item !== 'object') return null
+  const direction = item.direction === 'download' || item.direction === 'upload' || item.direction === 'backup'
+    ? item.direction
+    : 'upload'
+  const status = item.status === 'started' || item.status === 'success' || item.status === 'review' || item.status === 'error' || item.status === 'skipped'
+    ? item.status
+    : 'success'
+  return {
+    id: String(item.id || makeId()),
+    at: Number(item.at || Date.now()),
+    direction,
+    automatic: item.automatic === true,
+    status,
+    objectName: String(item.objectName || ''),
+    message: String(item.message || ''),
+    added: Number(item.added || 0),
+    modified: Number(item.modified || 0),
+    deleted: Number(item.deleted || 0),
+    selected: Number(item.selected || 0),
+    total: Number(item.total || 0)
+  }
+}
+
+function persistCloudSyncLogs() {
+  localStorage.setItem(CLOUD_SYNC_LOGS_KEY, JSON.stringify(cloudSyncLogs.value.slice(0, cloudSyncLogLimit.value)))
+}
+
+function loadCloudSyncLogLimit() {
+  return clampCloudSyncLogLimit(localStorage.getItem(CLOUD_SYNC_LOG_LIMIT_KEY))
+}
+
+function setCloudSyncLogLimit(value: number | string) {
+  cloudSyncLogLimit.value = clampCloudSyncLogLimit(value)
+  localStorage.setItem(CLOUD_SYNC_LOG_LIMIT_KEY, String(cloudSyncLogLimit.value))
+  cloudSyncLogs.value = cloudSyncLogs.value.slice(0, cloudSyncLogLimit.value)
+  persistCloudSyncLogs()
+}
+
+function clampCloudSyncLogLimit(value: unknown) {
+  const numberValue = Number(value)
+  if (!Number.isFinite(numberValue)) return CLOUD_SYNC_LOG_LIMIT_DEFAULT
+  return Math.min(Math.max(Math.round(numberValue), CLOUD_SYNC_LOG_LIMIT_MIN), CLOUD_SYNC_LOG_LIMIT_MAX)
+}
+
+function clearCloudSyncLogs() {
+  cloudSyncLogs.value = []
+  persistCloudSyncLogs()
+  showToast('同步记录已清空')
+}
+
+function cloudSyncDirectionLabel(direction: CloudSyncLogEntry['direction']) {
+  if (direction === 'download') return '下载'
+  if (direction === 'backup') return '备份'
+  return '上传'
+}
+
+function cloudSyncLogStatusLabel(status: CloudSyncLogStatus) {
+  if (status === 'started') return '开始'
+  if (status === 'review') return '待确认'
+  if (status === 'error') return '失败'
+  if (status === 'skipped') return '跳过'
+  return '完成'
+}
+
+function cloudSyncLogTitle(item: CloudSyncLogEntry) {
+  return item.message || cloudSyncLogStatusLabel(item.status)
+}
+
+function cloudSyncLogSummary(item: CloudSyncLogEntry) {
+  const diffText = [
+    item.added ? `新增 ${item.added}` : '',
+    item.modified ? `修改 ${item.modified}` : '',
+    item.deleted ? `删除 ${item.deleted}` : ''
+  ].filter(Boolean).join(' · ')
+  const selectedText = item.selected ? `已选 ${item.selected}/${item.total || item.selected}` : ''
+  return [selectedText, diffText || (item.total ? `差异 ${item.total}` : '')].filter(Boolean).join(' · ') || '无差异'
+}
+
+function buildCloudSyncDiff(sourcePayload: VaultPayload, basePayload: VaultPayload): CloudSyncDiffItem[] {
+  const sourceIndex = indexEntries(sourcePayload.entries || [])
+  const baseIndex = indexEntries(basePayload.entries || [])
+  const ids = new Set<string>([...sourceIndex.keys(), ...baseIndex.keys()])
+  const items: CloudSyncDiffItem[] = []
+
+  for (const id of ids) {
+    const sourceMeta = sourceIndex.get(id)
+    const baseMeta = baseIndex.get(id)
+    if (sourceMeta && !baseMeta) {
+      if (hasMissingAncestor(sourceMeta, baseIndex)) continue
+      items.push(makeCloudSyncDiffItem('added', sourceMeta, null))
+      continue
+    }
+    if (!sourceMeta && baseMeta) {
+      if (hasMissingAncestor(baseMeta, sourceIndex)) continue
+      items.push(makeCloudSyncDiffItem('deleted', null, baseMeta))
+      continue
+    }
+    if (sourceMeta && baseMeta) {
+      const changes = diffEntryChanges(sourceMeta, baseMeta)
+      if (changes.length) items.push(makeCloudSyncDiffItem('modified', sourceMeta, baseMeta, changes))
+    }
+  }
+
+  return items
+}
+
+function makeCloudSyncDiffItem(
+  changeType: CloudSyncChangeType,
+  sourceMeta: EntryIndexMeta | null,
+  baseMeta: EntryIndexMeta | null,
+  changes: CloudSyncChangeDetail[] = []
+): CloudSyncDiffItem {
+  const meta = sourceMeta || baseMeta
+  const entry = meta?.entry
+  return {
+    id: entry?.id || '',
+    changeType,
+    entryKind: entry?.kind === 'folder' ? 'folder' : 'login',
+    title: entry?.title || '未命名',
+    path: meta?.path || '未命名',
+    checked: true,
+    changes: changes.map((change) => change.label),
+    changeKeys: changes.map((change) => change.key),
+    sourceParentId: sourceMeta?.parentId || '',
+    sourceIndex: sourceMeta?.index || 0
+  }
+}
+
+function indexEntries(entries: VaultEntry[], parentId = '', parents: string[] = [], ancestorIds: string[] = [], result = new Map<string, EntryIndexMeta>()) {
+  entries.forEach((entry, index) => {
+    const title = entry.title || '未命名'
+    const path = [...parents, title].join(' / ') || title
+    result.set(entry.id, {
+      entry,
+      parentId,
+      index,
+      path,
+      ancestorIds
+    })
+    indexEntries(entry.children || [], entry.id, [...parents, title], [...ancestorIds, entry.id], result)
+  })
+  return result
+}
+
+function hasMissingAncestor(meta: EntryIndexMeta, otherIndex: Map<string, EntryIndexMeta>) {
+  return meta.ancestorIds.some((ancestorId) => !otherIndex.has(ancestorId))
+}
+
+function diffEntryChanges(sourceMeta: EntryIndexMeta, baseMeta: EntryIndexMeta) {
+  const changes: CloudSyncChangeDetail[] = []
+  if (sourceMeta.parentId !== baseMeta.parentId) {
+    changes.push({ key: 'position', label: CLOUD_SYNC_CHANGE_LABELS.position })
+  }
+  const source = comparableEntry(sourceMeta.entry)
+  const base = comparableEntry(baseMeta.entry)
+  for (const key of CLOUD_SYNC_ENTRY_CHANGE_FIELDS) {
+    if (JSON.stringify(source[key as keyof typeof source]) !== JSON.stringify(base[key as keyof typeof base])) {
+      changes.push({ key, label: CLOUD_SYNC_CHANGE_LABELS[key] })
+    }
+  }
+  return changes
+}
+
+function comparableEntry(entry: VaultEntry) {
+  return {
+    kind: entry.kind === 'folder' ? 'folder' : 'login',
+    title: entry.title || '',
+    status: normalizeEntryStatus(entry.status),
+    statusReason: entry.statusReason || '',
+    deletedAt: Number(entry.deletedAt || 0),
+    domains: Array.isArray(entry.domains) ? [...entry.domains] : [],
+    username: entry.username || '',
+    email: entry.email || '',
+    password: entry.password || '',
+    phone: entry.phone || '',
+    loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
+    note: entry.note || '',
+    totpSecret: entry.totpSecret || ''
+  }
+}
+
+function applyCloudSyncDiffItem(targetEntries: VaultEntry[], sourceEntries: VaultEntry[], item: CloudSyncDiffItem) {
+  if (item.changeType === 'deleted') {
+    removeEntryCopies(targetEntries, item.id)
+    return
+  }
+
+  const sourceEntry = findEntry(sourceEntries, item.id)
+  if (!sourceEntry) return
+  const nextEntry = clonePayload(sourceEntry)
+  const currentEntry = findEntry(targetEntries, item.id)
+  if (nextEntry.kind === 'folder' && currentEntry?.kind === 'folder') {
+    nextEntry.children = clonePayload(currentEntry.children || [])
+  }
+
+  removeEntryCopies(targetEntries, item.id)
+  insertEntryAt(targetEntries, item.sourceParentId, nextEntry, item.sourceIndex)
+}
+
+function cloudSyncChangeLabel(changeType: CloudSyncChangeType) {
+  if (changeType === 'added') return '新增'
+  if (changeType === 'modified') return '修改'
+  return '删除'
+}
+
+function cloudSyncEntryLabel(item: CloudSyncDiffItem) {
+  return item.entryKind === 'folder' ? '分组' : '登录'
+}
+
+function emptyCloudPayload(): VaultPayload {
+  return {
+    version: 1,
+    entries: [],
+    settings: normalizeSettings(settings),
+    updatedAt: 0
+  }
+}
+
+function clonePayload<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }
 
 async function refreshTotp(entryIdOverride = '') {
@@ -2082,14 +2984,33 @@ function normalizeSettings(nextSettings?: Partial<VaultPayload['settings']> | ty
       accessKeyId: String(oss.accessKeyId || '').trim(),
       accessKeySecret: String(oss.accessKeySecret || ''),
       region: String(oss.region || '').trim(),
-      objectName: normalizeObjectName(String(oss.objectName || DEFAULT_OSS_OBJECT_NAME))
+      objectName: normalizeObjectName(String(oss.objectName || DEFAULT_OSS_OBJECT_NAME)),
+      autoSync: oss.autoSync === true,
+      autoSyncIntervalMinutes: normalizeAutoSyncIntervalMinutes(oss.autoSyncIntervalMinutes)
     }
   }
 }
 
+function setAutoSyncIntervalMinutes(value: number | string) {
+  settings.oss.autoSyncIntervalMinutes = normalizeAutoSyncIntervalMinutes(value)
+}
+
+function normalizeAutoSyncIntervalMinutes(value: unknown) {
+  const numberValue = Number(value)
+  if (!Number.isFinite(numberValue)) return AUTO_CLOUD_SYNC_INTERVAL_DEFAULT_MINUTES
+  return Math.min(
+    Math.max(Math.round(numberValue), AUTO_CLOUD_SYNC_INTERVAL_MIN_MINUTES),
+    AUTO_CLOUD_SYNC_INTERVAL_MAX_MINUTES
+  )
+}
+
+function autoCloudDownloadMinIntervalMs() {
+  return normalizeAutoSyncIntervalMinutes(settings.oss.autoSyncIntervalMinutes) * 60 * 1000
+}
+
 function validateOssSettings() {
   syncSettings(settings)
-  if (!settings.oss.bucketName || !settings.oss.accessKeyId || !settings.oss.accessKeySecret || !settings.oss.region) {
+  if (!hasCompleteOssSettings()) {
     showFailToast('请先填写完整 OSS 配置')
     return false
   }
@@ -2098,6 +3019,10 @@ function validateOssSettings() {
     return false
   }
   return true
+}
+
+function hasCompleteOssSettings() {
+  return Boolean(settings.oss.bucketName && settings.oss.accessKeyId && settings.oss.accessKeySecret && settings.oss.region)
 }
 
 function createOssClient() {

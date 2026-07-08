@@ -34,6 +34,8 @@ export interface PasswordManagerApiAdapter {
   saveVault: (payload: VaultPayload) => Promise<ApiResult<VaultPayload>>
   changePassword: (newPassword: string) => Promise<ApiResult<AppState>>
   exportVaultBackup: () => Promise<ApiResult<VaultBackupExport>>
+  exportVaultBackupForPayload: (payload: VaultPayload) => Promise<ApiResult<VaultBackupExport>>
+  previewVaultBackup: (envelopeText: string) => Promise<ApiResult<VaultPayload>>
   importVaultBackup: (envelopeText: string) => Promise<ApiResult<VaultBackupImport>>
   getPluginListenerState: () => Promise<ApiResult<PluginListenerState>>
   enablePluginListener: (extensionId: string, browsers: string[]) => Promise<ApiResult<PluginListenerState>>
