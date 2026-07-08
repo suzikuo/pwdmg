@@ -37,6 +37,9 @@ final class AndroidVaultStore {
     private static final String SOURCE_USERNAME = "username";
     private static final String SOURCE_EMAIL = "email";
     private static final String SOURCE_PHONE = "phone";
+    private static final String STATUS_ACTIVE = "active";
+    private static final String STATUS_DISABLED = "disabled";
+    private static final String STATUS_TRASHED = "trashed";
     private static final byte[] AAD = "mypwdmg-vault-v1".getBytes(StandardCharsets.UTF_8);
     private static final int DEFAULT_ITERATIONS = 390000;
     private static final long UNLOCKED_EXPIRES_AT = 253402300799000L;
@@ -212,7 +215,7 @@ final class AndroidVaultStore {
         JSONObject sourcePayload = requirePayload();
         JSONObject entry = vaultIndex == null ? null : vaultIndex.getLogin(entryId);
         if (entry == null) entry = findEntry(sourcePayload.optJSONArray("entries"), entryId);
-        if (entry == null || !"login".equals(entry.optString("kind"))) {
+        if (entry == null || !"login".equals(entry.optString("kind")) || !STATUS_ACTIVE.equals(normalizeEntryStatus(entry.optString("status")))) {
             throw new IllegalArgumentException("Entry not found");
         }
         refreshSession();
@@ -439,6 +442,10 @@ final class AndroidVaultStore {
             .put("id", UUID.randomUUID().toString())
             .put("kind", "login")
             .put("title", firstNotEmpty(capture.optString("title"), capture.optString("hostname"), "Untitled"))
+            .put("status", STATUS_ACTIVE)
+            .put("statusReason", "")
+            .put("statusUpdatedAt", 0)
+            .put("deletedAt", 0)
             .put("domains", domains)
             .put("username", capture.optString("username"))
             .put("email", capture.optString("email"))
@@ -447,6 +454,7 @@ final class AndroidVaultStore {
             .put("loginAccountSource", normalizeLoginAccountSource(capture.optString("loginAccountSource")))
             .put("note", "")
             .put("totpSecret", "")
+            .put("history", new JSONArray())
             .put("children", new JSONArray());
     }
 
@@ -623,6 +631,10 @@ final class AndroidVaultStore {
             .put("id", entry.optString("id", UUID.randomUUID().toString()))
             .put("kind", kind)
             .put("title", defaultString(entry.optString("title"), "Untitled"))
+            .put("status", normalizeEntryStatus(entry.optString("status")))
+            .put("statusReason", entry.optString("statusReason"))
+            .put("statusUpdatedAt", entry.optLong("statusUpdatedAt", 0))
+            .put("deletedAt", entry.optLong("deletedAt", 0))
             .put("domains", normalizeDomains(entry.optJSONArray("domains")));
 
         if ("folder".equals(kind)) {
@@ -636,6 +648,7 @@ final class AndroidVaultStore {
                 .put("loginAccountSource", normalizeLoginAccountSource(entry.optString("loginAccountSource")))
                 .put("note", entry.optString("note"))
                 .put("totpSecret", entry.optString("totpSecret"))
+                .put("history", entry.optJSONArray("history") == null ? new JSONArray() : new JSONArray(entry.optJSONArray("history").toString()))
                 .put("children", new JSONArray());
         }
         return normalized;
@@ -833,6 +846,11 @@ final class AndroidVaultStore {
         return SOURCE_AUTO;
     }
 
+    private static String normalizeEntryStatus(String value) {
+        if (STATUS_DISABLED.equals(value) || STATUS_TRASHED.equals(value)) return value;
+        return STATUS_ACTIVE;
+    }
+
     private static String normalizeDomain(String value) {
         if (value == null) return "";
         String result = value.trim().toLowerCase(Locale.ROOT);
@@ -924,6 +942,7 @@ final class AndroidVaultStore {
             if (entry == null) continue;
             output.add(entry);
             if ("folder".equals(entry.optString("kind"))) {
+                if (!STATUS_ACTIVE.equals(normalizeEntryStatus(entry.optString("status")))) continue;
                 flattenEntries(entry.optJSONArray("children"), output);
             }
         }
@@ -936,7 +955,7 @@ final class AndroidVaultStore {
         flattenEntries(sourcePayload.optJSONArray("entries"), entries);
         List<JSONObject> logins = new ArrayList<>();
         for (JSONObject entry : entries) {
-            if ("login".equals(entry.optString("kind"))) logins.add(entry);
+            if ("login".equals(entry.optString("kind")) && STATUS_ACTIVE.equals(normalizeEntryStatus(entry.optString("status")))) logins.add(entry);
         }
         return logins;
     }
@@ -1022,7 +1041,7 @@ final class AndroidVaultStore {
 
         JSONObject getLogin(String entryId) {
             JSONObject entry = entriesById.get(entryId == null ? "" : entryId);
-            return entry != null && "login".equals(entry.optString("kind")) ? entry : null;
+            return entry != null && "login".equals(entry.optString("kind")) && STATUS_ACTIVE.equals(normalizeEntryStatus(entry.optString("status"))) ? entry : null;
         }
 
         List<JSONObject> loginEntries() {
@@ -1080,10 +1099,12 @@ final class AndroidVaultStore {
                 if (!id.isEmpty()) entriesById.put(id, entry);
 
                 if ("folder".equals(entry.optString("kind"))) {
+                    if (!STATUS_ACTIVE.equals(normalizeEntryStatus(entry.optString("status")))) continue;
                     visit(entry.optJSONArray("children"));
                     continue;
                 }
                 if (!"login".equals(entry.optString("kind"))) continue;
+                if (!STATUS_ACTIVE.equals(normalizeEntryStatus(entry.optString("status")))) continue;
 
                 loginEntries.add(entry);
                 boolean hasWildcard = false;

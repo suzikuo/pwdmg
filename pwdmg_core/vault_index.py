@@ -25,7 +25,7 @@ class VaultIndex:
 
     def get_login(self, entry_id: str) -> Dict[str, Any] | None:
         entry = self.get_entry(entry_id)
-        return entry if entry and entry.get("kind") == "login" else None
+        return entry if entry and entry.get("kind") == "login" and entry.get("status", "active") == "active" else None
 
     def path_for(self, entry_id: str) -> List[str]:
         return list(self.paths_by_id.get(entry_id) or [])
@@ -64,11 +64,15 @@ class VaultIndex:
                 self.paths_by_id[entry_id] = list(parents)
 
             if entry.get("kind") == "folder":
+                if entry.get("status", "active") != "active":
+                    continue
                 title = entry.get("title") or "Untitled"
                 self._visit(entry.get("children") or [], [*parents, title])
                 continue
 
             if entry.get("kind") != "login":
+                continue
+            if entry.get("status", "active") != "active":
                 continue
 
             self.login_entries.append(entry)

@@ -152,10 +152,9 @@ Startup errors from Chrome/Edge are written to `native-host\native-host-error.lo
 
 Run `npm run build` in `front/`, then open `android/` in Android Studio. The WebView loads `front/dist/android/` and talks to `AndroidPasswordBridge`; Autofill reads the same encrypted `vault.json` envelope from the app private directory.
 
-For public releases, set a private Android signing key with environment variables instead of using the debug key:
+For public releases, keep `pwdmg-release.jks` in the project root or override the path with `MYPWDMG_ANDROID_KEYSTORE`. Set the signing passwords and alias before building:
 
 ```powershell
-$env:MYPWDMG_ANDROID_KEYSTORE="D:\keys\mypwdmg-release.jks"
 $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD="..."
 $env:MYPWDMG_ANDROID_KEY_ALIAS="mypwdmg"
 $env:MYPWDMG_ANDROID_KEY_PASSWORD="..."

@@ -1,6 +1,7 @@
-import type { LoginAccountSource, VaultEntry, VaultPayload } from '../types'
+import type { EntryStatus, LoginAccountSource, VaultEntry, VaultPayload } from '../types'
 
 const LOGIN_ACCOUNT_SOURCES = new Set<LoginAccountSource>(['auto', 'username', 'email', 'phone'])
+const ENTRY_STATUSES = new Set<EntryStatus>(['active', 'disabled', 'trashed'])
 
 export function nowSeconds() {
   return Math.floor(Date.now() / 1000)
@@ -47,6 +48,10 @@ function normalizeEntries(entries: VaultEntry[]): VaultEntry[] {
     id: entry.id || makeId(),
     kind: entry.kind === 'folder' ? 'folder' : 'login',
     title: entry.title || 'Untitled',
+    status: normalizeEntryStatus(entry.status),
+    statusReason: entry.statusReason || '',
+    statusUpdatedAt: Number(entry.statusUpdatedAt || 0),
+    deletedAt: Number(entry.deletedAt || 0),
     domains: Array.isArray(entry.domains) ? entry.domains.filter(Boolean) : [],
     username: entry.username || '',
     email: entry.email || '',
@@ -55,8 +60,15 @@ function normalizeEntries(entries: VaultEntry[]): VaultEntry[] {
     loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
     note: entry.note || '',
     totpSecret: entry.totpSecret || '',
+    history: Array.isArray(entry.history) ? entry.history : [],
     children: normalizeEntries(entry.children || [])
   }))
+}
+
+function normalizeEntryStatus(value: unknown): EntryStatus {
+  return typeof value === 'string' && ENTRY_STATUSES.has(value as EntryStatus)
+    ? (value as EntryStatus)
+    : 'active'
 }
 
 function normalizeLoginAccountSource(value: unknown): LoginAccountSource {

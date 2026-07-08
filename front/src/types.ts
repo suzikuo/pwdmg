@@ -1,10 +1,28 @@
 export type EntryKind = 'login' | 'folder'
 export type LoginAccountSource = 'auto' | 'username' | 'email' | 'phone'
+export type EntryStatus = 'active' | 'disabled' | 'trashed'
+export type EntryHistoryAction = 'created' | 'updated' | 'disabled' | 'restored' | 'trashed'
+
+export interface VaultEntryHistory {
+  id: string
+  action: EntryHistoryAction
+  at: number
+  title: string
+  username?: string
+  email?: string
+  phone?: string
+  domains?: string[]
+  note?: string
+}
 
 export interface VaultEntry {
   id: string
   kind: EntryKind
   title: string
+  status?: EntryStatus
+  statusReason?: string
+  statusUpdatedAt?: number
+  deletedAt?: number
   domains: string[]
   username?: string
   email?: string
@@ -13,6 +31,7 @@ export interface VaultEntry {
   loginAccountSource?: LoginAccountSource
   note?: string
   totpSecret?: string
+  history?: VaultEntryHistory[]
   children?: VaultEntry[]
 }
 

@@ -6,11 +6,20 @@
         <h2>{{ entry.title }}</h2>
       </div>
       <div class="detail-actions">
-        <van-button size="small" icon="edit" plain @click="$emit('edit', entry)">编辑</van-button>
-        <button class="detail-delete-button" type="button" aria-label="删除" @click="$emit('delete', entry.id)">
+        <van-button v-if="entry.status !== 'trashed'" size="small" icon="edit" plain @click="$emit('edit', entry)">编辑</van-button>
+        <van-button v-if="entry.status === 'active' || !entry.status" size="small" icon="closed-eye" plain type="danger" @click="$emit('disable', entry.id)">归档</van-button>
+        <van-button v-if="entry.status === 'disabled' || entry.status === 'trashed'" size="small" icon="replay" plain type="primary" @click="$emit('restore', entry.id)">恢复</van-button>
+        <button v-if="entry.status !== 'trashed'" class="detail-delete-button" type="button" aria-label="删除" @click="$emit('delete', entry.id)">
+          <van-icon name="delete-o" />
+        </button>
+        <button v-else class="detail-delete-button" type="button" aria-label="彻底删除" @click="$emit('purge', entry.id)">
           <van-icon name="delete-o" />
         </button>
       </div>
+    </div>
+    <div v-if="entry.status === 'disabled' || entry.status === 'trashed'" class="detail-status-note">
+      <strong>{{ entry.status === 'disabled' ? '已归档' : '回收站' }}</strong>
+      <span>{{ entry.statusReason || (entry.status === 'disabled' ? '不会出现在正常列表和自动填充中，恢复后回到原位置' : '已从正常列表隐藏') }}</span>
     </div>
 
     <div class="detail-row" v-if="entry.domains?.length">
@@ -82,6 +91,9 @@ defineProps<{
 defineEmits<{
   edit: [entry: VaultEntry]
   delete: [entryId: string]
+  disable: [entryId: string]
+  restore: [entryId: string]
+  purge: [entryId: string]
   copy: [value: string]
   'toggle-password': []
   'refresh-totp': []

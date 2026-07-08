@@ -23,6 +23,7 @@ LOCAL_IMPORT_BACKUP_PREFIX = "vault-before-cloud-download-"
 LOCAL_IMPORT_BACKUP_SUFFIX = ".json"
 LOGIN_ACCOUNT_SOURCES = {"auto", "username", "email", "phone"}
 CAPTURE_ACCOUNT_KINDS = {"generic", "username", "email", "phone"}
+ENTRY_STATUSES = {"active", "disabled", "trashed"}
 MAX_CAPTURE_TEXT_LENGTH = 512
 MAX_CAPTURE_PASSWORD_LENGTH = 4096
 
@@ -423,6 +424,10 @@ class VaultService:
             "id": entry.get("id") or str(uuid.uuid4()),
             "kind": kind,
             "title": entry.get("title") or "Untitled",
+            "status": self._normalize_entry_status(entry.get("status")),
+            "statusReason": entry.get("statusReason") or "",
+            "statusUpdatedAt": int(entry.get("statusUpdatedAt") or 0),
+            "deletedAt": int(entry.get("deletedAt") or 0),
             "domains": [normalize_domain(d) for d in entry.get("domains", []) if normalize_domain(d)],
         }
         if kind == "folder":
@@ -439,6 +444,7 @@ class VaultService:
                     ),
                     "note": entry.get("note") or "",
                     "totpSecret": entry.get("totpSecret") or "",
+                    "history": entry.get("history") if isinstance(entry.get("history"), list) else [],
                     "children": [],
                 }
             )
@@ -446,6 +452,9 @@ class VaultService:
 
     def _normalize_login_account_source(self, value: Any) -> str:
         return value if value in LOGIN_ACCOUNT_SOURCES else "auto"
+
+    def _normalize_entry_status(self, value: Any) -> str:
+        return value if value in ENTRY_STATUSES else "active"
 
     def _normalize_capture(self, capture: Dict[str, Any]) -> Dict[str, Any]:
         title = self._clean_capture_text(capture.get("title")) or "Untitled"
@@ -510,6 +519,8 @@ class VaultService:
             for item in items or []:
                 if item.get("kind") != "folder":
                     continue
+                if item.get("status", "active") != "active":
+                    continue
                 title = item.get("title") or "Untitled"
                 path_parts = [*parents, title]
                 folders.append(
@@ -532,7 +543,7 @@ class VaultService:
             entry = self._index.get_entry(folder_id)
         else:
             entry = find_entry(entries, folder_id)
-        return entry if entry and entry.get("kind") == "folder" else None
+        return entry if entry and entry.get("kind") == "folder" and entry.get("status", "active") == "active" else None
 
     def _find_capture_candidate(self, entries: Iterable[Dict[str, Any]], capture: Dict[str, Any]) -> Dict[str, Any] | None:
         best: Dict[str, Any] | None = None
@@ -556,9 +567,13 @@ class VaultService:
             nonlocal best
             for entry in items or []:
                 if entry.get("kind") == "folder":
+                    if entry.get("status", "active") != "active":
+                        continue
                     visit(entry.get("children") or [], [*path, entry.get("title") or "Untitled"])
                     continue
                 if entry.get("kind") != "login":
+                    continue
+                if entry.get("status", "active") != "active":
                     continue
                 if not any(domain_matches(capture["hostname"], domain) for domain in entry.get("domains") or []):
                     continue
@@ -652,6 +667,10 @@ class VaultService:
             "id": str(uuid.uuid4()),
             "kind": "login",
             "title": capture["title"] or capture["hostname"] or "Untitled",
+            "status": "active",
+            "statusReason": "",
+            "statusUpdatedAt": 0,
+            "deletedAt": 0,
             "domains": domains,
             "username": capture["username"],
             "email": capture["email"],
@@ -660,6 +679,7 @@ class VaultService:
             "loginAccountSource": capture["loginAccountSource"],
             "note": "",
             "totpSecret": "",
+            "history": [],
             "children": [],
         }
 

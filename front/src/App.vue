@@ -99,6 +99,10 @@
               <span>TOTP</span>
               <strong>{{ stats.totp }}</strong>
             </div>
+            <div>
+              <span>归档</span>
+              <strong>{{ stats.archived }}</strong>
+            </div>
           </div>
 
           <EntryList
@@ -112,6 +116,7 @@
             @delete="deleteEntry"
             @create="openCreateSheet"
             @move-entry="moveEntry"
+            @context-menu="openEntryContextMenu"
           />
         </section>
 
@@ -128,6 +133,9 @@
               :totp-progress="totpProgress"
               @edit="openEdit"
               @delete="deleteEntry"
+              @disable="disableEntry"
+              @restore="restoreEntry"
+              @purge="purgeEntry"
               @copy="copyText"
               @toggle-password="showPassword = !showPassword"
               @refresh-totp="refreshTotp()"
@@ -159,6 +167,9 @@
           :totp-progress="totpProgress"
           @edit="openEdit"
           @delete="deleteEntry"
+          @disable="disableEntry"
+          @restore="restoreEntry"
+          @purge="purgeEntry"
           @copy="copyText"
           @toggle-password="showPassword = !showPassword"
           @refresh-totp="refreshTotp()"
@@ -173,6 +184,26 @@
       close-on-click-action
       @select="handleCreateAction"
     />
+
+    <div
+      v-if="entryContextMenuOpen"
+      class="entry-context-menu"
+      :style="entryContextMenuStyle"
+      role="menu"
+      @contextmenu.prevent
+      @pointerdown.stop
+    >
+      <button
+        v-for="action in entryContextActions"
+        :key="action.key"
+        type="button"
+        role="menuitem"
+        :class="{ danger: action.color === '#ee0a24' }"
+        @click="handleEntryContextAction(action)"
+      >
+        {{ action.name }}
+      </button>
+    </div>
 
     <van-popup v-model:show="editorOpen" position="bottom" class="editor-popup" :duration="0.12" lazy-render>
       <div class="sheet-inner" @focusin="scrollFocusedEditorFieldIntoView">
@@ -231,6 +262,10 @@
           <button type="button" :class="{ active: drawerSection === 'backup' }" @click="selectDrawerSection('backup')">
             <van-icon name="description-o" />
             <span>备份</span>
+          </button>
+          <button type="button" :class="{ active: drawerSection === 'system' }" @click="selectDrawerSection('system')">
+            <van-icon name="cluster-o" />
+            <span>系统分组</span>
           </button>
         </nav>
 
@@ -384,11 +419,77 @@
             <van-button block type="primary" native-type="submit">保存云配置</van-button>
           </van-form>
           <div class="backup-actions">
+            <van-button class="backup-action-button" size="small" plain type="default" icon="search" :loading="cloudBusy" @click="checkCloudBackupInfo">检测</van-button>
             <van-button class="backup-action-button" size="small" type="primary" icon="upgrade" :loading="cloudBusy" @click="uploadCloudBackup">上传</van-button>
             <van-button class="backup-action-button" size="small" plain type="primary" icon="notes-o" :loading="cloudBusy" @click="backupCloudVault">备份</van-button>
             <van-button class="backup-action-button" size="small" plain type="primary" icon="down" :loading="cloudBusy" @click="downloadCloudBackup">下载</van-button>
+            <van-button class="backup-action-button" size="small" plain type="default" icon="records-o" :loading="cloudBusy" @click="refreshCloudBackupList">列表</van-button>
+          </div>
+          <div v-if="cloudInfo" class="backup-info-grid">
+            <div>
+              <span>固定文件</span>
+              <strong>{{ cloudInfo.exists ? '已存在' : '未找到' }}</strong>
+            </div>
+            <div>
+              <span>大小</span>
+              <strong>{{ cloudInfo.size ? formatBytes(cloudInfo.size) : '-' }}</strong>
+            </div>
+            <div>
+              <span>更新时间</span>
+              <strong>{{ cloudInfo.lastModified ? formatDateTime(cloudInfo.lastModified) : '-' }}</strong>
+            </div>
+          </div>
+          <div v-if="cloudBackups.length" class="cloud-backup-list">
+            <button
+              v-for="item in cloudBackups"
+              :key="item.name"
+              class="cloud-backup-item"
+              type="button"
+              @click="selectCloudBackup(item.name)"
+            >
+              <span>{{ item.name }}</span>
+              <small>{{ formatBytes(item.size) }} · {{ formatDateTime(item.lastModified) }}</small>
+            </button>
           </div>
           <p v-if="backupStatus" class="settings-note">{{ backupStatus }}</p>
+        </section>
+        <section v-else-if="drawerSection === 'system'" class="drawer-panel system-panel">
+          <div class="system-group-list">
+            <button
+              v-for="group in systemGroups"
+              :key="group.key"
+              type="button"
+              :class="{ active: systemGroupKey === group.key }"
+              @click="systemGroupKey = group.key"
+            >
+              <span class="system-group-icon"><van-icon :name="group.icon" /></span>
+              <span class="system-group-copy">
+                <strong>{{ group.title }}</strong>
+                <small>{{ group.description }}</small>
+              </span>
+              <em>{{ group.count }}</em>
+            </button>
+          </div>
+          <div class="system-group-head">
+            <span>系统分组</span>
+            <strong>{{ currentSystemGroup.title }}</strong>
+            <small>{{ currentSystemGroup.description }}</small>
+          </div>
+          <van-empty v-if="systemGroupEntries.length === 0" image="search" :description="currentSystemGroup.emptyText" />
+          <div v-else class="archive-entry-list">
+            <div v-for="entry in systemGroupEntries" :key="entry.id" class="archive-entry">
+              <div>
+                <strong>{{ entry.title }}</strong>
+                <span>{{ archiveEntryMeta(entry) }}</span>
+                <small v-if="entry.statusReason">{{ entry.statusReason }}</small>
+              </div>
+              <div class="archive-entry-actions">
+                <van-button size="mini" plain type="primary" @click="restoreEntry(entry.id)">恢复</van-button>
+                <van-button v-if="systemGroupKey === 'archived'" size="mini" plain type="danger" @click="trashEntry(entry.id)">放入回收站</van-button>
+                <van-button v-else size="mini" plain type="danger" @click="purgeEntry(entry.id)">彻底删除</van-button>
+              </div>
+            </div>
+          </div>
         </section>
         <section v-else class="drawer-panel drawer-empty"></section>
       </aside>
@@ -445,7 +546,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { showConfirmDialog, showFailToast, showSuccessToast, showToast } from 'vant'
 import DetailContent from './components/DetailContent.vue'
 import EntryList from './components/EntryList.vue'
-import { AliyunOSSAPI, APIResponseStatus, DEFAULT_OSS_OBJECT_NAME, normalizeObjectName } from './services/aliyunOss'
+import { AliyunOSSAPI, APIResponseStatus, DEFAULT_OSS_OBJECT_NAME, normalizeObjectName, type OSSFileInfo } from './services/aliyunOss'
 import { api } from './services/api'
 import { generateTotp } from './services/totp'
 import type {
@@ -455,6 +556,7 @@ import type {
   AppUpdateCheck,
   AppUpdateProgress,
   EntryKind,
+  EntryStatus,
   LoginAccountSource,
   PluginListenerState,
   VaultEntry,
@@ -474,8 +576,25 @@ type AndroidAutofillLaunchContext = {
   searchTerm?: string
   includeAll?: boolean
 }
+type DrawerSection = 'settings' | 'updates' | 'backup' | 'system'
+type SystemGroupKey = 'archived' | 'trashed'
+type SystemGroupInfo = {
+  key: SystemGroupKey
+  title: string
+  description: string
+  emptyText: string
+  icon: string
+  count: number
+}
+type CloudBackupInfo = {
+  name: string
+  exists: boolean
+  size: number
+  lastModified: string
+}
 
 const LOGIN_ACCOUNT_SOURCES = new Set<LoginAccountSource>(['auto', 'username', 'email', 'phone'])
+const ENTRY_STATUSES = new Set<EntryStatus>(['active', 'disabled', 'trashed'])
 
 const DESKTOP_QUERY = '(min-width: 820px)'
 const PANE_WIDTH_KEY = 'mypwdmg.desktopPaneWidth'
@@ -534,6 +653,7 @@ const detailOpen = ref(false)
 const detailSheetExpanded = ref(false)
 const drawerOpen = ref(false)
 const createSheetOpen = ref(false)
+const entryContextMenuOpen = ref(false)
 const createMenuOpen = ref(false)
 const moreMenuOpen = ref(false)
 const passwordSheetOpen = ref(false)
@@ -541,18 +661,25 @@ const pluginDetailOpen = ref(false)
 const createParentId = ref('')
 const dragMode = ref(false)
 const drawerDetailOpen = ref(false)
-const drawerSection = ref<'settings' | 'updates' | 'backup'>('settings')
+const drawerSection = ref<DrawerSection>('settings')
+const systemGroupKey = ref<SystemGroupKey>('archived')
 const searchOpen = ref(false)
 const uiScalePercent = ref(loadUiScale())
 const fontSizePercent = ref(loadFontSize())
 const editingId = ref('')
 const editingParentId = ref('')
+const contextEntryId = ref('')
+const entryContextMenuX = ref(0)
+const entryContextMenuY = ref(0)
 const domainText = ref('')
 const totpCode = ref('')
 const selectedEntry = ref<VaultEntry | null>(null)
 const pluginListener = ref<PluginListenerState | null>(null)
 const androidAutofill = ref<AndroidAutofillState | null>(null)
 const androidAutofillLaunch = ref<AndroidAutofillLaunchContext | null>(null)
+const cloudInfo = ref<CloudBackupInfo | null>(null)
+const cloudBackups = ref<CloudBackupInfo[]>([])
+const selectedCloudObjectName = ref('')
 const showPassword = ref(false)
 const totpRemaining = ref(TOTP_PERIOD_SECONDS)
 const totpRequestId = ref(0)
@@ -580,6 +707,37 @@ const createMenuActions = [
   { text: '登录', icon: 'records-o', kind: 'login' as EntryKind },
   { text: '分组', icon: 'cluster-o', kind: 'folder' as EntryKind }
 ]
+const entryContextActions = computed(() => {
+  const entry = findEntry(vault.value?.entries || [], contextEntryId.value)
+  if (!entry) return []
+  if (entry.status === 'trashed') {
+    return [
+      { name: '恢复', key: 'restore', color: '#0f766e' },
+      { name: '彻底删除', key: 'purge', color: '#ee0a24' }
+    ]
+  }
+  const actions: Array<{ name: string; key: string; color?: string }> = []
+  if (entry.kind === 'folder') {
+    actions.push(
+      { name: '新建登录', key: 'create-login' },
+      { name: '新建分组', key: 'create-folder' },
+      { name: '编辑分组', key: 'edit' },
+      { name: '归档分组', key: 'archive', color: '#ee0a24' },
+      { name: '移入回收站', key: 'trash', color: '#ee0a24' }
+    )
+  } else {
+    actions.push(
+      { name: '编辑登录', key: 'edit' },
+      { name: '归档登录', key: 'archive', color: '#ee0a24' },
+      { name: '移入回收站', key: 'trash', color: '#ee0a24' }
+    )
+  }
+  return actions
+})
+const entryContextMenuStyle = computed<CssVars>(() => ({
+  left: `${entryContextMenuX.value}px`,
+  top: `${entryContextMenuY.value}px`
+}))
 const moreActions = computed(() => [
   {
     text: dragMode.value ? '退出拖拽模式' : '拖拽模式',
@@ -597,12 +755,13 @@ const loginAccountSourceOptions: Array<{ label: string; value: LoginAccountSourc
 ]
 
 const unlocked = computed(() => Boolean(vault.value) && !state.locked)
-const filteredEntries = computed(() => filterEntries(vault.value?.entries || [], keyword.value.trim().toLowerCase()))
+const filteredEntries = computed(() => filterEntries(activeTree(vault.value?.entries || []), keyword.value.trim().toLowerCase()))
 const passwordMask = computed(() => selectedEntry.value?.password ? '••••••••••••' : '未设置')
 const totpProgress = computed(() => Math.round((totpRemaining.value / TOTP_PERIOD_SECONDS) * 100))
 const drawerSectionTitle = computed(() => {
   if (drawerSection.value === 'settings') return '设置'
   if (drawerSection.value === 'updates') return '更新'
+  if (drawerSection.value === 'system') return '系统分组'
   return '备份'
 })
 const pluginListenerStatus = computed(() => {
@@ -651,11 +810,39 @@ const desktopGridStyle = computed<CssVars>(() => {
 })
 const stats = computed(() => {
   const flat = flattenEntries(vault.value?.entries || [])
+  const active = flat.filter(isActiveEntry)
   return {
-    logins: flat.filter((entry) => entry.kind === 'login').length,
-    folders: flat.filter((entry) => entry.kind === 'folder').length,
-    totp: flat.filter((entry) => entry.kind === 'login' && entry.totpSecret).length
+    logins: active.filter((entry) => entry.kind === 'login').length,
+    folders: active.filter((entry) => entry.kind === 'folder').length,
+    totp: active.filter((entry) => entry.kind === 'login' && entry.totpSecret).length,
+    archived: collectSystemGroupEntries(vault.value?.entries || [], 'disabled').length,
+    trashed: collectSystemGroupEntries(vault.value?.entries || [], 'trashed').length
   }
+})
+const systemGroups = computed<SystemGroupInfo[]>(() => [
+  {
+    key: 'archived',
+    title: '已归档',
+    description: '隐藏但保留原分组位置，恢复后回到原处',
+    emptyText: '没有归档条目',
+    icon: 'closed-eye',
+    count: stats.value.archived
+  },
+  {
+    key: 'trashed',
+    title: '回收站',
+    description: '准备删除的条目，彻底删除前还能恢复',
+    emptyText: '回收站为空',
+    icon: 'delete-o',
+    count: stats.value.trashed
+  }
+])
+const currentSystemGroup = computed(() => {
+  return systemGroups.value.find((group) => group.key === systemGroupKey.value) || systemGroups.value[0]
+})
+const systemGroupEntries = computed(() => {
+  const status: EntryStatus = systemGroupKey.value === 'archived' ? 'disabled' : 'trashed'
+  return collectSystemGroupEntries(vault.value?.entries || [], status)
 })
 
 let desktopMediaQuery: MediaQueryList | null = null
@@ -680,10 +867,11 @@ onMounted(() => {
   drawerMediaQuery.addEventListener('change', syncDrawerMode)
   window.addEventListener('resize', clampPaneToViewport)
   window.addEventListener('pointerdown', closeTopMenusOnOutside, true)
+  window.addEventListener('scroll', closeEntryContextMenu, true)
+  window.addEventListener('resize', closeEntryContextMenu)
   window.addEventListener('focus', loadAndroidAutofillState)
   window.addEventListener('focus', resetAndroidInstallBusy)
   window.addEventListener('focus', scheduleExternalVaultRefresh)
-  document.addEventListener('contextmenu', suppressNonEditableSelection)
   document.addEventListener('selectstart', suppressNonEditableSelection)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   window.__mypwdmgHandleNativeBack = handleNativeBack
@@ -699,6 +887,9 @@ watch(drawerOpen, (open) => {
 watch(detailOpen, (open) => {
   if (!open) detailSheetExpanded.value = false
 })
+watch(entryContextMenuOpen, (open) => {
+  if (!open) contextEntryId.value = ''
+})
 watch(keyword, (value) => {
   if (value.trim()) dragMode.value = false
 })
@@ -709,10 +900,11 @@ onUnmounted(() => {
   drawerMediaQuery?.removeEventListener('change', syncDrawerMode)
   window.removeEventListener('resize', clampPaneToViewport)
   window.removeEventListener('pointerdown', closeTopMenusOnOutside, true)
+  window.removeEventListener('scroll', closeEntryContextMenu, true)
+  window.removeEventListener('resize', closeEntryContextMenu)
   window.removeEventListener('focus', loadAndroidAutofillState)
   window.removeEventListener('focus', resetAndroidInstallBusy)
   window.removeEventListener('focus', scheduleExternalVaultRefresh)
-  document.removeEventListener('contextmenu', suppressNonEditableSelection)
   document.removeEventListener('selectstart', suppressNonEditableSelection)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (externalVaultRefreshTimer) window.clearTimeout(externalVaultRefreshTimer)
@@ -747,6 +939,10 @@ function closeTopLayer() {
   if (editorOpen.value) {
     blurActiveElement()
     editorOpen.value = false
+    return true
+  }
+  if (entryContextMenuOpen.value) {
+    entryContextMenuOpen.value = false
     return true
   }
   if (createSheetOpen.value) {
@@ -985,6 +1181,10 @@ function emptyEntry(kind: EntryKind): VaultEntry {
     id: makeId(),
     kind,
     title: '',
+    status: 'active',
+    statusReason: '',
+    statusUpdatedAt: 0,
+    deletedAt: 0,
     domains: [],
     username: '',
     email: '',
@@ -993,6 +1193,7 @@ function emptyEntry(kind: EntryKind): VaultEntry {
     loginAccountSource: 'auto',
     note: '',
     totpSecret: '',
+    history: [],
     children: []
   }
 }
@@ -1003,6 +1204,7 @@ function makeId() {
 
 function resetForm(entry: VaultEntry) {
   Object.assign(form, emptyEntry(entry.kind), JSON.parse(JSON.stringify(entry)))
+  form.status = normalizeEntryStatus(form.status)
   form.loginAccountSource = normalizeLoginAccountSource(form.loginAccountSource)
   domainText.value = (entry.domains || []).join('\n')
   totpCode.value = ''
@@ -1037,6 +1239,45 @@ function handleTopCreateAction(action: { kind?: EntryKind }) {
   if (!action.kind) return
   createParentId.value = ''
   openCreate(action.kind, '')
+}
+
+function openEntryContextMenu(payload: { entry: VaultEntry; x: number; y: number }) {
+  if (dragMode.value) return
+  contextEntryId.value = payload.entry.id
+  const position = clampEntryContextMenuPosition(payload.x, payload.y)
+  entryContextMenuX.value = position.x
+  entryContextMenuY.value = position.y
+  createMenuOpen.value = false
+  moreMenuOpen.value = false
+  entryContextMenuOpen.value = true
+}
+
+function handleEntryContextAction(action: { key?: string }) {
+  const entry = findEntry(vault.value?.entries || [], contextEntryId.value)
+  entryContextMenuOpen.value = false
+  contextEntryId.value = ''
+  if (!entry || !action.key) return
+  if (action.key === 'create-login') return openCreate('login', entry.id)
+  if (action.key === 'create-folder') return openCreate('folder', entry.id)
+  if (action.key === 'edit') return openEdit(entry)
+  if (action.key === 'archive') return archiveEntry(entry.id)
+  if (action.key === 'trash') return trashEntry(entry.id)
+  if (action.key === 'restore') return restoreEntry(entry.id)
+  if (action.key === 'purge') return purgeEntry(entry.id)
+}
+
+function closeEntryContextMenu() {
+  if (entryContextMenuOpen.value) entryContextMenuOpen.value = false
+}
+
+function clampEntryContextMenuPosition(x: number, y: number) {
+  const menuWidth = 156
+  const menuHeight = 188
+  const margin = 8
+  return {
+    x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
+    y: Math.max(margin, Math.min(y, window.innerHeight - menuHeight - margin))
+  }
 }
 
 function handleMoreAction(action: { key?: string }) {
@@ -1101,8 +1342,10 @@ async function saveEntry() {
   const payload = cloneVault()
   const entry = normalizeForm()
   if (editingId.value) {
+    appendEntryHistory(entry, 'updated', '手动编辑')
     replaceEntry(payload.entries, editingId.value, entry)
   } else {
+    appendEntryHistory(entry, 'created', '手动创建')
     insertEntry(payload.entries, editingParentId.value, entry)
   }
   const result = await api.saveVault(payload)
@@ -1116,39 +1359,75 @@ async function saveEntry() {
 }
 
 async function deleteEntry(entryId: string) {
+  await trashEntry(entryId)
+}
+
+async function disableEntry(entryId: string) {
+  await archiveEntry(entryId)
+}
+
+async function archiveEntry(entryId: string) {
   if (!vault.value) return
   const target = findEntry(vault.value.entries, entryId)
   if (!target) return showToast('条目不存在')
   const title = target.title || '未命名'
-  const childCount = target.kind === 'folder' ? flattenEntries(target.children || []).length : 0
-  const firstMessage =
-    target.kind === 'folder'
-      ? childCount > 0
-        ? `分组「${title}」下的 ${childCount} 项内容也会一起删除，确定继续吗？`
-        : `确定删除空分组「${title}」吗？`
-      : `确定删除登录「${title}」吗？`
-
+  const childCount = target.kind === 'folder' ? flattenEntries(target.children || []).filter((entry) => entry.status !== 'disabled').length : 0
+  const message = target.kind === 'folder'
+    ? childCount > 0
+      ? `分组「${title}」和其中 ${childCount} 项内容会从正常列表中隐藏，之后可以在归档里恢复。`
+      : `分组「${title}」会从正常列表中隐藏，之后可以在归档里恢复。`
+    : `「${title}」会从正常列表和自动填充中隐藏，之后可以在归档里恢复。`
   try {
     await showConfirmDialog({
-      title: target.kind === 'folder' ? '删除分组' : '删除登录',
-      message: firstMessage,
-      confirmButtonText: '继续删除',
-      confirmButtonColor: '#ee0a24'
-    })
-    await showConfirmDialog({
-      title: '再次确认',
-      message: '删除后无法从保险库恢复，确定永久删除吗？',
-      confirmButtonText: '永久删除',
+      title: target.kind === 'folder' ? '归档分组' : '归档登录',
+      message,
+      confirmButtonText: target.kind === 'folder' ? '归档分组' : '归档登录',
       confirmButtonColor: '#ee0a24'
     })
   } catch {
     return
   }
+  const payload = cloneVault()
+  const reason = target.kind === 'folder' ? '分组已归档' : '登录已归档，暂不在正常列表使用'
+  if (!updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'disabled', reason))) return
+  const result = await api.saveVault(payload)
+  if (!result.ok || !result.data) return showFailToast(result.message || '归档失败')
+  vault.value = result.data
+  if (selectedEntry.value && (selectedEntry.value.id === entryId || isDescendant(target, selectedEntry.value.id))) {
+    clearSelectedEntry()
+  }
+  drawerSection.value = 'system'
+  systemGroupKey.value = 'archived'
+  showSuccessToast(target.kind === 'folder' ? '分组已归档' : '登录已归档')
+}
+
+async function trashEntry(entryId: string) {
+  if (!vault.value) return
+  const target = findEntry(vault.value.entries, entryId)
+  if (!target) return showToast('条目不存在')
+  const title = target.title || '未命名'
+  const childCount = target.kind === 'folder' ? flattenEntries(target.children || []).filter((entry) => entry.status !== 'trashed').length : 0
+  const message = target.kind === 'folder'
+    ? childCount > 0
+      ? `分组「${title}」下的 ${childCount} 项内容也会一起移入回收站，之后可以恢复。`
+      : `将空分组「${title}」移入回收站？`
+    : `将登录「${title}」移入回收站？之后可以恢复。`
+  try {
+    await showConfirmDialog({
+      title: '移入回收站',
+      message,
+      confirmButtonText: '移入回收站',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
   const shouldClearSelection = selectedEntry.value
     ? selectedEntry.value.id === entryId || isDescendant(target, selectedEntry.value.id)
     : false
   const payload = cloneVault()
-  removeEntry(payload.entries, entryId)
+  if (!updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'trashed', '已移入回收站'))) return
   const result = await api.saveVault(payload)
   if (!result.ok || !result.data) return showFailToast(result.message || '删除失败')
   vault.value = result.data
@@ -1157,7 +1436,62 @@ async function deleteEntry(entryId: string) {
     detailOpen.value = false
     stopTotpTimer()
   }
-  showSuccessToast('已删除')
+  drawerSection.value = 'system'
+  systemGroupKey.value = 'trashed'
+  showSuccessToast('已移入回收站')
+}
+
+async function restoreEntry(entryId: string) {
+  if (!vault.value) return
+  const target = findEntry(vault.value.entries, entryId)
+  if (!target) return showToast('条目不存在')
+  const payload = cloneVault()
+  const updater = target.kind === 'folder'
+    ? (entry: VaultEntry) => markEntryStatus(entry, 'active', '恢复为正常条目')
+    : (entry: VaultEntry) => markEntrySelfStatus(entry, 'active', '恢复为正常账号')
+  if (!updateEntryAndAncestorsById(payload.entries, entryId, updater, (entry) => markEntrySelfStatus(entry, 'active', '恢复上级分组'))) {
+    return showToast('条目不存在')
+  }
+  const result = await api.saveVault(payload)
+  if (!result.ok || !result.data) return showFailToast(result.message || '恢复失败')
+  vault.value = result.data
+  selectedEntry.value = findEntry(vault.value.entries, entryId)
+  if (selectedEntry.value && selectedEntry.value.kind === 'login') showEntryDetail(selectedEntry.value)
+  showSuccessToast('已恢复')
+}
+
+async function purgeEntry(entryId: string) {
+  if (!vault.value) return
+  const target = findEntry(vault.value.entries, entryId)
+  if (!target) return showToast('条目不存在')
+  const title = target.title || '未命名'
+  try {
+    await showConfirmDialog({
+      title: '彻底删除',
+      message: `彻底删除「${title}」后无法从保险库恢复，确定继续吗？`,
+      confirmButtonText: '彻底删除',
+      confirmButtonColor: '#ee0a24'
+    })
+    await showConfirmDialog({
+      title: '再次确认',
+      message: '这会从加密保险库中永久移除该条目。',
+      confirmButtonText: '永久删除',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
+  const shouldClearSelection = selectedEntry.value
+    ? selectedEntry.value.id === entryId || isDescendant(target, selectedEntry.value.id)
+    : false
+  const payload = cloneVault()
+  removeEntry(payload.entries, entryId)
+  const result = await api.saveVault(payload)
+  if (!result.ok || !result.data) return showFailToast(result.message || '彻底删除失败')
+  vault.value = result.data
+  if (shouldClearSelection) clearSelectedEntry()
+  showSuccessToast('已彻底删除')
 }
 
 async function moveEntry(payload: MoveEntryPayload) {
@@ -1490,6 +1824,77 @@ async function backupCloudVault() {
   await uploadCloudVault(true)
 }
 
+async function checkCloudBackupInfo() {
+  if (!vault.value || cloudBusy.value) return
+  if (!validateOssSettings()) return
+  cloudBusy.value = true
+  backupStatus.value = ''
+  try {
+    const saved = await persistSettings({ closeDrawer: false, toast: false })
+    if (!saved) return
+    const client = createOssClient()
+    const response = await client.getFileInfo(settings.oss.objectName)
+    if (response.status === APIResponseStatus.Success && typeof response.content !== 'string') {
+      cloudInfo.value = toCloudBackupInfo(response.content)
+      backupStatus.value = `云端文件已存在：${formatBytes(cloudInfo.value.size)}`
+      showSuccessToast('云端文件可用')
+      return
+    }
+    if (response.status === APIResponseStatus.FileNotExist && typeof response.content !== 'string') {
+      cloudInfo.value = toCloudBackupInfo(response.content)
+      backupStatus.value = '云端固定文件不存在'
+      showToast('云端文件不存在')
+      return
+    }
+    showFailToast(String(response.content || '检测失败'))
+  } finally {
+    cloudBusy.value = false
+  }
+}
+
+async function refreshCloudBackupList() {
+  if (!vault.value || cloudBusy.value) return
+  if (!validateOssSettings()) return
+  cloudBusy.value = true
+  backupStatus.value = ''
+  try {
+    const saved = await persistSettings({ closeDrawer: false, toast: false })
+    if (!saved) return
+    const client = createOssClient()
+    const response = await client.listFiles(settings.oss.objectName, 50)
+    if (response.status !== APIResponseStatus.Success || !Array.isArray(response.content)) {
+      showFailToast(String(response.content || '读取备份列表失败'))
+      return
+    }
+    const fixedName = normalizeObjectName(settings.oss.objectName)
+    cloudBackups.value = response.content
+      .map(toCloudBackupInfo)
+      .filter((item) => item.name !== fixedName && item.name.startsWith(`${fixedName}.`))
+      .sort((left, right) => String(right.lastModified).localeCompare(String(left.lastModified)))
+    backupStatus.value = cloudBackups.value.length ? `找到 ${cloudBackups.value.length} 个云端日期备份` : '没有找到日期备份'
+    showToast(backupStatus.value)
+  } finally {
+    cloudBusy.value = false
+  }
+}
+
+function selectCloudBackup(objectName: string) {
+  selectedCloudObjectName.value = normalizeObjectName(objectName)
+  backupStatus.value = `本次下载将使用：${selectedCloudObjectName.value}`
+}
+
+function archiveEntryMeta(entry: VaultEntry) {
+  if (entry.kind === 'folder') {
+    const count = flattenEntries(entry.children || []).length
+    const time = entry.statusUpdatedAt ? formatUnixTime(entry.statusUpdatedAt) : ''
+    return [`分组`, `${count} 项`, time].filter(Boolean).join(' · ')
+  }
+  const account = entry.username || entry.email || entry.phone || '未设置账号'
+  const domain = entry.domains?.[0] || '未设置域名'
+  const time = entry.statusUpdatedAt ? formatUnixTime(entry.statusUpdatedAt) : ''
+  return [account, domain, time].filter(Boolean).join(' · ')
+}
+
 async function uploadCloudVault(asDatedBackup: boolean) {
   if (!vault.value || cloudBusy.value) return
   if (!validateOssSettings()) return
@@ -1525,6 +1930,12 @@ async function uploadCloudVault(asDatedBackup: boolean) {
       return
     }
     backupStatus.value = `已上传到 ${settings.oss.bucketName}/${objectName}`
+    if (!asDatedBackup) cloudInfo.value = {
+      name: objectName,
+      exists: true,
+      size: exported.data.content.length,
+      lastModified: new Date().toISOString()
+    }
     showSuccessToast(asDatedBackup ? '云端备份已创建' : '云端文件已上传')
   } finally {
     cloudBusy.value = false
@@ -1534,11 +1945,12 @@ async function uploadCloudVault(asDatedBackup: boolean) {
 async function downloadCloudBackup() {
   if (!vault.value || cloudBusy.value) return
   if (!validateOssSettings()) return
+  const objectName = selectedCloudObjectName.value || settings.oss.objectName
 
   try {
     await confirmTwice({
       title: '下载云端备份',
-      message: `将从 OSS 下载 ${settings.oss.objectName}。继续吗？`,
+      message: `将从 OSS 下载 ${objectName}。继续吗？`,
       secondTitle: '再次确认覆盖',
       secondMessage: '下载后会覆盖本机保险库并锁定当前会话。覆盖前会先保留一份本地备份。',
       confirmButtonText: '下载并覆盖'
@@ -1553,7 +1965,7 @@ async function downloadCloudBackup() {
     const saved = await persistSettings({ closeDrawer: false, toast: false })
     if (!saved) return
     const client = createOssClient()
-    const response = await client.downloadFile(settings.oss.objectName, 'text/plain')
+    const response = await client.downloadFile(objectName, 'text/plain')
     if (response.status !== APIResponseStatus.Success || typeof response.content !== 'string') {
       showFailToast(String(response.content || '下载失败'))
       return
@@ -1572,6 +1984,7 @@ async function downloadCloudBackup() {
     drawerOpen.value = false
     stopTotpTimer()
     backupStatus.value = imported.data.backupPath ? `本地覆盖前备份：${imported.data.backupPath}` : ''
+    selectedCloudObjectName.value = ''
     showSuccessToast('已下载，请重新解锁')
   } finally {
     cloudBusy.value = false
@@ -1715,6 +2128,28 @@ function formatBytes(value: number) {
   return `${Math.round((bytes / 1024 / 1024) * 10) / 10} MB`
 }
 
+function formatDateTime(value: string) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function formatUnixTime(value: number) {
+  const seconds = Number(value) || 0
+  if (!seconds) return ''
+  return new Date(seconds * 1000).toLocaleString()
+}
+
+function toCloudBackupInfo(value: OSSFileInfo): CloudBackupInfo {
+  return {
+    name: value.name,
+    exists: Boolean(value.exists),
+    size: Number(value.size || 0),
+    lastModified: value.lastModified || ''
+  }
+}
+
 async function confirmTwice(options: {
   title: string
   message: string
@@ -1759,8 +2194,110 @@ function normalizeLoginAccountSource(value: unknown): LoginAccountSource {
     : 'auto'
 }
 
+function normalizeEntryStatus(value: unknown): EntryStatus {
+  return typeof value === 'string' && ENTRY_STATUSES.has(value as EntryStatus)
+    ? (value as EntryStatus)
+    : 'active'
+}
+
 function cloneVault(): VaultPayload {
   return JSON.parse(JSON.stringify(vault.value))
+}
+
+function isActiveEntry(entry: VaultEntry) {
+  return normalizeEntryStatus(entry.status) === 'active'
+}
+
+function isVisibleInMainList(entry: VaultEntry) {
+  return isActiveEntry(entry)
+}
+
+function activeTree(entries: VaultEntry[]): VaultEntry[] {
+  return entries
+    .filter(isVisibleInMainList)
+    .map((entry) => entry.kind === 'folder' ? { ...entry, children: activeTree(entry.children || []) } : entry)
+}
+
+function collectSystemGroupEntries(entries: VaultEntry[], status: EntryStatus, ancestorHidden = false): VaultEntry[] {
+  const result: VaultEntry[] = []
+  for (const entry of entries) {
+    const entryStatus = normalizeEntryStatus(entry.status)
+    if (!ancestorHidden && entryStatus === status) result.push(entry)
+    const nextAncestorHidden = ancestorHidden || entryStatus !== 'active'
+    result.push(...collectSystemGroupEntries(entry.children || [], status, nextAncestorHidden))
+  }
+  return result
+}
+
+function markEntryStatus(entry: VaultEntry, status: EntryStatus, reason = '') {
+  markEntrySelfStatus(entry, status, reason)
+  for (const child of entry.children || []) markEntryStatus(child, status, reason)
+}
+
+function markEntrySelfStatus(entry: VaultEntry, status: EntryStatus, reason = '') {
+  const now = Math.floor(Date.now() / 1000)
+  const nextStatus = normalizeEntryStatus(status)
+  entry.status = nextStatus
+  entry.statusReason = nextStatus === 'active' ? '' : reason
+  entry.statusUpdatedAt = now
+  entry.deletedAt = nextStatus === 'trashed' ? now : 0
+  appendEntryHistory(entry, nextStatus === 'active' ? 'restored' : nextStatus, reason)
+}
+
+function appendEntryHistory(entry: VaultEntry, action: 'created' | 'updated' | 'disabled' | 'restored' | 'trashed', note = '') {
+  const history = Array.isArray(entry.history) ? entry.history : []
+  history.unshift({
+    id: makeId(),
+    action,
+    at: Math.floor(Date.now() / 1000),
+    title: entry.title || '',
+    username: entry.username || '',
+    email: entry.email || '',
+    phone: entry.phone || '',
+    domains: [...(entry.domains || [])],
+    note
+  })
+  entry.history = history.slice(0, 20)
+}
+
+function updateEntryById(entries: VaultEntry[], entryId: string, updater: (entry: VaultEntry) => void): boolean {
+  for (const entry of entries) {
+    if (entry.id === entryId) {
+      updater(entry)
+      return true
+    }
+    if (updateEntryById(entry.children || [], entryId, updater)) return true
+  }
+  return false
+}
+
+function updateEntryAndAncestorsById(
+  entries: VaultEntry[],
+  entryId: string,
+  updater: (entry: VaultEntry) => void,
+  ancestorUpdater: (entry: VaultEntry) => void
+): boolean {
+  for (const entry of entries) {
+    if (entry.id === entryId) {
+      updater(entry)
+      return true
+    }
+    if (updateEntryAndAncestorsById(entry.children || [], entryId, updater, ancestorUpdater)) {
+      ancestorUpdater(entry)
+      return true
+    }
+  }
+  return false
+}
+
+function clearSelectedEntry() {
+  selectedEntry.value = null
+  detailOpen.value = false
+  stopTotpTimer()
+}
+
+function clearSelectedEntryIf(entryId: string) {
+  if (selectedEntry.value?.id === entryId) clearSelectedEntry()
 }
 
 function replaceEntry(entries: VaultEntry[], entryId: string, next: VaultEntry): boolean {
@@ -1866,6 +2403,7 @@ function filterEntries(entries: VaultEntry[], term: string): VaultEntry[] {
   if (!term) return entries
   return entries
     .map((entry) => {
+      if (!isVisibleInMainList(entry)) return null
       const text = [entry.title, entry.username, entry.email, entry.phone, ...(entry.domains || [])].join(' ').toLowerCase()
       if (entry.kind === 'folder') {
         const children = filterEntries(entry.children || [], term)
@@ -2012,11 +2550,13 @@ function openDrawer() {
 }
 
 function closeTopMenusOnOutside(event: PointerEvent) {
-  if (!createMenuOpen.value && !moreMenuOpen.value) return
   const target = event.target as HTMLElement | null
-  if (target?.closest('.top-menu-popover, .top-menu-trigger')) return
-  createMenuOpen.value = false
-  moreMenuOpen.value = false
+  if (entryContextMenuOpen.value && !target?.closest('.entry-context-menu')) closeEntryContextMenu()
+  if (!createMenuOpen.value && !moreMenuOpen.value) return
+  if (!target?.closest('.top-menu-popover, .top-menu-trigger')) {
+    createMenuOpen.value = false
+    moreMenuOpen.value = false
+  }
 }
 
 function openPasswordSheet() {

@@ -2,11 +2,25 @@ plugins {
     id "com.android.application"
 }
 
-def releaseStoreFile = System.getenv("MYPWDMG_ANDROID_KEYSTORE")
+def defaultReleaseStoreFile = rootProject.file("../pwdmg-release.jks").absolutePath
+def releaseStoreFile = System.getenv("MYPWDMG_ANDROID_KEYSTORE") ?: defaultReleaseStoreFile
 def releaseStorePassword = System.getenv("MYPWDMG_ANDROID_KEYSTORE_PASSWORD")
 def releaseKeyAlias = System.getenv("MYPWDMG_ANDROID_KEY_ALIAS")
 def releaseKeyPassword = System.getenv("MYPWDMG_ANDROID_KEY_PASSWORD")
-def hasReleaseSigning = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+def hasReleaseStoreFile = releaseStoreFile && file(releaseStoreFile).exists()
+def hasReleaseSigning = hasReleaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+def requireReleaseSigning = gradle.startParameter.taskNames.any { task ->
+    task.toLowerCase().contains("assemblerelease") || task.toLowerCase().contains("bundlerelease")
+}
+
+if (requireReleaseSigning && !hasReleaseSigning) {
+    def missingSigningConfig = []
+    if (!hasReleaseStoreFile) missingSigningConfig += "keystore file (${releaseStoreFile})"
+    if (!releaseStorePassword) missingSigningConfig += "MYPWDMG_ANDROID_KEYSTORE_PASSWORD"
+    if (!releaseKeyAlias) missingSigningConfig += "MYPWDMG_ANDROID_KEY_ALIAS"
+    if (!releaseKeyPassword) missingSigningConfig += "MYPWDMG_ANDROID_KEY_PASSWORD"
+    throw new GradleException("Release signing is required. Missing: ${missingSigningConfig.join(', ')}. Keystore defaults to ${defaultReleaseStoreFile}; set MYPWDMG_ANDROID_KEYSTORE to override.")
+}
 
 android {
     namespace "com.suzikuo.mypwdmg"
@@ -16,8 +30,8 @@ android {
         applicationId "com.suzikuo.mypwdmg"
         minSdk 26
         targetSdk 34
-        versionCode 223
-        versionName "2.0.23"
+        versionCode 230
+        versionName "2.0.30"
     }
 
     buildFeatures {
@@ -44,7 +58,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
+            signingConfig signingConfigs.release
         }
     }
 

@@ -263,7 +263,9 @@ $ManifestScript = Join-Path $RootPath "scripts\write_update_manifest.ps1"
 $ArchivePath = Join-Path $RootPath "release\MyPasswordDesktop-windows.zip"
 $AndroidArchivePath = Join-Path $RootPath "release\MyPasswordAndroid-release.apk"
 $AndroidReleaseOutput = Join-Path $RootPath "android\app\build\outputs\apk\release\app-release.apk"
+$AndroidBuildLog = Join-Path $RootPath "release\android-gradle-build.log"
 $ManifestPath = Join-Path $RootPath "release\update-manifest.json"
+$DefaultAndroidKeystore = Join-Path $RootPath "pwdmg-release.jks"
 $ShouldIncludeAndroid = -not $DesktopOnly
 $ShouldPublish = $PublishOnly -or -not $NoPublish
 
@@ -283,6 +285,21 @@ function Assert-LastExitCode {
     if ($LASTEXITCODE -ne 0) {
         throw "$Step failed with exit code $LASTEXITCODE"
     }
+}
+
+function Assert-LastExitCodeWithLog {
+    param([string] $Step, [string] $LogPath)
+    if ($LASTEXITCODE -eq 0) {
+        return
+    }
+    if (Test-Path -LiteralPath $LogPath -PathType Leaf) {
+        Write-Host ""
+        Write-Host "$Step failed. Last Gradle log lines:" -ForegroundColor Red
+        Get-Content -LiteralPath $LogPath -Tail 80 | ForEach-Object { Write-Host $_ }
+        Write-Host ""
+        Write-Host "Full Android Gradle log: $LogPath" -ForegroundColor Yellow
+    }
+    throw "$Step failed with exit code $LASTEXITCODE"
 }
 
 function Require-ReleaseFile {
@@ -428,6 +445,134 @@ function Resolve-JavaHome {
     return ""
 }
 
+function Read-SecretText {
+    param([string] $Prompt)
+    $SecureValue = Read-Host $Prompt -AsSecureString
+    $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr)
+    }
+    finally {
+        if ($Bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
+        }
+    }
+}
+
+function Resolve-KeytoolPath {
+    $ResolvedJavaHome = Resolve-JavaHome
+    if ($ResolvedJavaHome) {
+        $Keytool = Join-Path $ResolvedJavaHome "bin\keytool.exe"
+        if (Test-Path -LiteralPath $Keytool -PathType Leaf) {
+            return $Keytool
+        }
+    }
+    $Command = Get-Command keytool -ErrorAction SilentlyContinue
+    if ($Command) {
+        return $Command.Source
+    }
+    return ""
+}
+
+function Get-AndroidKeystoreAliases {
+    if (-not $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD) {
+        return @()
+    }
+    $Keytool = Resolve-KeytoolPath
+    if (-not $Keytool) {
+        return @()
+    }
+    $Output = & $Keytool -list -keystore $env:MYPWDMG_ANDROID_KEYSTORE -storepass $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Could not list Android keystore aliases with keytool:" -ForegroundColor Yellow
+        $Output | ForEach-Object { Write-Host $_ }
+        return @()
+    }
+    $Aliases = @()
+    foreach ($Line in $Output) {
+        $Text = [string] $Line
+        if ($Text -match '^\s*([^,\s]+)\s*,\s*.+(PrivateKeyEntry|trustedCertEntry)') {
+            $Aliases += $Matches[1]
+        }
+    }
+    return @($Aliases | Select-Object -Unique)
+}
+
+function Ensure-AndroidKeyAlias {
+    $Aliases = @(Get-AndroidKeystoreAliases)
+    if ($env:MYPWDMG_ANDROID_KEY_ALIAS) {
+        if ($Aliases.Count -gt 0 -and $Aliases -notcontains $env:MYPWDMG_ANDROID_KEY_ALIAS) {
+            Write-Host "Android signing alias '$env:MYPWDMG_ANDROID_KEY_ALIAS' was not found in the keystore." -ForegroundColor Yellow
+            $env:MYPWDMG_ANDROID_KEY_ALIAS = ""
+        } else {
+            Write-Host "Android signing key alias: $($env:MYPWDMG_ANDROID_KEY_ALIAS)"
+            return
+        }
+    }
+    if ($env:MYPWDMG_ANDROID_KEY_ALIAS) {
+        return
+    }
+    if ($Aliases.Count -eq 1) {
+        $env:MYPWDMG_ANDROID_KEY_ALIAS = $Aliases[0]
+        Write-Host "Android signing key alias: $($env:MYPWDMG_ANDROID_KEY_ALIAS)"
+        return
+    }
+    if ($Aliases.Count -gt 1 -and -not [Console]::IsInputRedirected) {
+        Write-Host "Android signing aliases found:"
+        for ($Index = 0; $Index -lt $Aliases.Count; $Index += 1) {
+            Write-Host "  [$($Index + 1)] $($Aliases[$Index])"
+        }
+        $Choice = (Read-Host "Choose alias number or enter alias").Trim()
+        $ChoiceIndex = 0
+        if ([int]::TryParse($Choice, [ref] $ChoiceIndex) -and $ChoiceIndex -ge 1 -and $ChoiceIndex -le $Aliases.Count) {
+            $env:MYPWDMG_ANDROID_KEY_ALIAS = $Aliases[$ChoiceIndex - 1]
+            return
+        }
+        if ($Choice) {
+            $env:MYPWDMG_ANDROID_KEY_ALIAS = $Choice
+        }
+        return
+    }
+    if (-not [Console]::IsInputRedirected) {
+        $Alias = (Read-Host "Android signing key alias").Trim()
+        if ($Alias) {
+            $env:MYPWDMG_ANDROID_KEY_ALIAS = $Alias
+        }
+    }
+}
+
+function Ensure-AndroidSigningEnvironment {
+    if (-not $ShouldIncludeAndroid -or $SkipAndroidBuild) {
+        return
+    }
+
+    if (-not $env:MYPWDMG_ANDROID_KEYSTORE) {
+        $env:MYPWDMG_ANDROID_KEYSTORE = $DefaultAndroidKeystore
+    }
+    if (-not (Test-Path -LiteralPath $env:MYPWDMG_ANDROID_KEYSTORE -PathType Leaf)) {
+        throw "Android signing keystore was not found: $env:MYPWDMG_ANDROID_KEYSTORE"
+    }
+
+    if (-not $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD -and -not [Console]::IsInputRedirected) {
+        $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD = Read-SecretText "Android keystore password"
+    }
+    Ensure-AndroidKeyAlias
+    if (-not $env:MYPWDMG_ANDROID_KEY_PASSWORD -and -not [Console]::IsInputRedirected) {
+        $env:MYPWDMG_ANDROID_KEY_PASSWORD = Read-SecretText "Android key password (press Enter if same as keystore password)"
+        if (-not $env:MYPWDMG_ANDROID_KEY_PASSWORD) {
+            $env:MYPWDMG_ANDROID_KEY_PASSWORD = $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD
+        }
+    }
+
+    $Missing = @()
+    if (-not $env:MYPWDMG_ANDROID_KEYSTORE_PASSWORD) { $Missing += "MYPWDMG_ANDROID_KEYSTORE_PASSWORD" }
+    if (-not $env:MYPWDMG_ANDROID_KEY_ALIAS) { $Missing += "MYPWDMG_ANDROID_KEY_ALIAS" }
+    if (-not $env:MYPWDMG_ANDROID_KEY_PASSWORD) { $Missing += "MYPWDMG_ANDROID_KEY_PASSWORD" }
+    if ($Missing.Count -gt 0) {
+        throw "Android signing is missing: $($Missing -join ', '). Keystore is $env:MYPWDMG_ANDROID_KEYSTORE"
+    }
+}
+
 function Resolve-GitHubCli {
     $Command = Get-Command gh -ErrorAction SilentlyContinue
     if ($Command) {
@@ -497,14 +642,18 @@ function Invoke-AndroidPackage {
     }
 
     if (-not $SkipAndroidBuild) {
+        Ensure-AndroidSigningEnvironment
         Push-Location (Join-Path $RootPath "android")
         try {
             $ResolvedJavaHome = Resolve-JavaHome
             if ($ResolvedJavaHome) {
                 $env:JAVA_HOME = $ResolvedJavaHome
             }
-            .\gradlew.bat :app:assembleRelease
-            Assert-LastExitCode "Android release build"
+            if (-not (Test-Path -LiteralPath (Split-Path -Parent $AndroidBuildLog) -PathType Container)) {
+                New-Item -ItemType Directory -Path (Split-Path -Parent $AndroidBuildLog) | Out-Null
+            }
+            & cmd.exe /c ".\gradlew.bat :app:assembleRelease --stacktrace --warning-mode all 2>&1" | Tee-Object -FilePath $AndroidBuildLog
+            Assert-LastExitCodeWithLog "Android release build" $AndroidBuildLog
         }
         finally {
             Pop-Location
@@ -637,6 +786,10 @@ Write-Host "Frontend build: $(if ($SkipDesktopBuild) { 'unchanged' } elseif ($Sk
 Write-Host "Android package: $(if ($ShouldIncludeAndroid) { 'enabled' } else { 'desktop only' })"
 if ($ShouldIncludeAndroid) {
     Write-Host "Android Gradle build: $(if ($SkipAndroidBuild) { 'skipped, use existing APK' } else { 'enabled' })"
+    if (-not $SkipAndroidBuild) {
+        $SummaryKeystore = if ($env:MYPWDMG_ANDROID_KEYSTORE) { $env:MYPWDMG_ANDROID_KEYSTORE } else { $DefaultAndroidKeystore }
+        Write-Host "Android keystore: $SummaryKeystore"
+    }
 }
 Write-Host "Publish GitHub Release: $(if ($ShouldPublish) { 'enabled' } else { 'disabled' })"
 

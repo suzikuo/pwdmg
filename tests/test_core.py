@@ -178,6 +178,82 @@ class CoreTests(unittest.TestCase):
             self.assertEqual([m["id"] for m in service.query_matches("app.example.com")], ["entry-new"])
             self.assertEqual(service.get_fill_payload("entry-new")["password"], "new-secret")
 
+    def test_vault_service_excludes_disabled_and_trashed_from_autofill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "entry-active",
+                            "kind": "login",
+                            "title": "Active",
+                            "domains": ["example.com"],
+                            "username": "active",
+                            "password": "active-secret",
+                            "status": "active",
+                        },
+                        {
+                            "id": "entry-disabled",
+                            "kind": "login",
+                            "title": "Disabled",
+                            "domains": ["example.com"],
+                            "username": "disabled",
+                            "password": "disabled-secret",
+                            "status": "disabled",
+                        },
+                        {
+                            "id": "entry-trashed",
+                            "kind": "login",
+                            "title": "Trashed",
+                            "domains": ["example.com"],
+                            "username": "trashed",
+                            "password": "trashed-secret",
+                            "status": "trashed",
+                        },
+                    ]
+                )
+            )
+
+            matches = service.query_matches("www.example.com")
+
+            self.assertEqual([match["id"] for match in matches], ["entry-active"])
+
+    def test_vault_service_excludes_entries_inside_archived_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "folder-disabled",
+                            "kind": "folder",
+                            "title": "Archived Folder",
+                            "status": "disabled",
+                            "children": [
+                                {
+                                    "id": "entry-inside",
+                                    "kind": "login",
+                                    "title": "Inside",
+                                    "domains": ["example.com"],
+                                    "username": "inside",
+                                    "password": "secret",
+                                    "status": "active",
+                                }
+                            ],
+                        }
+                    ]
+                )
+            )
+
+            self.assertEqual(service.query_matches("www.example.com"), [])
+
     def test_vault_service_defaults_new_login_account_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault_path = Path(tmp) / "vault.json"

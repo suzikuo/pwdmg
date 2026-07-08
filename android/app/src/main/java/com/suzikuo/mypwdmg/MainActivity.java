@@ -6,14 +6,21 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.autofill.AutofillManager;
+import android.webkit.ConsoleMessage;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Toast;
 
 public class MainActivity extends Activity {
+    private static final String TAG = "PwdMainActivity";
     public static final String EXTRA_AUTOFILL_PICKER = "com.suzikuo.mypwdmg.extra.AUTOFILL_PICKER";
     private AssistStructure autofillStructure;
     private WebView webView;
@@ -43,6 +50,32 @@ public class MainActivity extends Activity {
         if (BuildConfig.DEBUG) {
             WebView.setWebContentsDebuggingEnabled(true);
         }
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
+                Log.e(
+                    TAG,
+                    "WebView console: " + consoleMessage.message()
+                        + " (" + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + ")"
+                );
+                return super.onConsoleMessage(consoleMessage);
+            }
+        });
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                Log.d(TAG, "WebView page loaded: " + url);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                super.onReceivedError(view, request, error);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Log.e(TAG, "WebView load error: " + error.getDescription() + " url=" + request.getUrl());
+                }
+            }
+        });
         webView.addJavascriptInterface(new AndroidPasswordBridge(this), "androidPasswordApi");
 
         setContentView(webView);

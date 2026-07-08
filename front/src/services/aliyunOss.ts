@@ -15,6 +15,13 @@ export interface OSSApiResponse<T = string | boolean | Blob> {
   content: T
 }
 
+export interface OSSFileInfo {
+  name: string
+  exists: boolean
+  size: number
+  lastModified: string
+}
+
 export interface OssClientSettings {
   bucketName: string
   accessKeyId: string
@@ -133,7 +140,15 @@ export class AliyunOSSAPI {
   }
 
   async checkFileExists(fileName: string): Promise<OSSApiResponse<boolean>> {
-    if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: false }
+    const info = await this.getFileInfo(fileName)
+    return {
+      status: info.status,
+      content: Boolean(info.content && typeof info.content !== 'string' && info.content.exists)
+    }
+  }
+
+  async getFileInfo(fileName: string): Promise<OSSApiResponse<OSSFileInfo | string>> {
+    if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
 
     try {
       const objectName = normalizeObjectName(fileName)
@@ -149,11 +164,68 @@ export class AliyunOSSAPI {
         }
       })
 
-      if (response.ok) return { status: APIResponseStatus.Success, content: true }
-      if (response.status === 404) return { status: APIResponseStatus.FileNotExist, content: false }
-      return { status: APIResponseStatus.Fail, content: false }
-    } catch {
-      return { status: APIResponseStatus.Fail, content: false }
+      if (response.ok) {
+        return {
+          status: APIResponseStatus.Success,
+          content: {
+            name: objectName,
+            exists: true,
+            size: Number(response.headers.get('Content-Length') || 0),
+            lastModified: response.headers.get('Last-Modified') || ''
+          }
+        }
+      }
+      if (response.status === 404) {
+        return {
+          status: APIResponseStatus.FileNotExist,
+          content: {
+            name: objectName,
+            exists: false,
+            size: 0,
+            lastModified: ''
+          }
+        }
+      }
+      const errorText = await response.text().catch(() => '')
+      return { status: APIResponseStatus.Fail, content: `检测失败: ${response.status} ${errorText}` }
+    } catch (error) {
+      return { status: APIResponseStatus.Fail, content: formatOssError(error) }
+    }
+  }
+
+  async listFiles(prefix = '', maxKeys = 30): Promise<OSSApiResponse<OSSFileInfo[] | string>> {
+    if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
+
+    try {
+      const normalizedPrefix = normalizeObjectName(prefix).replace(/\/?$/, '')
+      const query = `prefix=${encodeURIComponent(normalizedPrefix)}&max-keys=${Math.max(1, Math.min(100, Math.round(maxKeys)))}`
+      const date = this.getGMTDate()
+      const resource = `/${this.bucketName}/`
+      const ossHeaders = `x-oss-date:${date}`
+      const signature = await this.generateSignature('GET', '', '', date, ossHeaders, resource)
+      const response = await fetch(`${this.getEndpoint()}/?${query}`, {
+        method: 'GET',
+        headers: {
+          'x-oss-date': date,
+          Authorization: `OSS ${this.accessKeyId}:${signature}`
+        }
+      })
+      if (!response.ok) {
+        const errorText = await response.text()
+        return { status: APIResponseStatus.Fail, content: `列表失败: ${response.status} ${errorText}` }
+      }
+
+      const xmlText = await response.text()
+      const doc = new DOMParser().parseFromString(xmlText, 'application/xml')
+      const items = [...doc.querySelectorAll('Contents')].map((node) => ({
+        name: node.querySelector('Key')?.textContent || '',
+        exists: true,
+        size: Number(node.querySelector('Size')?.textContent || 0),
+        lastModified: node.querySelector('LastModified')?.textContent || ''
+      })).filter((item) => item.name)
+      return { status: APIResponseStatus.Success, content: items }
+    } catch (error) {
+      return { status: APIResponseStatus.Fail, content: formatOssError(error) }
     }
   }
 

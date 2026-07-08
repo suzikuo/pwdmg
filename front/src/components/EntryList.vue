@@ -25,7 +25,6 @@
         :data-drop-index="entry.kind === 'folder' && draggableEnabled ? 0 : undefined"
         data-drop-kind="folder"
         @pointerdown.stop="preparePointerDrag($event, entry.id)"
-        @contextmenu="handleContextMenu"
         @dragover.prevent="entry.kind === 'folder' && draggableEnabled"
         @drop.stop="entry.kind === 'folder' && dropEntry($event, entry.id, 0)"
       >
@@ -34,6 +33,7 @@
           class="entry-cell"
           clickable
           center
+          @contextmenu.stop.prevent="handleContextMenu($event, entry)"
           @click="handlePrimary(entry)"
         >
           <template #icon>
@@ -49,6 +49,8 @@
           <template #title>
             <div class="entry-title-row">
               <span class="entry-title">{{ entry.title }}</span>
+              <van-tag v-if="entry.status === 'disabled'" plain type="warning">归档</van-tag>
+              <van-tag v-if="entry.status === 'trashed'" plain type="danger">回收站</van-tag>
               <van-tag v-if="entry.kind === 'login' && entry.totpSecret" plain type="success">TOTP</van-tag>
               <van-tag v-if="entry.kind === 'folder'" plain>{{ entry.children?.length || 0 }} 项</van-tag>
             </div>
@@ -61,49 +63,12 @@
           </template>
           <template #right-icon>
             <div class="entry-right">
-              <van-button
-                v-if="entry.kind === 'folder' && isOpen(entry.id)"
-                class="mini-icon-action"
-                size="mini"
-                icon="plus"
-                plain
-                aria-label="新建"
-                @click.stop="$emit('create', entry.id)"
-              />
-              <van-button
-                v-if="entry.kind === 'folder' && isOpen(entry.id)"
-                class="mini-icon-action"
-                size="mini"
-                icon="edit"
-                plain
-                @click.stop="$emit('edit', entry)"
-              />
-              <button
-                v-if="entry.kind === 'folder' && isOpen(entry.id)"
-                class="mini-delete-action"
-                type="button"
-                aria-label="删除"
-                @click.stop="$emit('delete', entry.id)"
-              >
-                <van-icon name="delete-o" />
-              </button>
               <van-icon :name="entry.kind === 'folder' ? (isOpen(entry.id) ? 'arrow-up' : 'arrow-down') : 'arrow'" />
             </div>
           </template>
         </van-cell>
         <template #right>
-          <div v-if="entry.kind === 'folder'" class="swipe-actions">
-            <button class="swipe-icon-action" type="button" aria-label="新建" @click="$emit('create', entry.id)">
-              <van-icon name="plus" />
-            </button>
-            <button class="swipe-icon-action" type="button" aria-label="编辑" @click="$emit('edit', entry)">
-              <van-icon name="edit" />
-            </button>
-            <button class="swipe-icon-action is-danger" type="button" aria-label="删除" @click="$emit('delete', entry.id)">
-              <van-icon name="delete-o" />
-            </button>
-          </div>
-          <div v-else class="swipe-actions">
+          <div v-if="entry.kind === 'login'" class="swipe-actions">
             <button class="swipe-icon-action is-danger" type="button" aria-label="删除" @click="$emit('delete', entry.id)">
               <van-icon name="delete-o" />
             </button>
@@ -124,6 +89,7 @@
           @delete="$emit('delete', $event)"
           @create="$emit('create', $event)"
           @move-entry="$emit('move-entry', $event)"
+          @context-menu="$emit('context-menu', $event)"
         />
       </div>
       </div>
@@ -170,6 +136,7 @@ const emit = defineEmits<{
   delete: [entryId: string]
   create: [parentId: string]
   'move-entry': [payload: { entryId: string; targetParentId: string; targetIndex: number }]
+  'context-menu': [payload: { entry: VaultEntry; x: number; y: number }]
 }>()
 
 const expanded = ref(new Set<string>())
@@ -212,8 +179,9 @@ function handlePrimary(entry: VaultEntry) {
   emit('view', entry)
 }
 
-function handleContextMenu(event: MouseEvent) {
-  if (props.draggableEnabled) event.preventDefault()
+function handleContextMenu(event: MouseEvent, entry: VaultEntry) {
+  if (pointerDrag?.active) return
+  emit('context-menu', { entry, x: event.clientX, y: event.clientY })
 }
 
 function preparePointerDrag(event: PointerEvent, entryId: string) {
