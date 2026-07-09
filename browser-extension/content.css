@@ -335,6 +335,10 @@
   gap: 7px;
 }
 
+.mypwdmg-save-actions-wide {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .mypwdmg-save-primary,
 .mypwdmg-save-secondary {
   height: 31px;
@@ -367,7 +371,14 @@
   background: rgba(94, 234, 212, 0.1);
 }
 
-.mypwdmg-save-primary:disabled {
+.mypwdmg-save-primary:disabled,
+.mypwdmg-save-secondary:disabled {
   opacity: 0.62;
   cursor: default;
+}
+
+@media (max-width: 340px) {
+  .mypwdmg-save-actions-wide {
+    grid-template-columns: 1fr;
+  }
 }

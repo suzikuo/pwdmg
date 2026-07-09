@@ -9,6 +9,11 @@ const refreshButton = document.getElementById('refreshButton')
 const showPanelButton = document.getElementById('showPanelButton')
 const autoFillToggle = document.getElementById('autoFillToggle')
 const autoSaveToggle = document.getElementById('autoSaveToggle')
+const ignoredSiteSettingEl = document.getElementById('ignoredSiteSetting')
+const ignoredCurrentStateEl = document.getElementById('ignoredCurrentState')
+const toggleIgnoredSiteButton = document.getElementById('toggleIgnoredSiteButton')
+const ignoredSiteCountEl = document.getElementById('ignoredSiteCount')
+const ignoredSiteListEl = document.getElementById('ignoredSiteList')
 const shortcutInput = document.getElementById('shortcutInput')
 const resetShortcutButton = document.getElementById('resetShortcutButton')
 const matchListEl = document.getElementById('matchList')
@@ -19,6 +24,7 @@ let activeHost = ''
 let autoFillEnabled = true
 let autoSaveEnabled = true
 let manualPanelShortcut = DEFAULT_MANUAL_PANEL_SHORTCUT
+let ignoredSites = []
 
 function send(message) {
   return new Promise((resolve) => {
@@ -84,6 +90,76 @@ function tabHost(tab) {
   }
 }
 
+function normalizeHost(value = '') {
+  let host = String(value || '').trim().toLowerCase()
+  const schemeIndex = host.indexOf('://')
+  if (schemeIndex >= 0) host = host.slice(schemeIndex + 3)
+  host = host.split('/', 1)[0].replace(/^\.+|\.+$/g, '')
+  return host.startsWith('www.') ? host.slice(4) : host
+}
+
+function normalizeIgnoredSites(values = []) {
+  const result = []
+  const seen = new Set()
+  for (const value of Array.isArray(values) ? values : []) {
+    const host = normalizeHost(value)
+    if (!host || seen.has(host)) continue
+    seen.add(host)
+    result.push(host)
+  }
+  return result
+}
+
+function hostMatchesIgnore(hostname = '', ignoredHost = '') {
+  const host = normalizeHost(hostname)
+  const pattern = normalizeHost(ignoredHost)
+  return Boolean(host && pattern && (host === pattern || host.endsWith(`.${pattern}`)))
+}
+
+function findMatchingIgnoredSite(hostname = activeHost) {
+  const host = normalizeHost(hostname)
+  if (!host) return ''
+  const exact = ignoredSites.find((site) => site === host)
+  if (exact) return exact
+  return ignoredSites.find((site) => hostMatchesIgnore(host, site)) || ''
+}
+
+function isCurrentSiteIgnored() {
+  return Boolean(findMatchingIgnoredSite(activeHost))
+}
+
+async function toggleCurrentSiteIgnored() {
+  if (!activeHost) return
+  const current = findMatchingIgnoredSite()
+  const response = current
+    ? await send({ type: 'MYPWDMG_REMOVE_IGNORED_SITE', hostname: activeHost })
+    : await send({ type: 'MYPWDMG_ADD_IGNORED_SITE', hostname: activeHost })
+  if (!response?.ok) {
+    statusEl.textContent = response?.message || '更新忽略站点失败。'
+    return
+  }
+  ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
+  renderIgnoredSites()
+  statusEl.textContent = current
+    ? `已取消忽略 ${activeHost}。`
+    : `已忽略 ${activeHost}。`
+  await refreshActiveTab()
+}
+
+async function removeIgnoredSite(site) {
+  const target = normalizeHost(site)
+  if (!target) return
+  const response = await send({ type: 'MYPWDMG_REMOVE_IGNORED_SITE', hostname: target })
+  if (!response?.ok) {
+    statusEl.textContent = response?.message || '移除忽略站点失败。'
+    return
+  }
+  ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
+  renderIgnoredSites()
+  statusEl.textContent = `已移除 ${target}。`
+  await refreshActiveTab()
+}
+
 async function refreshActiveTab() {
   await sendToActiveTab({ type: 'MYPWDMG_REFRESH' })
 }
@@ -92,11 +168,13 @@ async function loadAutoSettings() {
   const response = await send({ type: 'MYPWDMG_GET_AUTO_SETTINGS' })
   autoFillEnabled = response?.data?.autoFillEnabled !== false
   autoSaveEnabled = response?.data?.autoSaveEnabled !== false
+  ignoredSites = normalizeIgnoredSites(response?.data?.ignoredSites)
   manualPanelShortcut = response?.data?.manualPanelShortcut || DEFAULT_MANUAL_PANEL_SHORTCUT
   autoFillToggle.checked = autoFillEnabled
   autoSaveToggle.checked = autoSaveEnabled
   shortcutInput.value = manualPanelShortcut
   updateShowPanelShortcutLabel()
+  renderIgnoredSites()
 }
 
 async function setAutoSettings(nextSettings) {
@@ -109,11 +187,13 @@ async function setAutoSettings(nextSettings) {
   }
   autoFillEnabled = response.data?.autoFillEnabled !== false
   autoSaveEnabled = response.data?.autoSaveEnabled !== false
+  ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
   manualPanelShortcut = response.data?.manualPanelShortcut || DEFAULT_MANUAL_PANEL_SHORTCUT
   autoFillToggle.checked = autoFillEnabled
   autoSaveToggle.checked = autoSaveEnabled
   shortcutInput.value = manualPanelShortcut
   updateShowPanelShortcutLabel()
+  renderIgnoredSites()
   statusEl.textContent = `自动填充${autoFillEnabled ? '已开启' : '已关闭'}，自动保存${autoSaveEnabled ? '已开启' : '已关闭'}。`
   await refreshActiveTab()
 }
@@ -125,6 +205,35 @@ function setBadge(text, state) {
 
 function updateShowPanelShortcutLabel() {
   showPanelButton.innerHTML = `页面弹窗 <span>${escapeHtml(manualPanelShortcut)}</span>`
+}
+
+function renderIgnoredSites() {
+  if (!ignoredSiteSettingEl || !ignoredCurrentStateEl || !toggleIgnoredSiteButton || !ignoredSiteCountEl || !ignoredSiteListEl) return
+
+  const currentMatch = findMatchingIgnoredSite()
+  ignoredSiteSettingEl.hidden = false
+  ignoredCurrentStateEl.textContent = currentMatch ? `已忽略 ${currentMatch}` : '未忽略'
+  toggleIgnoredSiteButton.textContent = currentMatch ? '取消忽略' : '忽略该网站'
+  toggleIgnoredSiteButton.dataset.action = currentMatch ? 'remove' : 'add'
+  ignoredSiteCountEl.textContent = String(ignoredSites.length)
+
+  if (!ignoredSites.length) {
+    ignoredSiteListEl.innerHTML = '<p class="ignored-empty">暂无已忽略网站。</p>'
+    return
+  }
+
+  ignoredSiteListEl.innerHTML = ignoredSites.map((site) => {
+    const active = hostMatchesIgnore(activeHost, site)
+    return `
+      <div class="ignored-row${active ? ' is-active' : ''}">
+        <div class="ignored-row-copy">
+          <strong>${escapeHtml(site)}</strong>
+          <span>${active ? '当前站点匹配此规则' : '忽略规则'}</span>
+        </div>
+        <button class="secondary ignored-remove" type="button" data-site="${escapeAttr(site)}">移除</button>
+      </div>
+    `
+  }).join('')
 }
 
 function shortcutFromEvent(event) {
@@ -338,6 +447,16 @@ autoFillToggle.addEventListener('change', async () => {
 
 autoSaveToggle.addEventListener('change', async () => {
   await setAutoSettings({ autoSaveEnabled: autoSaveToggle.checked })
+})
+
+toggleIgnoredSiteButton?.addEventListener('click', async () => {
+  await toggleCurrentSiteIgnored()
+})
+
+ignoredSiteListEl?.addEventListener('click', async (event) => {
+  const button = event.target?.closest?.('.ignored-remove')
+  if (!button) return
+  await removeIgnoredSite(button.getAttribute('data-site'))
 })
 
 shortcutInput.addEventListener('focus', () => {

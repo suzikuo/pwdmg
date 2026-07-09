@@ -7,6 +7,7 @@ const CONTEXT_MENU_SHOW_PANEL_ID = 'mypwdmg-show-panel'
 const LEGACY_AUTO_FILL_SAVE_ENABLED_KEY = 'autoFillSaveEnabled'
 const AUTO_FILL_ENABLED_KEY = 'autoFillEnabled'
 const AUTO_SAVE_ENABLED_KEY = 'autoSaveEnabled'
+const IGNORED_SITES_KEY = 'ignoredSites'
 const MANUAL_PANEL_SHORTCUT_KEY = 'manualPanelShortcut'
 const DEFAULT_MANUAL_PANEL_SHORTCUT = 'Alt+T'
 
@@ -160,17 +161,53 @@ function normalizeShortcutKey(value) {
   return ''
 }
 
+function normalizeIgnoredSites(values = []) {
+  const result = []
+  const seen = new Set()
+  for (const value of Array.isArray(values) ? values : []) {
+    const host = normalizeHost(value)
+    if (!host || seen.has(host)) continue
+    seen.add(host)
+    result.push(host)
+  }
+  return result
+}
+
+function hostMatchesIgnore(hostname = '', ignoredHost = '') {
+  const host = normalizeHost(hostname)
+  const pattern = normalizeHost(ignoredHost)
+  return Boolean(host && pattern && (host === pattern || host.endsWith(`.${pattern}`)))
+}
+
+function isHostIgnored(hostname = '', ignoredSites = []) {
+  return normalizeIgnoredSites(ignoredSites).some((site) => hostMatchesIgnore(hostname, site))
+}
+
+function clearPendingCapturesForHost(hostname = '') {
+  for (const [token, item] of pendingCaptures) {
+    if (hostMatchesIgnore(item.capture?.hostname, hostname)) pendingCaptures.delete(token)
+  }
+  for (const [tabId, item] of pendingPromptsByTab) {
+    if (hostMatchesIgnore(item.preview?.hostname, hostname)) pendingPromptsByTab.delete(tabId)
+  }
+  for (const [tabId, item] of pendingLockedCapturesByTab) {
+    if (hostMatchesIgnore(item.capture?.hostname, hostname)) pendingLockedCapturesByTab.delete(tabId)
+  }
+}
+
 async function getAutoSettings() {
   const values = await storageGet({
     [LEGACY_AUTO_FILL_SAVE_ENABLED_KEY]: true,
     [AUTO_FILL_ENABLED_KEY]: null,
     [AUTO_SAVE_ENABLED_KEY]: null,
+    [IGNORED_SITES_KEY]: [],
     [MANUAL_PANEL_SHORTCUT_KEY]: DEFAULT_MANUAL_PANEL_SHORTCUT
   })
   const legacyEnabled = values[LEGACY_AUTO_FILL_SAVE_ENABLED_KEY] !== false
   return {
     autoFillEnabled: values[AUTO_FILL_ENABLED_KEY] === null ? legacyEnabled : values[AUTO_FILL_ENABLED_KEY] !== false,
     autoSaveEnabled: values[AUTO_SAVE_ENABLED_KEY] === null ? legacyEnabled : values[AUTO_SAVE_ENABLED_KEY] !== false,
+    ignoredSites: normalizeIgnoredSites(values[IGNORED_SITES_KEY]),
     manualPanelShortcut: normalizeShortcut(values[MANUAL_PANEL_SHORTCUT_KEY])
   }
 }
@@ -180,6 +217,7 @@ async function setAutoSettings(next = {}) {
   const values = {
     [AUTO_FILL_ENABLED_KEY]: next.autoFillEnabled === undefined ? current.autoFillEnabled : next.autoFillEnabled !== false,
     [AUTO_SAVE_ENABLED_KEY]: next.autoSaveEnabled === undefined ? current.autoSaveEnabled : next.autoSaveEnabled !== false,
+    [IGNORED_SITES_KEY]: next.ignoredSites === undefined ? current.ignoredSites : normalizeIgnoredSites(next.ignoredSites),
     [MANUAL_PANEL_SHORTCUT_KEY]: next.manualPanelShortcut === undefined
       ? current.manualPanelShortcut
       : normalizeShortcut(next.manualPanelShortcut, current.manualPanelShortcut)
@@ -336,6 +374,10 @@ function applyCaptureOverrides(capture = {}, overrides = {}) {
 
 async function prepareCapturedLogin(capture, tabId = 0) {
   prunePendingCaptures()
+  const settings = await getAutoSettings()
+  if (isHostIgnored(capture?.hostname || '', settings.ignoredSites)) {
+    return { ok: true, data: { shouldPrompt: false } }
+  }
   const previewResponse = await nativeCall('previewCapturedLogin', { capture })
   if (!previewResponse?.ok && tabId && (previewResponse?.code === 'LOCKED' || previewResponse?.code === 'BAD_PASSWORD')) {
     pendingLockedCapturesByTab.set(tabId, {
@@ -420,6 +462,34 @@ function dismissPreparedCapture(token) {
   return { ok: true, data: null }
 }
 
+async function addIgnoredSite(hostname = '', token = '') {
+  const targetHost = normalizeHost(hostname)
+  if (!targetHost) return getAutoSettings()
+
+  const current = await getAutoSettings()
+  const alreadyIgnored = isHostIgnored(targetHost, current.ignoredSites)
+  const ignoredSites = alreadyIgnored ? current.ignoredSites : normalizeIgnoredSites([...current.ignoredSites, targetHost])
+  const alreadySaved = alreadyIgnored || (
+    ignoredSites.length === current.ignoredSites.length
+    && ignoredSites.every((site, index) => site === current.ignoredSites[index])
+  )
+  const settings = alreadySaved ? current : await setAutoSettings({ ignoredSites })
+
+  clearPendingCapturesForHost(targetHost)
+  if (token) dismissPreparedCapture(token)
+  return settings
+}
+
+async function removeIgnoredSite(hostname = '') {
+  const targetHost = normalizeHost(hostname)
+  if (!targetHost) return getAutoSettings()
+
+  const current = await getAutoSettings()
+  const ignoredSites = current.ignoredSites.filter((site) => !hostMatchesIgnore(site, targetHost) && !hostMatchesIgnore(targetHost, site))
+  if (ignoredSites.length === current.ignoredSites.length) return current
+  return setAutoSettings({ ignoredSites })
+}
+
 function setupContextMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
@@ -484,7 +554,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === 'MYPWDMG_PREPARE_CAPTURE') {
       const settings = await getAutoSettings()
-      if (!settings.autoSaveEnabled) {
+      if (!settings.autoSaveEnabled || isHostIgnored(message.capture?.hostname || '', settings.ignoredSites)) {
         sendResponse({ ok: true, data: { shouldPrompt: false } })
         return
       }
@@ -497,11 +567,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === 'MYPWDMG_TAKE_SAVE_PROMPT') {
       const settings = await getAutoSettings()
-      if (!settings.autoSaveEnabled) {
+      if (!settings.autoSaveEnabled || isHostIgnored(message.hostname || '', settings.ignoredSites)) {
         sendResponse({ ok: true, data: null })
         return
       }
       sendResponse(takePreparedPrompt(sender?.tab?.id || 0, message.hostname || ''))
+      return
+    }
+    if (message?.type === 'MYPWDMG_ADD_IGNORED_SITE') {
+      sendResponse({ ok: true, data: await addIgnoredSite(message.hostname || '', message.token || '') })
+      return
+    }
+    if (message?.type === 'MYPWDMG_REMOVE_IGNORED_SITE') {
+      sendResponse({ ok: true, data: await removeIgnoredSite(message.hostname || '') })
       return
     }
     if (message?.type === 'MYPWDMG_DISMISS_CAPTURE') {

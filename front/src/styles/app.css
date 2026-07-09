@@ -1397,16 +1397,24 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .cloud-sync-item {
   min-width: 0;
   display: grid;
-  grid-template-columns: 18px auto minmax(0, 1fr);
-  align-items: center;
-  gap: 9px;
+  gap: 8px;
   padding: 10px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
 
-.cloud-sync-item input {
+.cloud-sync-item-head,
+.cloud-sync-field {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+}
+
+.cloud-sync-item input,
+.cloud-sync-field input {
   width: 16px;
   height: 16px;
   margin: 0;
@@ -1446,6 +1454,58 @@ body.is-entry-pointer-drag .entry-drop-zone {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cloud-sync-field-list {
+  display: grid;
+  gap: 6px;
+  padding-left: 27px;
+}
+
+.cloud-sync-field {
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel-bg);
+}
+
+.cloud-sync-field-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.cloud-sync-field-copy strong {
+  color: var(--text-main);
+  font-size: var(--app-font-sm);
+}
+
+.cloud-sync-field-copy small {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--app-font-sm);
+}
+
+.cloud-sync-field-copy em {
+  font-style: normal;
+}
+
+.cloud-sync-field-copy b {
+  min-width: 0;
+  color: var(--text-main);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .cloud-sync-field-list {
+    padding-left: 0;
+  }
 }
 
 .cloud-sync-footer {

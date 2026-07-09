@@ -43,6 +43,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let contextMenuInputAt = 0
   let autoFillEnabled = true
   let autoSaveEnabled = true
+  let ignoredSites = []
   let manualPanelShortcut = parseShortcut(SHOW_PANEL_SHORTCUT)
   const completedSaveTokens = new Set()
   const extensionFilledPasswords = new Map()
@@ -112,6 +113,44 @@ if (!window.__mypwdmgContentScriptLoaded) {
       return parseShortcut(SHOW_PANEL_SHORTCUT)
     }
     return shortcut
+  }
+
+  function normalizeHost(value = '') {
+    let host = String(value || '').trim().toLowerCase()
+    const schemeIndex = host.indexOf('://')
+    if (schemeIndex >= 0) host = host.slice(schemeIndex + 3)
+    host = host.split('/', 1)[0].replace(/^\.+|\.+$/g, '')
+    return host.startsWith('www.') ? host.slice(4) : host
+  }
+
+  function normalizeIgnoredSites(values = []) {
+    const result = []
+    const seen = new Set()
+    for (const value of Array.isArray(values) ? values : []) {
+      const host = normalizeHost(value)
+      if (!host || seen.has(host)) continue
+      seen.add(host)
+      result.push(host)
+    }
+    return result
+  }
+
+  function hostMatchesIgnore(hostname = '', ignoredHost = '') {
+    const host = normalizeHost(hostname)
+    const pattern = normalizeHost(ignoredHost)
+    return Boolean(host && pattern && (host === pattern || host.endsWith(`.${pattern}`)))
+  }
+
+  function findMatchingIgnoredSite(hostname = location.hostname) {
+    const host = normalizeHost(hostname)
+    if (!host) return ''
+    const exact = ignoredSites.find((site) => site === host)
+    if (exact) return exact
+    return ignoredSites.find((site) => hostMatchesIgnore(host, site)) || ''
+  }
+
+  function isCurrentSiteIgnored(hostname = location.hostname) {
+    return Boolean(findMatchingIgnoredSite(hostname))
   }
 
   function shortcutCode(value) {
@@ -425,7 +464,9 @@ if (!window.__mypwdmgContentScriptLoaded) {
   function applyAutoSettings(settings = {}) {
     autoFillEnabled = settings.autoFillEnabled !== false
     autoSaveEnabled = settings.autoSaveEnabled !== false
+    ignoredSites = normalizeIgnoredSites(settings.ignoredSites)
     manualPanelShortcut = parseShortcut(settings.manualPanelShortcut || SHOW_PANEL_SHORTCUT)
+    if (isCurrentSiteIgnored() && pendingSave?.token) dismissSavePrompt()
     if (!autoFillEnabled && !panelManualMode) removeRoot()
   }
 
@@ -601,6 +642,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     const titleValue = update?.title || preview.title || preview.hostname || 'Untitled'
     const accountValue = preview.accountLabel || update?.username || update?.email || update?.phone || ''
     const accountKind = ['email', 'phone', 'username'].includes(preview.accountKind) ? preview.accountKind : 'username'
+    const statusNotice = String(preview.notice || '').trim()
     root.innerHTML = `
     <div class="mypwdmg-panel mypwdmg-save-panel" role="dialog" aria-label="保存到 My Password">
       <div class="mypwdmg-title">
@@ -639,8 +681,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
               </select>
             `
       }
-        <div class="mypwdmg-save-actions">
-          <button class="mypwdmg-save-secondary" type="button" data-action="dismiss">忽略</button>
+        ${statusNotice ? `<div class="mypwdmg-save-note">${escapeHtml(statusNotice)}</div>` : ''}
+        <div class="mypwdmg-save-actions mypwdmg-save-actions-wide">
+          <button class="mypwdmg-save-secondary" type="button" data-action="dismiss">忽略本次</button>
+          <button class="mypwdmg-save-secondary" type="button" data-action="ignore-site">忽略此站点</button>
           <button class="mypwdmg-save-primary" type="button" data-action="save">${escapeHtml(update ? '更新' : '保存')}</button>
         </div>
       </div>
@@ -649,6 +693,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
     root.querySelector('.mypwdmg-close')?.addEventListener('click', dismissSavePrompt)
     root.querySelector('[data-action="dismiss"]')?.addEventListener('click', dismissSavePrompt)
+    root.querySelector('[data-action="ignore-site"]')?.addEventListener('click', ignoreCurrentSaveSite)
     root.querySelector('[data-action="save"]')?.addEventListener('click', savePendingCapture)
     root.querySelector('.mypwdmg-title')?.addEventListener('pointerdown', startPanelDrag)
   }
@@ -660,6 +705,37 @@ if (!window.__mypwdmgContentScriptLoaded) {
     }
     pendingSave = null
     removeRoot()
+  }
+
+  async function ignoreCurrentSaveSite() {
+    if (!pendingSave?.token) return
+    const token = pendingSave.token
+    const anchor = pendingSave.anchor || document.activeElement
+    const hostname = normalizeHost(pendingSave.hostname || location.hostname)
+    if (!hostname) return
+
+    const root = ensureRoot()
+    const button = root.querySelector('[data-action="ignore-site"]')
+    button?.setAttribute('disabled', 'true')
+    const response = await sendMessage({
+      type: 'MYPWDMG_ADD_IGNORED_SITE',
+      hostname,
+      token
+    })
+    if (!response?.ok) {
+      renderSavePrompt({
+        ...pendingSave,
+        anchor,
+        notice: response?.message || '忽略站点失败。'
+      })
+      return
+    }
+
+    ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
+    completedSaveTokens.add(token)
+    pendingSave = null
+    renderPanel([], `已忽略 ${hostname}，之后不会自动保存该站点。`, anchor)
+    window.setTimeout(removeRoot, 1800)
   }
 
   async function savePendingCapture() {
@@ -865,6 +941,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function scheduleSaveCapture(captureInfo) {
     if (!autoSaveEnabled) return
+    if (isCurrentSiteIgnored()) return
     if (!captureInfo?.capture?.password) return
     lastSubmitCapture = { ...captureInfo, at: Date.now() }
     window.clearTimeout(savePromptTimer)
@@ -881,6 +958,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function rememberInputCapture(target) {
     if (!autoSaveEnabled) return
+    if (isCurrentSiteIgnored()) return
     const input = target instanceof Element ? inputFromEventTarget(target) : null
     if (!input) return
     if (!isPasswordInput(input) && !isUsernameInput(input)) return
@@ -898,6 +976,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   async function prepareSavePrompt(captureInfo, renderDelay = 0) {
     if (!autoSaveEnabled) return
+    if (isCurrentSiteIgnored()) return
     if (!captureInfo?.capture?.password) return
     const response = await sendMessage({
       type: 'MYPWDMG_PREPARE_CAPTURE',
@@ -911,6 +990,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     }
     if (!response?.ok || !response.data?.shouldPrompt || !response.data?.token) return
     if (renderDelay > 0) await sleep(renderDelay)
+    if (isCurrentSiteIgnored()) return
     if (completedSaveTokens.has(response.data.token) || pendingSave?.token === response.data.token) return
     renderSavePrompt({
       ...response.data,
@@ -921,6 +1001,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   async function takePreparedSavePrompt() {
     if (extensionContextInvalidated) return
     if (!autoSaveEnabled) return
+    if (isCurrentSiteIgnored()) return
     const response = await sendMessage({
       type: 'MYPWDMG_TAKE_SAVE_PROMPT',
       hostname: location.hostname

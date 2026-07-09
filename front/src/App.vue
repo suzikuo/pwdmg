@@ -553,9 +553,16 @@
       </div>
     </van-popup>
 
-    <van-popup v-model:show="cloudSyncReviewOpen" position="bottom" class="cloud-sync-popup" :duration="0.14" lazy-render>
+    <van-popup
+      v-model:show="cloudSyncReviewOpen"
+      position="bottom"
+      class="cloud-sync-popup"
+      :duration="0.14"
+      :close-on-click-overlay="false"
+      lazy-render
+    >
       <section v-if="cloudSyncPreview" class="cloud-sync-shell">
-        <van-nav-bar safe-area-inset-top :title="cloudSyncReviewTitle" left-arrow @click-left="closeCloudSyncReview" />
+        <van-nav-bar safe-area-inset-top :title="cloudSyncReviewTitle" left-arrow @click-left="hideCloudSyncReview" />
         <div class="cloud-sync-body">
           <div class="cloud-sync-target">
             <span>{{ cloudSyncPreview.direction === 'download' ? '云端到本机' : '本机到云端' }}</span>
@@ -578,26 +585,49 @@
           <div class="cloud-sync-actions">
             <van-button size="small" plain type="default" @click="setAllCloudSyncDiffs(true)">全选</van-button>
             <van-button size="small" plain type="default" @click="setAllCloudSyncDiffs(false)">全不选</van-button>
+            <van-button size="small" plain type="danger" @click="discardCloudSyncReview">放弃本次</van-button>
           </div>
           <div v-if="cloudSyncPreview.items.length" class="cloud-sync-list">
-            <label
+            <article
               v-for="item in cloudSyncPreview.items"
               :key="`${item.changeType}:${item.id}`"
               class="cloud-sync-item"
               :class="`is-${item.changeType}`"
             >
-              <input v-model="item.checked" type="checkbox" />
-              <span class="cloud-sync-tag">{{ cloudSyncChangeLabel(item.changeType) }}</span>
-              <span class="cloud-sync-copy">
-                <strong>{{ item.path }}</strong>
-                <small>{{ item.changes.length ? item.changes.join(' · ') : cloudSyncEntryLabel(item) }}</small>
-              </span>
-            </label>
+              <label class="cloud-sync-item-head">
+                <input :checked="isCloudSyncItemChecked(item)" type="checkbox" @change="setCloudSyncItemChecked(item, readCheckboxChecked($event))" />
+                <span class="cloud-sync-tag">{{ cloudSyncChangeLabel(item.changeType) }}</span>
+                <span class="cloud-sync-copy">
+                  <strong>{{ item.path }}</strong>
+                  <small>{{ cloudSyncItemSummary(item) }}</small>
+                </span>
+              </label>
+              <div v-if="item.changeType === 'modified' && item.details.length" class="cloud-sync-field-list">
+                <label
+                  v-for="detail in item.details"
+                  :key="detail.key"
+                  class="cloud-sync-field"
+                >
+                  <input :checked="detail.checked" type="checkbox" @change="setCloudSyncDetailChecked(item, detail, readCheckboxChecked($event))" />
+                  <span class="cloud-sync-field-copy">
+                    <strong>{{ detail.label }}</strong>
+                    <small>
+                      <em>{{ cloudSyncPreview.direction === 'download' ? '云端' : '本机' }}</em>
+                      <b>{{ detail.sourceText }}</b>
+                    </small>
+                    <small>
+                      <em>{{ cloudSyncPreview.direction === 'download' ? '本机' : '云端' }}</em>
+                      <b>{{ detail.baseText }}</b>
+                    </small>
+                  </span>
+                </label>
+              </div>
+            </article>
           </div>
           <van-empty v-else image="search" description="两端条目一致" />
         </div>
         <div class="cloud-sync-footer">
-          <span>已选 {{ cloudSyncSelectedCount }} 项</span>
+          <span>已选 {{ cloudSyncSelectedCount }} 处</span>
           <van-button size="small" type="primary" :disabled="cloudSyncSelectedCount === 0" :loading="cloudBusy" @click="applyCloudSyncPreview">
             {{ cloudSyncReviewActionText }}
           </van-button>
@@ -706,8 +736,7 @@ type CloudSyncDiffItem = {
   title: string
   path: string
   checked: boolean
-  changes: string[]
-  changeKeys: CloudSyncChangeField[]
+  details: CloudSyncChangeDetail[]
   sourceParentId: string
   sourceIndex: number
 }
@@ -730,6 +759,9 @@ type CloudSyncEntryChangeField = Exclude<CloudSyncChangeField, 'position'>
 type CloudSyncChangeDetail = {
   key: CloudSyncChangeField
   label: string
+  sourceText: string
+  baseText: string
+  checked: boolean
 }
 type CloudSyncPreview = {
   direction: CloudSyncDirection
@@ -1071,7 +1103,7 @@ const cloudSyncDiffCounts = computed(() => {
     deleted: items.filter((item) => item.changeType === 'deleted').length
   }
 })
-const cloudSyncSelectedCount = computed(() => (cloudSyncPreview.value?.items || []).filter((item) => item.checked).length)
+const cloudSyncSelectedCount = computed(() => countCloudSyncSelections(cloudSyncPreview.value?.items || []))
 const cloudSyncReviewTitle = computed(() => {
   if (cloudSyncPreview.value?.direction === 'download') return '下载校验'
   return '上传校验'
@@ -1170,7 +1202,7 @@ function handleNativeBack() {
 
 function closeTopLayer() {
   if (cloudSyncReviewOpen.value) {
-    closeCloudSyncReview()
+    hideCloudSyncReview()
     return true
   }
   if (pluginDetailOpen.value) {
@@ -2226,7 +2258,7 @@ async function downloadCloudBackup() {
 
 function canScheduleAutoCloudSync() {
   if (!vault.value || !settings.oss.autoSync || state.locked) return
-  if (cloudBusy.value || cloudSyncReviewOpen.value) return
+  if (cloudBusy.value || cloudSyncReviewOpen.value || hasPendingCloudSyncReview()) return
   if (!hasCompleteOssSettings()) {
     backupStatus.value = '自动同步已开启，请补全 OSS 配置'
     return
@@ -2269,6 +2301,14 @@ async function startCloudSyncReview(
   options: { automatic?: boolean; skipPersist?: boolean; objectName?: string } = {}
 ) {
   if (!vault.value || cloudBusy.value) return
+  if (hasPendingCloudSyncReview()) {
+    if (!options.automatic) {
+      cloudSyncReviewOpen.value = true
+      backupStatus.value = '有未处理同步差异，请先确认'
+      showToast('有未处理同步差异，请先确认')
+    }
+    return
+  }
   syncSettings(settings)
   if (options.automatic) {
     if (!hasCompleteOssSettings() || !crypto.subtle) return
@@ -2355,17 +2395,9 @@ async function startCloudSyncReview(
     const sourcePayload = direction === 'download' ? remotePayload : localPayload
     const basePayload = direction === 'download' ? localPayload : remotePayload
     const items = buildCloudSyncDiff(sourcePayload, basePayload)
-    const preview: CloudSyncPreview = {
-      direction,
-      objectName,
-      sourcePayload,
-      basePayload,
-      items,
-      automatic: options.automatic === true
-    }
-    cloudSyncPreview.value = preview
 
     if (!items.length) {
+      cloudSyncPreview.value = null
       backupStatus.value = '两端条目一致'
       if (!options.automatic) showToast('两端条目一致')
       appendCloudSyncLog({
@@ -2377,6 +2409,16 @@ async function startCloudSyncReview(
       })
       return
     }
+
+    const preview: CloudSyncPreview = {
+      direction,
+      objectName,
+      sourcePayload,
+      basePayload,
+      items,
+      automatic: options.automatic === true
+    }
+    cloudSyncPreview.value = preview
 
     if (options.automatic) {
       const autoDecision = resolveAutoCloudSyncDecision(preview)
@@ -2433,7 +2475,7 @@ async function startCloudSyncReview(
 async function applyCloudSyncPreview() {
   const preview = cloudSyncPreview.value
   if (!preview || cloudBusy.value) return
-  const selectedItems = preview.items.filter((item) => item.checked)
+  const selectedItems = getCloudSyncSelectedItems(preview.items)
   if (!selectedItems.length) return showToast('没有选中差异')
 
   cloudBusy.value = true
@@ -2464,6 +2506,8 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
     for (const item of selectedItems) {
       applyCloudSyncDiffItem(nextPayload.entries, preview.sourcePayload.entries, item)
     }
+    const previewStats = cloudSyncSelectionStats(preview.items)
+    const selectedStats = cloudSyncSelectionStats(selectedItems)
 
     if (preview.direction === 'download') {
       const result = await api.saveVault(nextPayload)
@@ -2475,8 +2519,8 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
           status: 'error',
           objectName: preview.objectName,
           message: result.message || '应用下载差异失败',
-          selected: selectedItems.length,
-          total: preview.items.length,
+          selected: selectedStats.selected,
+          total: previewStats.total,
           ...cloudSyncDiffCountsForItems(selectedItems)
         })
         if (options.showErrors !== false) showFailToast(result.message || '应用下载差异失败')
@@ -2498,8 +2542,8 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
         status: 'success',
         objectName: preview.objectName,
         message,
-        selected: selectedItems.length,
-        total: preview.items.length,
+        selected: selectedStats.selected,
+        total: previewStats.total,
         ...cloudSyncDiffCountsForItems(selectedItems)
       })
       finishCloudSyncApplyPreview(preview, options)
@@ -2516,8 +2560,8 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
         status: 'error',
         objectName: preview.objectName,
         message: exported.message || '生成上传内容失败',
-        selected: selectedItems.length,
-        total: preview.items.length,
+        selected: selectedStats.selected,
+        total: previewStats.total,
         ...cloudSyncDiffCountsForItems(selectedItems)
       })
       if (options.showErrors !== false) showFailToast(exported.message || '生成上传内容失败')
@@ -2535,8 +2579,8 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
         status: 'error',
         objectName: preview.objectName,
         message: String(response.content || '上传失败'),
-        selected: selectedItems.length,
-        total: preview.items.length,
+        selected: selectedStats.selected,
+        total: previewStats.total,
         ...cloudSyncDiffCountsForItems(selectedItems)
       })
       if (options.showErrors !== false) showFailToast(String(response.content || '上传失败'))
@@ -2557,8 +2601,8 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
       status: 'success',
       objectName: preview.objectName,
       message,
-      selected: selectedItems.length,
-      total: preview.items.length,
+      selected: selectedStats.selected,
+      total: previewStats.total,
       ...cloudSyncDiffCountsForItems(selectedItems)
     })
     finishCloudSyncApplyPreview(preview, options)
@@ -2566,14 +2610,16 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
     return true
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || '应用同步差异失败')
+    const previewStats = cloudSyncSelectionStats(preview.items)
+    const selectedStats = cloudSyncSelectionStats(selectedItems)
     appendCloudSyncLog({
       direction: preview.direction,
       automatic: preview.automatic,
       status: 'error',
       objectName: preview.objectName,
       message,
-      selected: selectedItems.length,
-      total: preview.items.length,
+      selected: selectedStats.selected,
+      total: previewStats.total,
       ...cloudSyncDiffCountsForItems(selectedItems)
     })
     if (options.showErrors !== false) showFailToast(message)
@@ -2596,8 +2642,97 @@ function closeCloudSyncReview() {
   cloudSyncPreview.value = null
 }
 
+function hideCloudSyncReview() {
+  cloudSyncReviewOpen.value = false
+}
+
+async function discardCloudSyncReview() {
+  const preview = cloudSyncPreview.value
+  if (!preview) return
+  try {
+    await showConfirmDialog({
+      title: '放弃同步确认',
+      message: '本次差异不会应用，也不会删除两端数据。之后可以重新检测生成新的同步差异。',
+      confirmButtonText: '放弃本次',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+  const stats = cloudSyncSelectionStats(preview.items)
+  appendCloudSyncLog({
+    direction: preview.direction,
+    automatic: preview.automatic,
+    status: 'skipped',
+    objectName: preview.objectName,
+    message: '已放弃本次同步差异',
+    selected: 0,
+    total: stats.total,
+    ...cloudSyncDiffCountsForItems(preview.items)
+  })
+  backupStatus.value = '已放弃本次同步差异'
+  closeCloudSyncReview()
+}
+
+function hasPendingCloudSyncReview() {
+  return Boolean(cloudSyncPreview.value?.items.length)
+}
+
+function readCheckboxChecked(event: Event) {
+  return (event.target as HTMLInputElement | null)?.checked === true
+}
+
+function isCloudSyncItemChecked(item: CloudSyncDiffItem) {
+  if (item.changeType !== 'modified') return item.checked
+  return item.details.length > 0 && item.details.every((detail) => detail.checked)
+}
+
+function setCloudSyncItemChecked(item: CloudSyncDiffItem, checked: boolean) {
+  item.checked = checked
+  if (item.changeType !== 'modified') return
+  for (const detail of item.details) detail.checked = checked
+}
+
+function setCloudSyncDetailChecked(item: CloudSyncDiffItem, detail: CloudSyncChangeDetail, checked: boolean) {
+  detail.checked = checked
+  item.checked = item.details.length > 0 && item.details.every((itemDetail) => itemDetail.checked)
+}
+
+function getCloudSyncSelectedItems(items: CloudSyncDiffItem[]) {
+  return items.filter((item) => (item.changeType === 'modified' ? item.details.some((detail) => detail.checked) : item.checked))
+}
+
+function cloudSyncSelectionStats(items: CloudSyncDiffItem[]) {
+  let selected = 0
+  let total = 0
+  for (const item of items) {
+    if (item.changeType === 'modified') {
+      total += item.details.length
+      selected += item.details.filter((detail) => detail.checked).length
+      continue
+    }
+    total += 1
+    if (item.checked) selected += 1
+  }
+  return { selected, total }
+}
+
+function countCloudSyncSelections(items: CloudSyncDiffItem[]) {
+  return cloudSyncSelectionStats(items).selected
+}
+
+function cloudSyncItemSummary(item: CloudSyncDiffItem) {
+  if (item.changeType === 'modified') {
+    const stats = cloudSyncSelectionStats([item])
+    const summary = stats.total ? `已选 ${stats.selected}/${stats.total} 处` : '无可选字段'
+    const fields = item.details.map((detail) => detail.label).join(' · ')
+    return [summary, fields].filter(Boolean).join(' · ')
+  }
+  return `${cloudSyncChangeLabel(item.changeType)} · ${cloudSyncEntryLabel(item)}`
+}
+
 function setAllCloudSyncDiffs(checked: boolean) {
-  for (const item of cloudSyncPreview.value?.items || []) item.checked = checked
+  for (const item of cloudSyncPreview.value?.items || []) setCloudSyncItemChecked(item, checked)
 }
 
 function cloudSyncDiffCountsForItems(items: CloudSyncDiffItem[]) {
@@ -2611,15 +2746,13 @@ function cloudSyncDiffCountsForItems(items: CloudSyncDiffItem[]) {
 function resolveAutoCloudSyncDecision(preview: CloudSyncPreview) {
   const items = preview.items
   const action = preview.direction === 'download' ? '下载' : '上传'
-  if (items.some((item) => item.changeType === 'deleted')) {
-    return { apply: false, message: '发现删除差异，等待手动确认' }
-  }
-
-  const manualFields = autoCloudSyncManualReviewLabels(items)
-  if (manualFields.length) {
+  if (items.some((item) => item.changeType !== 'added')) {
+    const manualFields = autoCloudSyncManualReviewLabels(items)
     return {
       apply: false,
-      message: `发现关键字段变化（${manualFields.join('、')}），等待手动确认`
+      message: manualFields.length
+        ? `发现修改/删除差异（${manualFields.join('、')}），等待手动确认`
+        : '发现修改/删除差异，等待手动确认'
     }
   }
 
@@ -2633,8 +2766,8 @@ function autoCloudSyncManualReviewLabels(items: CloudSyncDiffItem[]) {
   const labels = new Set<string>()
   for (const item of items) {
     if (item.changeType !== 'modified') continue
-    for (const key of item.changeKeys) {
-      if (CLOUD_SYNC_MANUAL_REVIEW_FIELDS.has(key)) labels.add(CLOUD_SYNC_CHANGE_LABELS[key])
+    for (const detail of item.details) {
+      if (CLOUD_SYNC_MANUAL_REVIEW_FIELDS.has(detail.key)) labels.add(CLOUD_SYNC_CHANGE_LABELS[detail.key])
     }
   }
   return [...labels]
@@ -2792,8 +2925,7 @@ function makeCloudSyncDiffItem(
     title: entry?.title || '未命名',
     path: meta?.path || '未命名',
     checked: true,
-    changes: changes.map((change) => change.label),
-    changeKeys: changes.map((change) => change.key),
+    details: changes,
     sourceParentId: sourceMeta?.parentId || '',
     sourceIndex: sourceMeta?.index || 0
   }
@@ -2822,16 +2954,66 @@ function hasMissingAncestor(meta: EntryIndexMeta, otherIndex: Map<string, EntryI
 function diffEntryChanges(sourceMeta: EntryIndexMeta, baseMeta: EntryIndexMeta) {
   const changes: CloudSyncChangeDetail[] = []
   if (sourceMeta.parentId !== baseMeta.parentId) {
-    changes.push({ key: 'position', label: CLOUD_SYNC_CHANGE_LABELS.position })
+    changes.push(makeCloudSyncChangeDetail('position', sourceMeta.path, baseMeta.path))
   }
   const source = comparableEntry(sourceMeta.entry)
   const base = comparableEntry(baseMeta.entry)
   for (const key of CLOUD_SYNC_ENTRY_CHANGE_FIELDS) {
     if (JSON.stringify(source[key as keyof typeof source]) !== JSON.stringify(base[key as keyof typeof base])) {
-      changes.push({ key, label: CLOUD_SYNC_CHANGE_LABELS[key] })
+      changes.push(makeCloudSyncChangeDetail(key, source[key as keyof typeof source], base[key as keyof typeof base]))
     }
   }
   return changes
+}
+
+function makeCloudSyncChangeDetail(key: CloudSyncChangeField, sourceValue: unknown, baseValue: unknown): CloudSyncChangeDetail {
+  return {
+    key,
+    label: CLOUD_SYNC_CHANGE_LABELS[key],
+    sourceText: formatCloudSyncValue(key, sourceValue),
+    baseText: formatCloudSyncValue(key, baseValue),
+    checked: true
+  }
+}
+
+function formatCloudSyncValue(key: CloudSyncChangeField, value: unknown) {
+  if (key === 'password' || key === 'totpSecret') {
+    const text = String(value || '')
+    return text ? `已设置（${text.length} 字符）` : '空'
+  }
+  if (key === 'domains') {
+    const domains = Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : []
+    return domains.length ? domains.join('、') : '空'
+  }
+  if (key === 'deletedAt') {
+    return formatUnixTime(Number(value || 0)) || '空'
+  }
+  if (key === 'kind') {
+    return value === 'folder' ? '分组' : '登录'
+  }
+  if (key === 'status') {
+    return cloudSyncStatusLabel(normalizeEntryStatus(value))
+  }
+  if (key === 'loginAccountSource') {
+    return cloudSyncLoginAccountSourceLabel(normalizeLoginAccountSource(value))
+  }
+  return compactCloudSyncText(String(value || ''))
+}
+
+function compactCloudSyncText(value: string) {
+  const text = value.replace(/\s+/g, ' ').trim()
+  if (!text) return '空'
+  return text.length > 96 ? `${text.slice(0, 96)}...` : text
+}
+
+function cloudSyncStatusLabel(status: EntryStatus) {
+  if (status === 'disabled') return '已归档'
+  if (status === 'trashed') return '回收站'
+  return '正常'
+}
+
+function cloudSyncLoginAccountSourceLabel(source: LoginAccountSource) {
+  return loginAccountSourceOptions.find((option) => option.value === source)?.label || '自动'
 }
 
 function comparableEntry(entry: VaultEntry) {
@@ -2860,14 +3042,71 @@ function applyCloudSyncDiffItem(targetEntries: VaultEntry[], sourceEntries: Vaul
 
   const sourceEntry = findEntry(sourceEntries, item.id)
   if (!sourceEntry) return
-  const nextEntry = clonePayload(sourceEntry)
-  const currentEntry = findEntry(targetEntries, item.id)
-  if (nextEntry.kind === 'folder' && currentEntry?.kind === 'folder') {
-    nextEntry.children = clonePayload(currentEntry.children || [])
+  if (item.changeType === 'added') {
+    removeEntryCopies(targetEntries, item.id)
+    insertEntryAt(targetEntries, item.sourceParentId, clonePayload(sourceEntry), item.sourceIndex)
+    return
   }
 
-  removeEntryCopies(targetEntries, item.id)
-  insertEntryAt(targetEntries, item.sourceParentId, nextEntry, item.sourceIndex)
+  const currentEntry = findEntry(targetEntries, item.id)
+  if (!currentEntry) return
+  for (const detail of item.details) {
+    if (detail.checked && detail.key !== 'position') {
+      applyCloudSyncEntryField(currentEntry, sourceEntry, detail.key)
+    }
+  }
+  if (item.details.some((detail) => detail.checked && detail.key === 'position')) {
+    const moved = takeEntry(targetEntries, item.id)
+    if (moved) insertEntryAt(targetEntries, item.sourceParentId, moved.entry, item.sourceIndex)
+  }
+}
+
+function applyCloudSyncEntryField(target: VaultEntry, source: VaultEntry, key: CloudSyncChangeField) {
+  switch (key) {
+    case 'position':
+      return
+    case 'kind':
+      target.kind = source.kind === 'folder' ? 'folder' : 'login'
+      if (target.kind === 'folder') target.children = target.children || []
+      return
+    case 'title':
+      target.title = source.title || ''
+      return
+    case 'status':
+      target.status = normalizeEntryStatus(source.status)
+      target.statusUpdatedAt = Number(source.statusUpdatedAt || target.statusUpdatedAt || 0)
+      return
+    case 'statusReason':
+      target.statusReason = source.statusReason || ''
+      return
+    case 'deletedAt':
+      target.deletedAt = Number(source.deletedAt || 0)
+      return
+    case 'domains':
+      target.domains = Array.isArray(source.domains) ? [...source.domains] : []
+      return
+    case 'username':
+      target.username = source.username || ''
+      return
+    case 'email':
+      target.email = source.email || ''
+      return
+    case 'password':
+      target.password = source.password || ''
+      return
+    case 'phone':
+      target.phone = source.phone || ''
+      return
+    case 'loginAccountSource':
+      target.loginAccountSource = normalizeLoginAccountSource(source.loginAccountSource)
+      return
+    case 'note':
+      target.note = source.note || ''
+      return
+    case 'totpSecret':
+      target.totpSecret = source.totpSecret || ''
+      return
+  }
 }
 
 function cloudSyncChangeLabel(changeType: CloudSyncChangeType) {

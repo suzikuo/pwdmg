@@ -50,6 +50,20 @@
       </label>
     </div>
 
+    <section id="ignoredSiteSetting" class="ignored-site-setting" hidden>
+      <div class="ignored-current">
+        <div class="ignored-copy">
+          <strong>当前站点</strong>
+          <span id="ignoredCurrentState">未忽略</span>
+        </div>
+        <button id="toggleIgnoredSiteButton" class="secondary" type="button">忽略该网站</button>
+      </div>
+      <details class="ignored-manager">
+        <summary>管理已忽略网站 <span id="ignoredSiteCount">0</span></summary>
+        <div id="ignoredSiteList" class="ignored-site-list"></div>
+      </details>
+    </section>
+
     <section class="shortcut-setting">
       <label for="shortcutInput">页面弹窗快捷键</label>
       <div class="shortcut-row">

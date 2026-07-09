@@ -342,6 +342,118 @@ button:hover {
   accent-color: #5eead4;
 }
 
+.ignored-site-setting {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(94, 234, 212, 0.14);
+  border-radius: 8px;
+  background: rgba(15, 23, 28, 0.46);
+}
+
+.ignored-site-setting[hidden] {
+  display: none;
+}
+
+.ignored-current,
+.ignored-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.ignored-copy,
+.ignored-row-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ignored-copy strong,
+.ignored-row-copy strong {
+  overflow: hidden;
+  color: #f3fffd;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ignored-copy span,
+.ignored-row-copy span,
+.ignored-empty {
+  margin: 0;
+  color: #7f98a2;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+#toggleIgnoredSiteButton,
+.ignored-remove {
+  min-width: 72px;
+  height: 30px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.ignored-manager {
+  display: grid;
+  gap: 6px;
+}
+
+.ignored-manager summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #cfe7ea;
+  font-size: 12px;
+  font-weight: 760;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ignored-manager summary::-webkit-details-marker {
+  display: none;
+}
+
+.ignored-manager summary span {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid rgba(94, 234, 212, 0.18);
+  border-radius: 6px;
+  color: #b7fff4;
+  background: rgba(45, 212, 191, 0.12);
+  font-size: 10.5px;
+  line-height: 18px;
+}
+
+.ignored-site-list {
+  display: grid;
+  max-height: 132px;
+  overflow: auto;
+  gap: 6px;
+  padding-top: 6px;
+}
+
+.ignored-row {
+  min-height: 40px;
+  padding: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  border-radius: 7px;
+  background: rgba(3, 7, 10, 0.34);
+}
+
+.ignored-row.is-active {
+  border-color: rgba(94, 234, 212, 0.24);
+  background: rgba(45, 212, 191, 0.08);
+}
+
 .shortcut-setting {
   display: grid;
   gap: 6px;
