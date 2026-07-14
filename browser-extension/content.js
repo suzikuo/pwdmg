@@ -4,7 +4,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
   const FIELD_ID_ATTR = 'data-mypwdmg-field-id'
   const QUERY_DEBOUNCE_MS = 300
   const MUTATION_DEBOUNCE_MS = 900
-  const SAVE_PROMPT_DELAY_MS = 900
+  const SAVE_PROMPT_CAPTURE_DELAY_MS = 2500
+  const SAVE_PROMPT_RESTORE_DELAY_MS = 700
   const CAPTURE_CLICK_WINDOW_MS = 800
   const RECENT_INPUT_CAPTURE_TTL_MS = 15000
   const FILL_CAPTURE_SUPPRESS_MS = 2500
@@ -88,8 +89,12 @@ if (!window.__mypwdmgContentScriptLoaded) {
     })
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => window.setTimeout(resolve, ms))
+  function isTopFrame() {
+    try {
+      return window.top === window
+    } catch {
+      return false
+    }
   }
 
   function parseShortcut(value) {
@@ -494,7 +499,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
       return
     }
 
-    const rect = anchor?.getBoundingClientRect()
+    const rect = usableAnchorRect(anchor)
     if (!rect) {
       root.style.removeProperty('--mypwdmg-top')
       root.style.removeProperty('--mypwdmg-right')
@@ -508,6 +513,38 @@ if (!window.__mypwdmgContentScriptLoaded) {
     const right = Math.max(12, Math.min(anchorRight, maxRight))
     root.style.setProperty('--mypwdmg-top', `${Math.round(top)}px`)
     root.style.setProperty('--mypwdmg-right', `${Math.round(right)}px`)
+  }
+
+  function usableAnchorRect(anchor) {
+    if (!(anchor instanceof Element)) return null
+    if (anchor === document.body || anchor === document.documentElement) return null
+    const rect = anchor.getBoundingClientRect()
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null
+    return rect
+  }
+
+  function promptPlacementForAnchor(anchor) {
+    const rect = usableAnchorRect(anchor)
+    if (!rect) return null
+    const panelWidth = Math.min(286, window.innerWidth - 24)
+    const top = Math.min(Math.max(12, rect.bottom + 8), Math.max(12, window.innerHeight - 280))
+    const anchorRight = window.innerWidth - Math.min(window.innerWidth - 12, rect.right) - 4
+    const maxRight = Math.max(12, window.innerWidth - panelWidth - 12)
+    return {
+      top: Math.round(top),
+      right: Math.round(Math.max(12, Math.min(anchorRight, maxRight))),
+      viewportWidth: Math.round(window.innerWidth),
+      viewportHeight: Math.round(window.innerHeight)
+    }
+  }
+
+  function applyPromptPlacement(placement) {
+    if (!placement || typeof placement !== 'object') return false
+    const top = Number(placement.top)
+    const right = Number(placement.right)
+    if (!Number.isFinite(top) || !Number.isFinite(right)) return false
+    setPanelPosition(top, right)
+    return true
   }
 
   function setPanelPosition(top, right) {
@@ -636,7 +673,9 @@ if (!window.__mypwdmgContentScriptLoaded) {
     pendingSave = preview
     panelPinned = false
     const root = ensureRoot()
-    positionRoot(preview.anchor || document.activeElement)
+    if (!applyPromptPlacement(preview.placement)) {
+      positionRoot(preview.anchor || null)
+    }
     const folders = Array.isArray(preview.folders) ? preview.folders : []
     const update = preview.updateCandidate
     const titleValue = update?.title || preview.title || preview.hostname || 'Untitled'
@@ -920,7 +959,12 @@ if (!window.__mypwdmgContentScriptLoaded) {
       phone: accountKind === 'phone' ? account : '',
       password
     }
-    return { capture, anchor: anchor || fields.passwordInput || fields.usernameInput }
+    const promptAnchor = anchor || fields.passwordInput || fields.usernameInput
+    return {
+      capture,
+      anchor: promptAnchor,
+      placement: promptPlacementForAnchor(promptAnchor)
+    }
   }
 
   function detectLoginFieldsInScope(scope = document) {
@@ -945,7 +989,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (!captureInfo?.capture?.password) return
     lastSubmitCapture = { ...captureInfo, at: Date.now() }
     window.clearTimeout(savePromptTimer)
-    prepareSavePrompt(captureInfo, SAVE_PROMPT_DELAY_MS).catch(() => { })
+    prepareSavePrompt(captureInfo, SAVE_PROMPT_CAPTURE_DELAY_MS).catch(() => { })
   }
 
   function sameCapture(left, right) {
@@ -980,7 +1024,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (!captureInfo?.capture?.password) return
     const response = await sendMessage({
       type: 'MYPWDMG_PREPARE_CAPTURE',
-      capture: captureInfo.capture
+      capture: captureInfo.capture,
+      placement: isTopFrame() ? (captureInfo.placement || promptPlacementForAnchor(captureInfo.anchor)) : null
     })
     if (!response?.ok) {
       if (response?.code === 'LOCKED_CAPTURE_PENDING' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
@@ -989,28 +1034,39 @@ if (!window.__mypwdmgContentScriptLoaded) {
       return
     }
     if (!response?.ok || !response.data?.shouldPrompt || !response.data?.token) return
-    if (renderDelay > 0) await sleep(renderDelay)
-    if (isCurrentSiteIgnored()) return
-    if (completedSaveTokens.has(response.data.token) || pendingSave?.token === response.data.token) return
-    renderSavePrompt({
-      ...response.data,
-      anchor: captureInfo.anchor
-    })
+    scheduleTakePreparedSavePrompt(renderDelay)
   }
 
   async function takePreparedSavePrompt() {
     if (extensionContextInvalidated) return
+    if (!isTopFrame()) return
     if (!autoSaveEnabled) return
+    if (pendingSave?.token) return
     if (isCurrentSiteIgnored()) return
     const response = await sendMessage({
       type: 'MYPWDMG_TAKE_SAVE_PROMPT',
       hostname: location.hostname
     })
     if (!response?.ok || !response.data?.token) return
+    if (completedSaveTokens.has(response.data.token) || pendingSave?.token === response.data.token) return
     renderSavePrompt({
-      ...response.data,
-      anchor: document.activeElement
+      ...response.data
     })
+  }
+
+  function scheduleTakePreparedSavePrompt(delay = 0) {
+    if (extensionContextInvalidated) return
+    if (!isTopFrame()) return
+    window.clearTimeout(savePromptTimer)
+    const run = () => {
+      savePromptTimer = 0
+      takePreparedSavePrompt().catch(() => { })
+    }
+    if (delay > 0) {
+      savePromptTimer = window.setTimeout(run, delay)
+      return
+    }
+    run()
   }
 
   function handleSubmitCapture(event) {
@@ -1103,7 +1159,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (message?.type === 'MYPWDMG_REFRESH') {
       lastQueryKey = ''
       queryMatches(true)
-      takePreparedSavePrompt()
+      scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
       sendResponse?.({ ok: true })
     }
     if (message?.type === 'MYPWDMG_AUTO_SETTINGS_CHANGED') {
@@ -1123,7 +1179,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
       return true
     }
     if (message?.type === 'MYPWDMG_CAPTURE_READY') {
-      takePreparedSavePrompt()
+      scheduleTakePreparedSavePrompt(SAVE_PROMPT_CAPTURE_DELAY_MS)
     }
   })
 
@@ -1148,7 +1204,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
   document.addEventListener('submit', handleSubmitCapture, true)
   document.addEventListener('click', handleClickCapture, true)
   document.addEventListener('contextmenu', rememberContextMenuInput, true)
-  window.addEventListener('pageshow', () => scheduleQuery(true))
+  window.addEventListener('pageshow', () => {
+    scheduleQuery(true)
+    scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
+  })
   window.addEventListener('resize', () => {
     if (panelPinned) clampPanelPosition()
     else if (panelManualMode && isRootOpen()) positionRoot(lastManualFields?.anchor || activeInput())
@@ -1164,10 +1223,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
     .then((response) => {
       if (response?.ok) applyAutoSettings(response.data || {})
       scheduleQuery(true)
-      takePreparedSavePrompt()
+      scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
     })
     .catch(() => {
       scheduleQuery(true)
-      takePreparedSavePrompt()
+      scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
     })
 }

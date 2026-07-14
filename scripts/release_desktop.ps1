@@ -5,7 +5,9 @@ param(
     [int] $VersionCode = 0,
     [string] $Repo = "",
     [string] $AssetUrl = "",
+    [string] $AssetMirrorUrls = "",
     [string] $AndroidAssetUrl = "",
+    [string] $AndroidAssetMirrorUrls = "",
     [string] $JavaHome = "",
     [string] $Notes = "",
     [string] $Mode = "",
@@ -40,7 +42,7 @@ function Show-Help {
     Write-Host "  2. Updates pwdmg_core/version.py, front package versions, Android versionName/versionCode, and front manifest version."
     Write-Host "  3. Runs scripts\package_desktop.ps1."
     Write-Host "  4. Builds the Android release APK unless -DesktopOnly is used."
-    Write-Host "  5. Generates release\update-manifest.json for GitHub Releases."
+    Write-Host "  5. Generates release\update-manifest.json for GitHub Releases and optional mirrors."
     Write-Host "  6. Publishes the GitHub Release unless -NoPublish is used."
     Write-Host "  If no flow option is provided in an interactive shell, a release mode menu is shown."
     Write-Host ""
@@ -62,7 +64,9 @@ function Show-Help {
     Write-Host "  -VersionCode NUMBER      Explicit Android/front manifest build code. Default: +1 when version changes."
     Write-Host "  -Repo OWNER/REPO         GitHub repository. Inferred from git remote when possible."
     Write-Host "  -AssetUrl URL            Explicit release zip URL. Overrides -Repo URL generation."
+    Write-Host "  -AssetMirrorUrls URLS    Optional desktop mirror URLs, separated by comma/semicolon/space."
     Write-Host "  -AndroidAssetUrl URL     Explicit Android APK URL. Overrides -Repo URL generation."
+    Write-Host "  -AndroidAssetMirrorUrls URLS  Optional Android mirror URLs, separated by comma/semicolon/space."
     Write-Host "  -JavaHome PATH           Optional JDK/JBR path for Android Gradle."
     Write-Host "  -Notes TEXT              Release notes for manifest and optional GitHub release."
     Write-Host "  -Mode MODE               Release flow: full, build, publish, or menu."
@@ -459,7 +463,7 @@ function Build-AssetUrl {
     if (-not $Repository) {
         throw "Repo is required to generate the GitHub Release asset URL. Pass -Repo OWNER/REPO or -AssetUrl URL."
     }
-    return "https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordDesktop-windows.zip"
+    return "https://ghproxy.net/https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordDesktop-windows.zip"
 }
 
 function Build-AndroidAssetUrl {
@@ -467,7 +471,7 @@ function Build-AndroidAssetUrl {
     if (-not $Repository) {
         throw "Repo is required to generate the Android APK asset URL. Pass -Repo OWNER/REPO or -AndroidAssetUrl URL."
     }
-    return "https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordAndroid-release.apk"
+    return "https://ghproxy.net/https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordAndroid-release.apk"
 }
 
 function Resolve-JavaHome {
@@ -762,9 +766,11 @@ function Invoke-Manifest {
         & $ManifestScript `
             -Version $ReleaseVersion `
             -AssetUrl $Url `
+            -AssetMirrorUrls $AssetMirrorUrls `
             -PackagePath $ArchivePath `
             -AndroidPackagePath $AndroidArchivePath `
             -AndroidAssetUrl $AndroidAssetUrl `
+            -AndroidAssetMirrorUrls $AndroidAssetMirrorUrls `
             -AndroidVersionCode $NextVersionCode `
             -OutPath $ManifestPath `
             -Notes $Notes
@@ -773,6 +779,7 @@ function Invoke-Manifest {
         & $ManifestScript `
             -Version $ReleaseVersion `
             -AssetUrl $Url `
+            -AssetMirrorUrls $AssetMirrorUrls `
             -PackagePath $ArchivePath `
             -OutPath $ManifestPath `
             -Notes $Notes
@@ -832,7 +839,18 @@ if (-not $Repo.Trim()) {
 $Repo = $Repo.Trim()
 
 $AssetUrl = $AssetUrl.Trim()
+$AssetMirrorUrls = $AssetMirrorUrls.Trim()
 $AndroidAssetUrl = $AndroidAssetUrl.Trim()
+$AndroidAssetMirrorUrls = $AndroidAssetMirrorUrls.Trim()
+function Assert-HttpsUrlList {
+    param([string] $Urls, [string] $Label)
+    foreach ($Raw in ($Urls -split '[\s,;]+')) {
+        $Value = $Raw.Trim()
+        if ($Value -and -not ($Value -match '^https://')) {
+            throw "$Label must contain only HTTPS URLs: $Value"
+        }
+    }
+}
 if (-not $PublishOnly) {
     if (-not $AssetUrl) {
         $AssetUrl = Build-AssetUrl $Repo $NextVersion
@@ -840,12 +858,16 @@ if (-not $PublishOnly) {
     if (-not ($AssetUrl -match '^https://')) {
         throw "AssetUrl must be HTTPS: $AssetUrl"
     }
+    Assert-HttpsUrlList $AssetMirrorUrls "AssetMirrorUrls"
 
     if ($ShouldIncludeAndroid -and -not $AndroidAssetUrl) {
         $AndroidAssetUrl = Build-AndroidAssetUrl $Repo $NextVersion
     }
     if ($ShouldIncludeAndroid -and -not ($AndroidAssetUrl -match '^https://')) {
         throw "AndroidAssetUrl must be HTTPS: $AndroidAssetUrl"
+    }
+    if ($ShouldIncludeAndroid) {
+        Assert-HttpsUrlList $AndroidAssetMirrorUrls "AndroidAssetMirrorUrls"
     }
 }
 
@@ -859,8 +881,14 @@ if ($AssetUrl) {
 elseif ($PublishOnly) {
     Write-Host "Asset URL: existing manifest"
 }
+if ($AssetMirrorUrls) {
+    Write-Host "Asset mirror URLs: $AssetMirrorUrls"
+}
 if ($ShouldIncludeAndroid -and $AndroidAssetUrl) {
     Write-Host "Android asset URL: $AndroidAssetUrl"
+}
+if ($ShouldIncludeAndroid -and $AndroidAssetMirrorUrls) {
+    Write-Host "Android asset mirror URLs: $AndroidAssetMirrorUrls"
 }
 Write-Host "Desktop build: $(if ($SkipDesktopBuild) { 'skip, use existing zip' } else { 'enabled' })"
 Write-Host "Native Host: $(if ($SkipDesktopBuild) { 'unchanged' } elseif ($NoNativeHost) { 'excluded' } else { 'included' })"

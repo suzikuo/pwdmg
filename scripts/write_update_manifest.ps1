@@ -1,10 +1,12 @@
 param(
     [string] $Version = "",
     [string] $AssetUrl = "",
+    [string] $AssetMirrorUrls = "",
 
     [string] $PackagePath = ".\release\MyPasswordDesktop-windows.zip",
     [string] $AndroidPackagePath = "",
     [string] $AndroidAssetUrl = "",
+    [string] $AndroidAssetMirrorUrls = "",
     [int] $AndroidVersionCode = 0,
     [string] $OutPath = ".\release\update-manifest.json",
     [string] $Notes = "",
@@ -20,9 +22,11 @@ function Show-Help {
     Write-Host "Options:"
     Write-Host "  -Version      Release version. Example: 2.0.1"
     Write-Host "  -AssetUrl     HTTPS URL for the desktop zip release asset."
+    Write-Host "  -AssetMirrorUrls  Optional desktop mirror URLs, separated by comma/semicolon/space."
     Write-Host "  -PackagePath  Local zip to hash. Default: .\release\MyPasswordDesktop-windows.zip"
     Write-Host "  -AndroidPackagePath  Optional Android release APK to hash."
     Write-Host "  -AndroidAssetUrl     Optional HTTPS URL for the Android APK release asset."
+    Write-Host "  -AndroidAssetMirrorUrls  Optional Android mirror URLs, separated by comma/semicolon/space."
     Write-Host "  -AndroidVersionCode  Optional Android versionCode."
     Write-Host "  -OutPath      Manifest output path. Default: .\release\update-manifest.json"
     Write-Host "  -Notes        Optional release notes text."
@@ -46,6 +50,36 @@ if (-not ($AssetUrl -match '^https://')) {
     throw "AssetUrl must be an HTTPS GitHub Release asset URL."
 }
 
+function Get-UrlCandidates {
+    param([string] $MirrorUrls, [string] $PrimaryUrl)
+
+    $Result = New-Object System.Collections.Generic.List[string]
+    foreach ($Raw in ($MirrorUrls -split '[\s,;]+')) {
+        $Value = $Raw.Trim()
+        if ($Value -and -not $Result.Contains($Value)) {
+            $Result.Add($Value)
+        }
+    }
+    $Primary = $PrimaryUrl.Trim()
+    if ($Primary -and -not $Result.Contains($Primary)) {
+        $Result.Add($Primary)
+    }
+    return @($Result.ToArray())
+}
+
+function Assert-HttpsUrls {
+    param([string[]] $Urls, [string] $Label)
+
+    foreach ($Url in $Urls) {
+        if (-not ($Url -match '^https://')) {
+            throw "$Label must contain only HTTPS URLs: $Url"
+        }
+    }
+}
+
+$WindowsUrls = Get-UrlCandidates -MirrorUrls $AssetMirrorUrls -PrimaryUrl $AssetUrl
+Assert-HttpsUrls -Urls $WindowsUrls -Label "AssetMirrorUrls"
+
 if ($AndroidPackagePath.Trim() -or $AndroidAssetUrl.Trim()) {
     if (-not $AndroidPackagePath.Trim()) {
         throw "AndroidPackagePath is required when AndroidAssetUrl is set."
@@ -56,6 +90,8 @@ if ($AndroidPackagePath.Trim() -or $AndroidAssetUrl.Trim()) {
     if (-not ($AndroidAssetUrl -match '^https://')) {
         throw "AndroidAssetUrl must be an HTTPS GitHub Release asset URL."
     }
+    $AndroidUrls = Get-UrlCandidates -MirrorUrls $AndroidAssetMirrorUrls -PrimaryUrl $AndroidAssetUrl
+    Assert-HttpsUrls -Urls $AndroidUrls -Label "AndroidAssetMirrorUrls"
 }
 
 if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
@@ -81,6 +117,9 @@ $Assets = [ordered]@{
         sha256 = $Hash.Hash.ToLowerInvariant()
     }
 }
+if ($AssetMirrorUrls.Trim()) {
+    $Assets.windows.urls = $WindowsUrls
+}
 
 if ($AndroidPackagePath.Trim()) {
     if (-not (Test-Path -LiteralPath $AndroidPackagePath -PathType Leaf)) {
@@ -94,6 +133,9 @@ if ($AndroidPackagePath.Trim()) {
         fileName = $AndroidItem.Name
         size = $AndroidItem.Length
         sha256 = $AndroidHash.Hash.ToLowerInvariant()
+    }
+    if ($AndroidAssetMirrorUrls.Trim()) {
+        $AndroidAsset.urls = $AndroidUrls
     }
     if ($AndroidVersionCode -gt 0) {
         $AndroidAsset.versionCode = $AndroidVersionCode

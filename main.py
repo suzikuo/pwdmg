@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -20,6 +22,20 @@ from pwdmg_core.version import APP_VERSION
 
 _desktop_window: webview.Window | None = None
 _desktop_state: "DesktopWindowState | None" = None
+WEBVIEW_CACHE_STATE_FILE = "frontend_cache_state.json"
+WEBVIEW_CACHE_DIR_NAMES = {
+    "BrowserMetrics",
+    "Cache",
+    "CacheStorage",
+    "Code Cache",
+    "DawnCache",
+    "GPUCache",
+    "GraphiteDawnCache",
+    "GrShaderCache",
+    "ScriptCache",
+    "ShaderCache",
+    "component_crx_cache",
+}
 
 
 def read_passwordless_marker(vault_path: Path) -> bool:
@@ -431,6 +447,67 @@ def resolve_frontend_entry() -> str:
     return missing_frontend_page(checked_paths)
 
 
+def frontend_entry_fingerprint(frontend_entry: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(APP_VERSION.encode("utf-8"))
+    digest.update(b"\0")
+    try:
+        path = Path(frontend_entry)
+        if path.is_file():
+            digest.update(path.read_bytes())
+            return digest.hexdigest()
+    except OSError:
+        pass
+    digest.update(frontend_entry.encode("utf-8", errors="replace"))
+    return digest.hexdigest()
+
+
+def load_webview_cache_state(state_file: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def clear_webview_resource_cache(webview_storage_dir: Path) -> None:
+    webview_root = webview_storage_dir / "EBWebView"
+    if not webview_root.exists():
+        return
+
+    delete_targets: list[Path] = []
+    try:
+        for path in webview_root.rglob("*"):
+            if path.is_dir() and path.name in WEBVIEW_CACHE_DIR_NAMES:
+                delete_targets.append(path)
+    except OSError:
+        return
+
+    for path in sorted(delete_targets, key=lambda item: len(item.parts), reverse=True):
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def refresh_webview_cache_if_frontend_changed(webview_storage_dir: Path, frontend_entry: str) -> None:
+    fingerprint = frontend_entry_fingerprint(frontend_entry)
+    state_file = webview_storage_dir / WEBVIEW_CACHE_STATE_FILE
+    state = load_webview_cache_state(state_file)
+    if state.get("frontendFingerprint") == fingerprint:
+        return
+
+    clear_webview_resource_cache(webview_storage_dir)
+    next_state = {
+        "appVersion": APP_VERSION,
+        "frontendFingerprint": fingerprint,
+    }
+    try:
+        state_file.write_text(json.dumps(next_state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def main() -> None:
     global _desktop_window, _desktop_state
 
@@ -438,10 +515,12 @@ def main() -> None:
     startup_config = get_pywebview_startup_config(config)
     webview_storage_dir = ensure_app_dir() / "webview_storage"
     webview_storage_dir.mkdir(parents=True, exist_ok=True)
+    frontend_entry = resolve_frontend_entry()
+    refresh_webview_cache_if_frontend_changed(webview_storage_dir, frontend_entry)
     desktop_state = DesktopWindowState(config)
     window = webview.create_window(
         config.get("appname", DEFAULT_DESKTOP_CONFIG["appname"]),
-        resolve_frontend_entry(),
+        frontend_entry,
         js_api=DesktopPasswordManagerApi(),
         width=startup_config["width"],
         height=startup_config["height"],

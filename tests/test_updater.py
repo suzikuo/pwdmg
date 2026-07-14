@@ -14,6 +14,21 @@ class UpdaterTest(unittest.TestCase):
 
         self.assertEqual(service._normalize_manifest_url(""), DEFAULT_UPDATE_MANIFEST_URL)
 
+    def test_manifest_url_accepts_multiple_candidates(self):
+        service = DesktopUpdateService(current_version="2.0.0")
+
+        urls = service._normalize_manifest_urls(
+            "https://mirror.example.com/update.json, https://github.com/owner/repo/releases/latest/download/update-manifest.json"
+        )
+
+        self.assertEqual(
+            urls,
+            [
+                "https://mirror.example.com/update.json",
+                "https://github.com/owner/repo/releases/latest/download/update-manifest.json",
+            ],
+        )
+
     def test_parse_manifest_accepts_windows_asset(self):
         service = DesktopUpdateService(current_version="2.0.0")
         manifest = {
@@ -35,6 +50,33 @@ class UpdaterTest(unittest.TestCase):
         self.assertEqual(parsed["latestVersion"], "2.0.1")
         self.assertEqual(parsed["asset"]["sha256"], "a" * 64)
         self.assertEqual(parsed["asset"]["fileName"], "MyPasswordDesktop-windows.zip")
+
+    def test_parse_manifest_prefers_asset_urls_for_new_clients(self):
+        service = DesktopUpdateService(current_version="2.0.0")
+        manifest = {
+            "version": "2.0.1",
+            "assets": {
+                "windows": {
+                    "url": "https://github.com/owner/repo/releases/download/v2.0.1/MyPasswordDesktop-windows.zip",
+                    "urls": [
+                        "https://cdn.example.com/MyPasswordDesktop-windows.zip",
+                        "https://github.com/owner/repo/releases/download/v2.0.1/MyPasswordDesktop-windows.zip",
+                    ],
+                    "fileName": "MyPasswordDesktop-windows.zip",
+                    "size": 123,
+                    "sha256": "b" * 64,
+                }
+            },
+        }
+
+        parsed = service._parse_manifest(manifest, "https://example.com/update-manifest.json")
+
+        self.assertEqual(parsed["asset"]["url"], "https://cdn.example.com/MyPasswordDesktop-windows.zip")
+        self.assertEqual(parsed["asset"]["urls"][0], "https://cdn.example.com/MyPasswordDesktop-windows.zip")
+        self.assertIn(
+            "https://github.com/owner/repo/releases/download/v2.0.1/MyPasswordDesktop-windows.zip",
+            parsed["asset"]["urls"],
+        )
 
     def test_parse_manifest_requires_sha256(self):
         service = DesktopUpdateService(current_version="2.0.0")

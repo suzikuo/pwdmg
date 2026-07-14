@@ -554,6 +554,27 @@
     </van-popup>
 
     <van-popup
+      v-model:show="cloudPasswordPromptOpen"
+      round
+      class="password-popup"
+      :duration="0.14"
+      :close-on-click-overlay="false"
+      @closed="handleCloudPasswordPromptClosed"
+    >
+      <div class="password-popup-inner">
+        <van-nav-bar safe-area-inset-top title="校验云端保险库" left-arrow @click-left="cancelCloudPasswordPrompt" />
+        <van-form class="password-popup-form" @submit="submitCloudPasswordPrompt">
+          <p class="settings-note compact-note">云端文件使用了另一套加密参数。请输入云端保险库的主密码重新校验；云端未设置主密码可留空。</p>
+          <van-field v-model="cloudPasswordPromptValue" type="password" label="云端密码" autocomplete="current-password" placeholder="云端未设置可留空" />
+          <div class="prompt-actions">
+            <van-button block plain type="default" native-type="button" @click="cancelCloudPasswordPrompt">取消</van-button>
+            <van-button block type="primary" native-type="submit">继续</van-button>
+          </div>
+        </van-form>
+      </div>
+    </van-popup>
+
+    <van-popup
       v-model:show="cloudSyncReviewOpen"
       position="bottom"
       class="cloud-sync-popup"
@@ -786,6 +807,12 @@ type CloudSyncLogEntry = {
   selected: number
   total: number
 }
+type CloudSyncStateRecord = {
+  remoteUpdatedAt: number
+  remoteFingerprint: string
+  localFingerprint: string
+  recordedAt: number
+}
 
 const LOGIN_ACCOUNT_SOURCES = new Set<LoginAccountSource>(['auto', 'username', 'email', 'phone'])
 const ENTRY_STATUSES = new Set<EntryStatus>(['active', 'disabled', 'trashed'])
@@ -797,6 +824,7 @@ const FONT_SIZE_KEY = 'mypwdmg.fontSizePercent'
 const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
 const CLOUD_SYNC_LOGS_KEY = 'mypwdmg.cloudSyncLogs.v1'
 const CLOUD_SYNC_LOG_LIMIT_KEY = 'mypwdmg.cloudSyncLogLimit'
+const CLOUD_SYNC_STATE_KEY = 'mypwdmg.cloudSyncState.v1'
 const CLOUD_SYNC_LOG_LIMIT_DEFAULT = 50
 const CLOUD_SYNC_LOG_LIMIT_MIN = 10
 const CLOUD_SYNC_LOG_LIMIT_MAX = 200
@@ -845,9 +873,11 @@ const CLOUD_SYNC_MANUAL_REVIEW_FIELDS = new Set<CloudSyncChangeField>([
   'loginAccountSource',
   'totpSecret'
 ])
-const DEFAULT_UPDATE_MANIFEST_URL = 'https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json'
-const VERSIONED_DEFAULT_MANIFEST_URL_PATTERN =
-  /^https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/download\/[^/]+\/update-manifest\.json$/i
+const GITHUB_PROXY_PREFIX = 'https://ghproxy.net/'
+const GITHUB_UPDATE_MANIFEST_URL = 'https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json'
+const DEFAULT_UPDATE_MANIFEST_URL = `${GITHUB_PROXY_PREFIX}${GITHUB_UPDATE_MANIFEST_URL}`
+const BUILT_IN_MANIFEST_URL_PATTERN =
+  /^(?:https:\/\/ghproxy\.net\/)?https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/(?:latest\/download|download\/[^/]+)\/update-manifest\.json$/i
 const packagedAppVersion = String(import.meta.env.PACKAGE_VERSION || '').trim()
 const appVersion = ref('')
 const displayAppVersion = computed(() => appVersion.value || packagedAppVersion || '0.0.0')
@@ -888,6 +918,8 @@ const downloadedUpdatePath = ref('')
 const password = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
+const cloudPasswordPromptOpen = ref(false)
+const cloudPasswordPromptValue = ref('')
 const changePasswordValue = ref('')
 const changePasswordConfirm = ref('')
 const pluginExtensionId = ref('')
@@ -950,6 +982,7 @@ const settings = reactive({
     autoSyncIntervalMinutes: AUTO_CLOUD_SYNC_INTERVAL_DEFAULT_MINUTES
   }
 })
+let cloudPasswordPromptResolve: ((value: string | null) => void) | null = null
 const createActions = [
   { name: '登录', subname: '账号、密码、TOTP', kind: 'login' as EntryKind },
   { name: '分组', subname: '整理一组条目', kind: 'folder' as EntryKind }
@@ -1807,7 +1840,7 @@ async function moveEntry(payload: MoveEntryPayload) {
 
 function resolveUpdateManifestUrl(value: string | null) {
   const url = (value || '').trim()
-  if (!url || url.includes('OWNER/REPO') || VERSIONED_DEFAULT_MANIFEST_URL_PATTERN.test(url)) {
+  if (!url || url.includes('OWNER/REPO') || BUILT_IN_MANIFEST_URL_PATTERN.test(url)) {
     return DEFAULT_UPDATE_MANIFEST_URL
   }
   return url
@@ -2239,6 +2272,11 @@ async function uploadCloudVault(asDatedBackup: boolean) {
       size: exported.data.content.length,
       lastModified: new Date().toISOString()
     }
+    if (!asDatedBackup && vault.value) {
+      const uploadedPayload = clonePayload(vault.value)
+      uploadedPayload.updatedAt = Number(exported.data.updatedAt || uploadedPayload.updatedAt || 0)
+      rememberCloudSyncState(objectName, uploadedPayload, vault.value)
+    }
     appendCloudSyncLog({
       direction: 'backup',
       automatic: false,
@@ -2254,6 +2292,40 @@ async function uploadCloudVault(asDatedBackup: boolean) {
 
 async function downloadCloudBackup() {
   await startCloudSyncReview('download')
+}
+
+function requestCloudVaultPassword() {
+  if (cloudPasswordPromptResolve) cloudPasswordPromptResolve(null)
+  cloudPasswordPromptValue.value = ''
+  cloudPasswordPromptOpen.value = true
+  return new Promise<string | null>((resolve) => {
+    cloudPasswordPromptResolve = resolve
+  })
+}
+
+function submitCloudPasswordPrompt() {
+  resolveCloudPasswordPrompt(cloudPasswordPromptValue.value)
+}
+
+function cancelCloudPasswordPrompt() {
+  resolveCloudPasswordPrompt(null)
+}
+
+function handleCloudPasswordPromptClosed() {
+  if (cloudPasswordPromptResolve) resolveCloudPasswordPrompt(null)
+}
+
+function resolveCloudPasswordPrompt(value: string | null) {
+  const resolve = cloudPasswordPromptResolve
+  cloudPasswordPromptResolve = null
+  cloudPasswordPromptOpen.value = false
+  cloudPasswordPromptValue.value = ''
+  if (resolve) resolve(value)
+}
+
+function isVaultPasswordChangedResult(result: ApiResult<unknown>) {
+  const message = `${result.code || ''} ${result.message || ''}`
+  return result.code === 'BAD_PASSWORD' && /vault password changed/i.test(message)
 }
 
 function canScheduleAutoCloudSync() {
@@ -2301,6 +2373,7 @@ async function startCloudSyncReview(
   options: { automatic?: boolean; skipPersist?: boolean; objectName?: string } = {}
 ) {
   if (!vault.value || cloudBusy.value) return
+  let scheduleUploadAfterSkip = false
   if (hasPendingCloudSyncReview()) {
     if (!options.automatic) {
       cloudSyncReviewOpen.value = true
@@ -2331,6 +2404,7 @@ async function startCloudSyncReview(
   cloudBusy.value = true
   backupStatus.value = direction === 'download' ? '正在生成下载差异' : '正在生成上传差异'
   try {
+    const localPayloadBeforePersist = clonePayload(vault.value)
     if (!options.skipPersist) {
       const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
       if (!saved || !vault.value) {
@@ -2351,7 +2425,23 @@ async function startCloudSyncReview(
     let remotePayload: VaultPayload | null = null
 
     if (response.status === APIResponseStatus.Success && typeof response.content === 'string') {
-      const preview = await api.previewVaultBackup(response.content)
+      let preview = await api.previewVaultBackup(response.content)
+      if ((!preview.ok || !preview.data) && !options.automatic && isVaultPasswordChangedResult(preview)) {
+        backupStatus.value = '云端文件需要输入云端主密码校验'
+        const retryPassword = await requestCloudVaultPassword()
+        if (retryPassword === null) {
+          backupStatus.value = '已取消云端校验'
+          appendCloudSyncLog({
+            direction,
+            automatic: false,
+            status: 'skipped',
+            objectName,
+            message: '已取消云端校验'
+          })
+          return
+        }
+        preview = await api.previewVaultBackupWithPassword(response.content, retryPassword)
+      }
       if (!preview.ok || !preview.data) {
         if (!options.automatic) showFailToast(preview.message || '云端文件无法用当前会话解密')
         backupStatus.value = '云端文件无法校验，请确认它来自当前保险库'
@@ -2392,16 +2482,54 @@ async function startCloudSyncReview(
     }
     if (!remotePayload) return
 
-    const sourcePayload = direction === 'download' ? remotePayload : localPayload
-    const basePayload = direction === 'download' ? localPayload : remotePayload
+    let effectiveDirection = direction
+    if (direction === 'upload' && shouldPreferCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)) {
+      effectiveDirection = 'download'
+      const message = options.automatic
+        ? '云端数据已更新，已跳过自动上传并改为下载校验'
+        : '云端数据比本地同步基线更新，已改为下载校验'
+      backupStatus.value = message
+      appendCloudSyncLog({
+        direction: 'upload',
+        automatic: options.automatic === true,
+        status: 'skipped',
+        objectName,
+        message
+      })
+    }
+
+    const sourcePayload = effectiveDirection === 'download' ? remotePayload : localPayload
+    const basePayload = effectiveDirection === 'download' ? localPayload : remotePayload
     const items = buildCloudSyncDiff(sourcePayload, basePayload)
+
+    if (
+      options.automatic &&
+      effectiveDirection === 'download' &&
+      shouldSkipAutomaticCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)
+    ) {
+      cloudSyncPreview.value = null
+      scheduleUploadAfterSkip = true
+      const message = '本地有未上传变更，已跳过自动下载并改为上传校验'
+      backupStatus.value = message
+      appendCloudSyncLog({
+        direction: 'download',
+        automatic: true,
+        status: 'skipped',
+        objectName,
+        message,
+        total: items.length,
+        ...cloudSyncDiffCountsForItems(items)
+      })
+      return
+    }
 
     if (!items.length) {
       cloudSyncPreview.value = null
+      rememberCloudSyncState(objectName, remotePayload, localPayload)
       backupStatus.value = '两端条目一致'
       if (!options.automatic) showToast('两端条目一致')
       appendCloudSyncLog({
-        direction,
+        direction: effectiveDirection,
         automatic: options.automatic === true,
         status: 'success',
         objectName,
@@ -2411,7 +2539,7 @@ async function startCloudSyncReview(
     }
 
     const preview: CloudSyncPreview = {
-      direction,
+      direction: effectiveDirection,
       objectName,
       sourcePayload,
       basePayload,
@@ -2435,7 +2563,7 @@ async function startCloudSyncReview(
       cloudSyncReviewOpen.value = true
       backupStatus.value = autoDecision.message
       appendCloudSyncLog({
-        direction,
+        direction: preview.direction,
         automatic: true,
         status: 'review',
         objectName,
@@ -2449,7 +2577,7 @@ async function startCloudSyncReview(
     cloudSyncReviewOpen.value = true
     backupStatus.value = `发现 ${items.length} 项差异`
     appendCloudSyncLog({
-      direction,
+      direction: preview.direction,
       automatic: false,
       status: 'review',
       objectName,
@@ -2469,6 +2597,7 @@ async function startCloudSyncReview(
     })
   } finally {
     cloudBusy.value = false
+    if (scheduleUploadAfterSkip) scheduleAutoCloudUpload()
   }
 }
 
@@ -2529,6 +2658,7 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
       }
       vault.value = result.data
       syncSettings(vault.value.settings)
+      rememberCloudSyncState(preview.objectName, preview.sourcePayload, vault.value)
       if (selectedEntry.value) {
         selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
         if (!selectedEntry.value) clearSelectedEntry()
@@ -2593,6 +2723,9 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
       size: exported.data.content.length,
       lastModified: new Date().toISOString()
     }
+    const uploadedPayload = clonePayload(nextPayload)
+    uploadedPayload.updatedAt = Number(exported.data.updatedAt || uploadedPayload.updatedAt || 0)
+    rememberCloudSyncState(preview.objectName, uploadedPayload, vault.value || uploadedPayload)
     const message = options.successMessage || `已上传 ${selectedItems.length} 项差异`
     backupStatus.value = options.successMessage || `已上传 ${selectedItems.length} 项差异到 ${settings.oss.bucketName}/${preview.objectName}`
     appendCloudSyncLog({
@@ -2852,6 +2985,129 @@ function clearCloudSyncLogs() {
   cloudSyncLogs.value = []
   persistCloudSyncLogs()
   showToast('同步记录已清空')
+}
+
+function shouldPreferCloudDownload(
+  objectName: string,
+  localPayload: VaultPayload,
+  remotePayload: VaultPayload,
+  localFreshnessPayload: VaultPayload
+) {
+  const remoteFingerprint = cloudSyncPayloadFingerprint(remotePayload)
+  const localFingerprint = cloudSyncPayloadFingerprint(localPayload)
+  if (remoteFingerprint === localFingerprint) return false
+  if (isLocalPayloadNewerThanRemote(localFreshnessPayload, remotePayload)) return false
+
+  const state = readCloudSyncState(objectName)
+  if (state) {
+    const remoteChanged = Boolean(state.remoteFingerprint && remoteFingerprint !== state.remoteFingerprint)
+    const localChanged = Boolean(state.localFingerprint && localFingerprint !== state.localFingerprint)
+    return remoteChanged && !localChanged
+  }
+
+  const remoteUpdatedAt = cloudSyncPayloadUpdatedAt(remotePayload)
+  const localUpdatedAt = cloudSyncPayloadUpdatedAt(localFreshnessPayload)
+  return remoteUpdatedAt > 0 && localUpdatedAt > 0 && remoteUpdatedAt > localUpdatedAt
+}
+
+function shouldSkipAutomaticCloudDownload(
+  objectName: string,
+  localPayload: VaultPayload,
+  remotePayload: VaultPayload,
+  localFreshnessPayload: VaultPayload
+) {
+  return hasLocalCloudSyncChanges(objectName, localPayload, remotePayload, localFreshnessPayload)
+}
+
+function hasLocalCloudSyncChanges(
+  objectName: string,
+  localPayload: VaultPayload,
+  remotePayload: VaultPayload,
+  localFreshnessPayload: VaultPayload
+) {
+  const localFingerprint = cloudSyncPayloadFingerprint(localPayload)
+  const state = readCloudSyncState(objectName)
+  if (state?.localFingerprint) {
+    if (localFingerprint !== state.localFingerprint) return true
+    return isLocalPayloadNewerThanRemote(localFreshnessPayload, remotePayload)
+  }
+
+  return isLocalPayloadNewerThanRemote(localFreshnessPayload, remotePayload)
+}
+
+function isLocalPayloadNewerThanRemote(localPayload: VaultPayload, remotePayload: VaultPayload) {
+  const localUpdatedAt = cloudSyncPayloadUpdatedAt(localPayload)
+  const remoteUpdatedAt = cloudSyncPayloadUpdatedAt(remotePayload)
+  return localUpdatedAt > 0 && (remoteUpdatedAt <= 0 || localUpdatedAt > remoteUpdatedAt)
+}
+
+function rememberCloudSyncState(objectName: string, remotePayload: VaultPayload, localPayload: VaultPayload = remotePayload) {
+  try {
+    const state = loadCloudSyncStateMap()
+    state[cloudSyncStateKey(objectName)] = {
+      remoteUpdatedAt: cloudSyncPayloadUpdatedAt(remotePayload),
+      remoteFingerprint: cloudSyncPayloadFingerprint(remotePayload),
+      localFingerprint: cloudSyncPayloadFingerprint(localPayload),
+      recordedAt: Date.now()
+    }
+    localStorage.setItem(CLOUD_SYNC_STATE_KEY, JSON.stringify(state))
+  } catch {
+    // Sync state is only a safety hint; failing to persist it must not block vault use.
+  }
+}
+
+function readCloudSyncState(objectName: string): CloudSyncStateRecord | null {
+  return loadCloudSyncStateMap()[cloudSyncStateKey(objectName)] || null
+}
+
+function loadCloudSyncStateMap(): Record<string, CloudSyncStateRecord> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CLOUD_SYNC_STATE_KEY) || '{}')
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const result: Record<string, CloudSyncStateRecord> = {}
+    for (const [key, value] of Object.entries(raw)) {
+      const record = normalizeCloudSyncStateRecord(value)
+      if (record) result[key] = record
+    }
+    return result
+  } catch {
+    return {}
+  }
+}
+
+function normalizeCloudSyncStateRecord(value: unknown): CloudSyncStateRecord | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Partial<CloudSyncStateRecord>
+  const remoteUpdatedAt = Number(item.remoteUpdatedAt || 0)
+  const recordedAt = Number(item.recordedAt || 0)
+  return {
+    remoteUpdatedAt: Number.isFinite(remoteUpdatedAt) ? remoteUpdatedAt : 0,
+    remoteFingerprint: String(item.remoteFingerprint || ''),
+    localFingerprint: String(item.localFingerprint || ''),
+    recordedAt: Number.isFinite(recordedAt) ? recordedAt : 0
+  }
+}
+
+function cloudSyncStateKey(objectName: string) {
+  const oss = normalizeSettings(settings).oss
+  return JSON.stringify([oss.region, oss.bucketName, normalizeObjectName(objectName)])
+}
+
+function cloudSyncPayloadUpdatedAt(payload: VaultPayload | null | undefined) {
+  const value = Number(payload?.updatedAt || 0)
+  return Number.isFinite(value) ? value : 0
+}
+
+function cloudSyncPayloadFingerprint(payload: VaultPayload) {
+  return JSON.stringify((payload.entries || []).map(cloudSyncEntryFingerprint))
+}
+
+function cloudSyncEntryFingerprint(entry: VaultEntry): unknown {
+  return {
+    id: entry.id || '',
+    ...comparableEntry(entry),
+    children: (entry.children || []).map(cloudSyncEntryFingerprint)
+  }
 }
 
 function cloudSyncDirectionLabel(direction: CloudSyncLogEntry['direction']) {

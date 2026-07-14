@@ -37,8 +37,8 @@ class DesktopUpdateService:
         self.update_dir = update_dir or UPDATE_DIR
 
     def check(self, manifest_url: str) -> Dict[str, Any]:
-        manifest_url = self._normalize_manifest_url(manifest_url)
-        manifest = self._fetch_manifest(manifest_url)
+        manifest_urls = self._normalize_manifest_urls(manifest_url)
+        manifest_url, manifest = self._fetch_manifest_from_candidates(manifest_urls)
         parsed = self._parse_manifest(manifest, manifest_url)
         parsed["currentVersion"] = self.current_version
         parsed["updateAvailable"] = compare_versions(parsed["latestVersion"], self.current_version) > 0
@@ -54,7 +54,7 @@ class DesktopUpdateService:
         cached_package = self.update_dir / safe_file_name(asset["fileName"])
         self._cleanup_update_dir(keep=cached_package)
         package_path = self._download_asset(
-            url=asset["url"],
+            url=asset.get("urls") or asset["url"],
             expected_sha256=asset["sha256"],
             expected_size=asset.get("size", 0),
             file_name=asset["fileName"],
@@ -123,14 +123,20 @@ class DesktopUpdateService:
                 pass
 
     def _normalize_manifest_url(self, manifest_url: str) -> str:
-        value = (manifest_url or "").strip() or DEFAULT_UPDATE_MANIFEST_URL
-        parsed = urllib.parse.urlparse(value)
-        host = (parsed.hostname or "").lower()
-        if parsed.scheme == "https":
-            return value
-        if parsed.scheme == "http" and host in {"localhost", "127.0.0.1", "::1"}:
-            return value
-        raise UpdateError("Update manifest URL must use HTTPS")
+        return self._normalize_manifest_urls(manifest_url)[0]
+
+    def _normalize_manifest_urls(self, manifest_url: str) -> list[str]:
+        values = split_url_candidates(manifest_url) or [DEFAULT_UPDATE_MANIFEST_URL]
+        result: list[str] = []
+        for value in values:
+            parsed = urllib.parse.urlparse(value)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme == "https" or (parsed.scheme == "http" and host in {"localhost", "127.0.0.1", "::1"}):
+                if value not in result:
+                    result.append(value)
+                continue
+            raise UpdateError("Update manifest URL must use HTTPS")
+        return result
 
     def _fetch_manifest(self, manifest_url: str) -> Dict[str, Any]:
         data = fetch_url(manifest_url, MAX_MANIFEST_BYTES)
@@ -142,17 +148,30 @@ class DesktopUpdateService:
             raise UpdateError("Update manifest must be a JSON object")
         return manifest
 
+    def _fetch_manifest_from_candidates(self, manifest_urls: list[str]) -> tuple[str, Dict[str, Any]]:
+        last_error: Exception | None = None
+        for manifest_url in manifest_urls:
+            try:
+                return manifest_url, self._fetch_manifest(manifest_url)
+            except Exception as exc:
+                last_error = exc
+        if isinstance(last_error, UpdateError):
+            raise last_error
+        raise UpdateError(str(last_error or "Update manifest request failed"))
+
     def _parse_manifest(self, manifest: Dict[str, Any], manifest_url: str) -> Dict[str, Any]:
         version = str(manifest.get("version") or "").strip()
         if not version:
             raise UpdateError("Update manifest is missing version")
 
         asset = select_windows_asset(manifest)
-        url = str(asset.get("url") or "").strip()
+        urls = collect_asset_urls(asset)
+        url = urls[0] if urls else ""
         sha256 = str(asset.get("sha256") or "").strip().lower()
         if not url:
             raise UpdateError("Update manifest is missing the Windows asset URL")
-        validate_download_url(url)
+        for candidate_url in urls:
+            validate_download_url(candidate_url)
         if not HEX_SHA256_RE.match(sha256):
             raise UpdateError("Update manifest must include a valid SHA256 for the Windows asset")
 
@@ -170,6 +189,7 @@ class DesktopUpdateService:
             "canApply": False,
             "asset": {
                 "url": url,
+                "urls": urls,
                 "sha256": sha256,
                 "size": size,
                 "fileName": safe_file_name(asset.get("fileName") or file_name_from_url(url, version)),
@@ -179,7 +199,7 @@ class DesktopUpdateService:
     def _download_asset(
         self,
         *,
-        url: str,
+        url: str | list[str],
         expected_sha256: str,
         expected_size: int,
         file_name: str,
@@ -189,8 +209,38 @@ class DesktopUpdateService:
         if destination.exists() and sha256_file(destination) == expected_sha256:
             return destination
 
-        validate_download_url(url)
+        urls = url if isinstance(url, list) else [url]
         temp_path = destination.with_suffix(destination.suffix + ".tmp")
+        last_error: Exception | None = None
+        for candidate_url in urls:
+            try:
+                return self._download_asset_from_url(
+                    url=candidate_url,
+                    expected_sha256=expected_sha256,
+                    expected_size=expected_size,
+                    destination=destination,
+                    temp_path=temp_path,
+                )
+            except Exception as exc:
+                last_error = exc
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+        if isinstance(last_error, UpdateError):
+            raise last_error
+        raise UpdateError(str(last_error or "Update package download failed"))
+
+    def _download_asset_from_url(
+        self,
+        *,
+        url: str,
+        expected_sha256: str,
+        expected_size: int,
+        destination: Path,
+        temp_path: Path,
+    ) -> Path:
+        validate_download_url(url)
         digest = hashlib.sha256()
         total = 0
 
@@ -471,6 +521,27 @@ def validate_download_url(url: str) -> None:
     if parsed.scheme == "http" and host in {"localhost", "127.0.0.1", "::1"}:
         return
     raise UpdateError("Update downloads must use HTTPS")
+
+
+def split_url_candidates(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_values = [str(item or "") for item in value]
+    else:
+        raw_values = re.split(r"[\s,;]+", str(value or ""))
+    result: list[str] = []
+    for raw_value in raw_values:
+        candidate = raw_value.strip()
+        if candidate and candidate not in result:
+            result.append(candidate)
+    return result
+
+
+def collect_asset_urls(asset: Dict[str, Any]) -> list[str]:
+    result = split_url_candidates(asset.get("urls"))
+    for candidate in split_url_candidates(asset.get("url")):
+        if candidate not in result:
+            result.append(candidate)
+    return result
 
 
 def select_windows_asset(manifest: Dict[str, Any]) -> Dict[str, Any]:

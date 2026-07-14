@@ -77,10 +77,10 @@ It produces:
 - `release\update-manifest.json`
 - `release\MyPasswordAndroid-release.apk`
 
-The script creates a GitHub Release with tag `vX.Y.Z` and uploads all release files. The manifest will point to:
+The script creates a GitHub Release with tag `vX.Y.Z` and uploads all release files. The generated manifest points to the ghproxy URL:
 
 ```text
-https://github.com/OWNER/REPO/releases/download/vX.Y.Z/MyPasswordDesktop-windows.zip
+https://ghproxy.net/https://github.com/OWNER/REPO/releases/download/vX.Y.Z/MyPasswordDesktop-windows.zip
 ```
 
 Android reads `assets.android` from the same `update-manifest.json`, downloads the APK, verifies SHA256, and opens the system installer. Android does not allow silent self-replacement; the user must confirm installation in the system installer. On Android 8+, the app may first ask for the "install unknown apps" permission for this app.
@@ -112,10 +112,24 @@ The lower-level manual steps are still available:
 powershell -ExecutionPolicy Bypass -File .\scripts\package_desktop.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\write_update_manifest.ps1 `
   -Version 2.0.1 `
-  -AssetUrl "https://github.com/OWNER/REPO/releases/download/v2.0.1/MyPasswordDesktop-windows.zip"
+  -AssetUrl "https://ghproxy.net/https://github.com/OWNER/REPO/releases/download/v2.0.1/MyPasswordDesktop-windows.zip"
 ```
 
-In the desktop app, open `更新` and check/download/install. The manifest URL defaults to `https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json`, so a published release can be discovered without typing a version-specific URL. The app verifies the desktop zip SHA256 from the manifest before it can be installed. Auto install is only enabled in packaged Windows builds; development mode can still check/download.
+In the desktop app, open `更新` and check/download/install. The manifest URL defaults to `https://ghproxy.net/https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json`, so a published release can be discovered without typing a version-specific URL. The app verifies the desktop zip SHA256 from the manifest before it can be installed. Auto install is only enabled in packaged Windows builds; development mode can still check/download.
+
+If GitHub release downloads are slow in your network, you can still pass additional mirror URLs when writing the manifest. New clients read `urls` first and fall back to `url`; old clients keep using `url`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\write_update_manifest.ps1 `
+  -Version 2.0.1 `
+  -AssetUrl "https://github.com/OWNER/REPO/releases/download/v2.0.1/MyPasswordDesktop-windows.zip" `
+  -AssetMirrorUrls "https://cdn.example.com/MyPasswordDesktop-windows.zip" `
+  -AndroidPackagePath ".\release\MyPasswordAndroid-release.apk" `
+  -AndroidAssetUrl "https://github.com/OWNER/REPO/releases/download/v2.0.1/MyPasswordAndroid-release.apk" `
+  -AndroidAssetMirrorUrls "https://cdn.example.com/MyPasswordAndroid-release.apk"
+```
+
+The update package is still verified by SHA256, so mirrors may serve the bytes while GitHub remains the canonical release location. The manifest URL field in the app can also contain multiple manifest candidates separated by commas, semicolons, or whitespace.
 
 For Windows desktop, the update zip contains the multi-file app contents. During install, the app exits, the updater expands the zip, copies the unpacked files over the current install directory, and restarts `My Password.exe`.
 

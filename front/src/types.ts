@@ -95,6 +95,7 @@ export interface AndroidAutofillState {
 
 export interface AppUpdateAsset {
   url: string
+  urls?: string[]
   sha256: string
   size: number
   fileName: string

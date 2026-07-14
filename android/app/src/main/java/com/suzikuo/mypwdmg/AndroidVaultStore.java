@@ -68,6 +68,20 @@ final class AndroidVaultStore {
         }
     }
 
+    private static final class DecryptedVault {
+        final JSONObject payload;
+        final byte[] key;
+        final byte[] salt;
+        final int iterations;
+
+        DecryptedVault(JSONObject payload, byte[] key, byte[] salt, int iterations) {
+            this.payload = payload;
+            this.key = key;
+            this.salt = salt;
+            this.iterations = iterations;
+        }
+    }
+
     AndroidVaultStore(Context context) {
         File root = context.getApplicationContext().getFilesDir();
         this.vaultFile = new File(root, "vault.json");
@@ -203,6 +217,14 @@ final class AndroidVaultStore {
         requirePayload();
         JSONObject envelope = validateEnvelope(envelopeText);
         JSONObject decrypted = normalizePayload(decryptWithCurrentKey(envelope));
+        refreshSession();
+        return decrypted;
+    }
+
+    synchronized JSONObject previewBackupWithPassword(String envelopeText, String password) throws Exception {
+        requirePayload();
+        JSONObject envelope = validateEnvelope(envelopeText);
+        JSONObject decrypted = normalizePayload(decryptPayloadForPassword(password, envelope).payload);
         refreshSession();
         return decrypted;
     }
@@ -557,23 +579,33 @@ final class AndroidVaultStore {
 
     private JSONObject decryptPayload(String password, JSONObject envelope) throws Exception {
         try {
+            DecryptedVault decrypted = decryptPayloadForPassword(password, envelope);
+            iterations = decrypted.iterations;
+            salt = decrypted.salt;
+            key = decrypted.key;
+            return decrypted.payload;
+        } catch (BadPasswordException error) {
+            lock();
+            throw error;
+        } catch (Exception error) {
+            lock();
+            throw new BadPasswordException("Wrong password or corrupted vault", error);
+        }
+    }
+
+    private DecryptedVault decryptPayloadForPassword(String password, JSONObject envelope) throws Exception {
+        try {
             if (!"mypwdmg-vault".equals(envelope.optString("format"))) {
                 throw new BadPasswordException("Unsupported vault format", null);
             }
             JSONObject kdf = envelope.getJSONObject("kdf");
-            iterations = kdf.getInt("iterations");
-            salt = b64d(kdf.getString("salt"));
-            key = deriveKey(password, salt, iterations);
-
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, b64d(envelope.getString("nonce"))));
-            cipher.updateAAD(AAD);
-            byte[] plain = cipher.doFinal(b64d(envelope.getString("ciphertext")));
-            return new JSONObject(new String(plain, StandardCharsets.UTF_8));
+            int nextIterations = kdf.getInt("iterations");
+            byte[] nextSalt = b64d(kdf.getString("salt"));
+            byte[] nextKey = deriveKey(password, nextSalt, nextIterations);
+            return new DecryptedVault(decryptEnvelopeWithKey(envelope, nextKey), nextKey, nextSalt, nextIterations);
         } catch (BadPasswordException error) {
             throw error;
         } catch (Exception error) {
-            lock();
             throw new BadPasswordException("Wrong password or corrupted vault", error);
         }
     }
@@ -587,8 +619,12 @@ final class AndroidVaultStore {
             throw new BadPasswordException("Vault password changed", null);
         }
 
+        return decryptEnvelopeWithKey(envelope, key);
+    }
+
+    private JSONObject decryptEnvelopeWithKey(JSONObject envelope, byte[] decryptKey) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, b64d(envelope.getString("nonce"))));
+        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(decryptKey, "AES"), new GCMParameterSpec(128, b64d(envelope.getString("nonce"))));
         cipher.updateAAD(AAD);
         byte[] plain = cipher.doFinal(b64d(envelope.getString("ciphertext")));
         return new JSONObject(new String(plain, StandardCharsets.UTF_8));

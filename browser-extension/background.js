@@ -267,7 +267,22 @@ function newToken() {
   return crypto.randomUUID?.() || `capture-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-function publicCapturePreview(preview) {
+function publicPromptPlacement(placement) {
+  if (!placement || typeof placement !== 'object') return null
+  const top = Number(placement.top)
+  const right = Number(placement.right)
+  if (!Number.isFinite(top) || !Number.isFinite(right)) return null
+  const viewportWidth = Number(placement.viewportWidth)
+  const viewportHeight = Number(placement.viewportHeight)
+  return {
+    top: Math.max(0, Math.round(top)),
+    right: Math.max(0, Math.round(right)),
+    viewportWidth: Number.isFinite(viewportWidth) ? Math.max(0, Math.round(viewportWidth)) : 0,
+    viewportHeight: Number.isFinite(viewportHeight) ? Math.max(0, Math.round(viewportHeight)) : 0
+  }
+}
+
+function publicCapturePreview(preview, placement = null) {
   return {
     hostname: preview.hostname || '',
     title: preview.title || '',
@@ -276,7 +291,8 @@ function publicCapturePreview(preview) {
     folders: Array.isArray(preview.folders) ? preview.folders : [],
     updateCandidate: preview.updateCandidate || null,
     passwordSame: Boolean(preview.passwordSame),
-    shouldPrompt: Boolean(preview.shouldPrompt)
+    shouldPrompt: Boolean(preview.shouldPrompt),
+    placement: publicPromptPlacement(placement)
   }
 }
 
@@ -286,12 +302,6 @@ function normalizeHost(value = '') {
   if (schemeIndex >= 0) host = host.slice(schemeIndex + 3)
   host = host.split('/', 1)[0].replace(/^\.+|\.+$/g, '')
   return host.startsWith('www.') ? host.slice(4) : host
-}
-
-function hostLooksRelated(left, right) {
-  const a = normalizeHost(left)
-  const b = normalizeHost(right)
-  return Boolean(a && b && (a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`)))
 }
 
 async function activeTabId() {
@@ -372,7 +382,7 @@ function applyCaptureOverrides(capture = {}, overrides = {}) {
   return next
 }
 
-async function prepareCapturedLogin(capture, tabId = 0) {
+async function prepareCapturedLogin(capture, tabId = 0, placement = null) {
   prunePendingCaptures()
   const settings = await getAutoSettings()
   if (isHostIgnored(capture?.hostname || '', settings.ignoredSites)) {
@@ -382,6 +392,7 @@ async function prepareCapturedLogin(capture, tabId = 0) {
   if (!previewResponse?.ok && tabId && (previewResponse?.code === 'LOCKED' || previewResponse?.code === 'BAD_PASSWORD')) {
     pendingLockedCapturesByTab.set(tabId, {
       capture,
+      placement: publicPromptPlacement(placement),
       expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
     })
     return {
@@ -402,7 +413,7 @@ async function prepareCapturedLogin(capture, tabId = 0) {
     expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
   })
   const preview = {
-    ...publicCapturePreview(nativePreview),
+    ...publicCapturePreview(nativePreview, placement),
     token
   }
   if (tabId) {
@@ -423,7 +434,7 @@ async function prepareLockedCaptureForTab(tabId = 0) {
   const item = pendingLockedCapturesByTab.get(tabId)
   if (!item) return
   pendingLockedCapturesByTab.delete(tabId)
-  await prepareCapturedLogin(item.capture, tabId)
+  await prepareCapturedLogin(item.capture, tabId, item.placement)
 }
 
 async function savePreparedCapture(token, parentId = '', updateEntryId = '', overrides = {}) {
@@ -447,12 +458,11 @@ async function savePreparedCapture(token, parentId = '', updateEntryId = '', ove
   return response
 }
 
-function takePreparedPrompt(tabId = 0, hostname = '') {
+function takePreparedPrompt(tabId = 0) {
   prunePendingCaptures()
   const item = pendingPromptsByTab.get(tabId)
   if (!item) return { ok: true, data: null }
-  if (!hostLooksRelated(hostname, item.preview?.hostname)) return { ok: true, data: null }
-  pendingPromptsByTab.delete(tabId)
+  // Keep the prompt available after rendering so it can survive same-tab redirects.
   return { ok: true, data: item.preview }
 }
 
@@ -558,7 +568,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, data: { shouldPrompt: false } })
         return
       }
-      sendResponse(await prepareCapturedLogin(message.capture || {}, sender?.tab?.id || 0))
+      sendResponse(await prepareCapturedLogin(message.capture || {}, sender?.tab?.id || 0, message.placement || null))
       return
     }
     if (message?.type === 'MYPWDMG_SAVE_CAPTURE') {
@@ -571,7 +581,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, data: null })
         return
       }
-      sendResponse(takePreparedPrompt(sender?.tab?.id || 0, message.hostname || ''))
+      sendResponse(takePreparedPrompt(sender?.tab?.id || 0))
       return
     }
     if (message?.type === 'MYPWDMG_ADD_IGNORED_SITE') {

@@ -9,6 +9,8 @@ import android.provider.Settings;
 
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -36,9 +38,8 @@ final class AndroidUpdateManager {
     }
 
     JSONObject check(String manifestUrl) throws Exception {
-        String url = normalizeHttpsUrl(manifestUrl);
-        JSONObject manifest = new JSONObject(fetchText(url, MAX_MANIFEST_BYTES));
-        JSONObject parsed = parseManifest(manifest, url);
+        ManifestFetchResult fetched = fetchManifestFromCandidates(normalizeHttpsUrls(manifestUrl));
+        JSONObject parsed = parseManifest(fetched.manifest, fetched.url);
         int latestCode = parsed.optInt("latestCode", 0);
         boolean newerName = compareVersions(parsed.getString("latestVersion"), BuildConfig.VERSION_NAME) > 0;
         boolean newerCode = latestCode > 0 && latestCode > BuildConfig.VERSION_CODE;
@@ -66,7 +67,7 @@ final class AndroidUpdateManager {
         JSONObject asset = update.getJSONObject("asset");
         notifyProgress(progress, "download", 0, asset.optLong("size", 0), "正在准备下载");
         File packageFile = downloadAsset(
-            asset.getString("url"),
+            assetUrlCandidates(asset),
             asset.getString("sha256"),
             asset.optLong("size", 0),
             asset.getString("fileName"),
@@ -128,7 +129,11 @@ final class AndroidUpdateManager {
             versionCode = asset.optInt("versionCode", versionCode);
         }
 
-        String url = normalizeHttpsUrl(asset.optString("url", ""));
+        List<String> urls = collectAssetUrls(asset);
+        if (urls.isEmpty()) {
+            throw new IllegalArgumentException("Update manifest is missing an Android asset URL");
+        }
+        String url = urls.get(0);
         String sha256 = asset.optString("sha256", "").trim().toLowerCase(Locale.ROOT);
         if (!SHA256_PATTERN.matcher(sha256).matches()) {
             throw new IllegalArgumentException("Update manifest must include a valid SHA256 for the Android APK");
@@ -147,6 +152,7 @@ final class AndroidUpdateManager {
             .put("publishedAt", manifest.optString("publishedAt", ""))
             .put("asset", new JSONObject()
                 .put("url", url)
+                .put("urls", new org.json.JSONArray(urls))
                 .put("sha256", sha256)
                 .put("size", size)
                 .put("fileName", safeApkName(asset.optString("fileName", fileNameFromUrl(url, version)))));
@@ -165,7 +171,7 @@ final class AndroidUpdateManager {
         throw new IllegalArgumentException("Update manifest is missing an Android asset");
     }
 
-    private File downloadAsset(String url, String expectedSha256, long expectedSize, String fileName, ProgressCallback progress) throws Exception {
+    private File downloadAsset(List<String> urls, String expectedSha256, long expectedSize, String fileName, ProgressCallback progress) throws Exception {
         updateDir.mkdirs();
         File destination = new File(updateDir, safeApkName(fileName));
         if (destination.isFile() && sha256File(destination).equals(expectedSha256)) {
@@ -174,6 +180,26 @@ final class AndroidUpdateManager {
         }
 
         File temp = new File(updateDir, destination.getName() + ".tmp");
+        Exception lastError = null;
+        for (String url : urls) {
+            try {
+                return downloadAssetFromUrl(url, expectedSha256, expectedSize, destination, temp, progress);
+            } catch (Exception error) {
+                lastError = error;
+                temp.delete();
+            }
+        }
+        throw lastError == null ? new IllegalStateException("APK download failed") : lastError;
+    }
+
+    private File downloadAssetFromUrl(
+        String url,
+        String expectedSha256,
+        long expectedSize,
+        File destination,
+        File temp,
+        ProgressCallback progress
+    ) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         long total = 0;
 
@@ -259,6 +285,18 @@ final class AndroidUpdateManager {
         }
     }
 
+    private ManifestFetchResult fetchManifestFromCandidates(List<String> urls) throws Exception {
+        Exception lastError = null;
+        for (String url : urls) {
+            try {
+                return new ManifestFetchResult(url, new JSONObject(fetchText(url, MAX_MANIFEST_BYTES)));
+            } catch (Exception error) {
+                lastError = error;
+            }
+        }
+        throw lastError == null ? new IllegalStateException("Update manifest request failed") : lastError;
+    }
+
     private HttpURLConnection openConnection(String url) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(normalizeHttpsUrl(url)).openConnection();
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
@@ -292,6 +330,53 @@ final class AndroidUpdateManager {
             throw new IllegalArgumentException("Update URLs must use HTTPS");
         }
         return url;
+    }
+
+    private List<String> normalizeHttpsUrls(String value) {
+        List<String> result = new ArrayList<>();
+        for (String candidate : splitUrlCandidates(value)) {
+            String url = normalizeHttpsUrl(candidate);
+            if (!result.contains(url)) result.add(url);
+        }
+        if (result.isEmpty()) {
+            throw new IllegalArgumentException("Update URLs must use HTTPS");
+        }
+        return result;
+    }
+
+    private List<String> collectAssetUrls(JSONObject asset) {
+        List<String> result = new ArrayList<>();
+        org.json.JSONArray array = asset.optJSONArray("urls");
+        if (array != null) {
+            for (int index = 0; index < array.length(); index += 1) {
+                String url = normalizeHttpsUrl(array.optString(index, ""));
+                if (!result.contains(url)) result.add(url);
+            }
+        }
+        String url = asset.optString("url", "").trim();
+        if (!url.isEmpty()) {
+            String normalized = normalizeHttpsUrl(url);
+            if (!result.contains(normalized)) result.add(normalized);
+        }
+        return result;
+    }
+
+    private List<String> assetUrlCandidates(JSONObject asset) {
+        org.json.JSONArray array = asset.optJSONArray("urls");
+        if (array != null && array.length() > 0) return collectAssetUrls(asset);
+        List<String> result = new ArrayList<>();
+        result.add(normalizeHttpsUrl(asset.optString("url", "")));
+        return result;
+    }
+
+    private List<String> splitUrlCandidates(String value) {
+        List<String> result = new ArrayList<>();
+        String[] parts = (value == null ? "" : value).split("[\\s,;]+");
+        for (String part : parts) {
+            String candidate = part.trim();
+            if (!candidate.isEmpty() && !result.contains(candidate)) result.add(candidate);
+        }
+        return result;
     }
 
     private int compareVersions(String left, String right) {
@@ -356,5 +441,15 @@ final class AndroidUpdateManager {
 
     interface ProgressCallback {
         void onProgress(String phase, long downloaded, long total, String message);
+    }
+
+    private static final class ManifestFetchResult {
+        final String url;
+        final JSONObject manifest;
+
+        ManifestFetchResult(String url, JSONObject manifest) {
+            this.url = url;
+            this.manifest = manifest;
+        }
     }
 }

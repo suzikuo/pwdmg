@@ -28,6 +28,7 @@ export const api: PasswordManagerApiAdapter = {
   exportVaultBackup: () => nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
   exportVaultBackupForPayload: (nextPayload) => nativeVaultCall('exportVaultBackupForPayload', () => guard(() => exportVaultBackupForPayload(nextPayload)), nextPayload),
   previewVaultBackup: (envelopeText) => nativeVaultCall('previewVaultBackup', () => guard(() => previewVaultBackup(envelopeText)), envelopeText),
+  previewVaultBackupWithPassword: (envelopeText, password) => nativeVaultCall('previewVaultBackupWithPassword', () => guard(() => previewVaultBackupWithPassword(envelopeText, password)), envelopeText, password),
   importVaultBackup: (envelopeText) => nativeVaultCall('importVaultBackup', () => guard(() => importVaultBackup(envelopeText)), envelopeText),
   getPluginListenerState: () => selectedStorage().getPluginListenerState(),
   enablePluginListener: (extensionId, browsers) => selectedStorage().enablePluginListener(extensionId, browsers),
@@ -187,6 +188,14 @@ async function previewVaultBackup(envelopeText: string): Promise<VaultPayload> {
   const decrypted = await decryptPayloadWithKey(vaultKey, envelope)
   refreshSession()
   return cloneVaultPayload(normalizeVaultPayload(decrypted))
+}
+
+async function previewVaultBackupWithPassword(envelopeText: string, password: string): Promise<VaultPayload> {
+  await requirePayload()
+  const envelope = validateEnvelope(JSON.parse(envelopeText))
+  const decrypted = await decryptPayload(password || '', envelope)
+  refreshSession()
+  return cloneVaultPayload(normalizeVaultPayload(decrypted.payload))
 }
 
 async function importVaultBackup(envelopeText: string): Promise<VaultBackupImport> {

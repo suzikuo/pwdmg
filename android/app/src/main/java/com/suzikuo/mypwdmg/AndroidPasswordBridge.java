@@ -486,6 +486,11 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
+    public String previewVaultBackupWithPassword(String envelopeText, String password) {
+        return result(() -> store.previewBackupWithPassword(envelopeText, password));
+    }
+
+    @JavascriptInterface
     public String importVaultBackup(String envelopeText) {
         return result(() -> store.importBackup(envelopeText));
     }
