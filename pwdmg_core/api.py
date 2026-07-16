@@ -33,11 +33,34 @@ class PasswordManagerApi:
     def readVaultEnvelope(self) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.read_vault_envelope())
 
-    def writeVaultEnvelope(self, envelopeText: str, protectBackup: bool = False) -> Dict[str, Any]:
-        return self._call_result(lambda: self.service.write_vault_envelope(envelopeText, protect_backup=bool(protectBackup)))
+    def writeVaultEnvelope(
+        self,
+        envelopeText: str,
+        protectBackup: bool = False,
+        expectedRevision: int | None = None,
+    ) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.write_vault_envelope(
+                envelopeText,
+                protect_backup=bool(protectBackup),
+                expected_revision=expectedRevision,
+            )
+        )
 
     def readLegacyLocalStorage(self) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.read_legacy_local_storage())
+
+    def cleanupLegacyStorage(
+        self,
+        expectedDigest: str,
+        expectedVaultDigest: str | None = None,
+    ) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.cleanup_legacy_local_storage(
+                expectedDigest,
+                expected_vault_digest=expectedVaultDigest,
+            )
+        )
 
     def createVault(self, password: str, importLegacy: bool = True) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.create_vault(password, import_legacy=bool(importLegacy)))
@@ -51,8 +74,14 @@ class PasswordManagerApi:
     def getVault(self) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.get_vault())
 
-    def saveVault(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._call_result(lambda: self.service.save_vault(payload))
+    def saveVault(
+        self,
+        payload: Dict[str, Any],
+        expectedRevision: int | None = None,
+    ) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.save_vault(payload, expected_revision=expectedRevision)
+        )
 
     def changePassword(self, newPassword: str) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.change_password(newPassword))

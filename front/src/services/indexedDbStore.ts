@@ -22,6 +22,21 @@ export async function idbSet<T>(key: string, value: T): Promise<void> {
   })
 }
 
+export async function idbSetIfRevision<T>(key: string, value: T, expectedRevision: number): Promise<void> {
+  await withStore('readwrite', async (store) => {
+    const record = await requestToPromise<KvRecord<unknown> | undefined>(store.get(key))
+    const current = record?.value as { revision?: unknown } | null | undefined
+    const currentRevision = record
+      ? Math.max(1, Math.floor(Number(current?.revision || 1)))
+      : 0
+    if (currentRevision !== expectedRevision) throw new Error('Vault revision conflict; reload before saving')
+    const next = value as { revision?: unknown } | null | undefined
+    const nextRevision = Math.max(1, Math.floor(Number(next?.revision || 1)))
+    if (nextRevision !== currentRevision + 1) throw new Error('Vault revision must advance by exactly one')
+    store.put({ key, value })
+  })
+}
+
 export async function idbDelete(key: string): Promise<void> {
   await withStore('readwrite', async (store) => {
     store.delete(key)

@@ -16,6 +16,7 @@ import type {
 export type CreateVaultResult = {
   vault: VaultPayload
   migrated: number
+  legacyCleanupPending?: boolean
 }
 
 export type StartupData = {

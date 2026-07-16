@@ -111,12 +111,22 @@ class DesktopPasswordManagerApi:
         return self.api.readVaultEnvelope()
 
     def writeVaultEnvelope(
-        self, envelopeText: str, protectBackup: bool = False
+        self,
+        envelopeText: str,
+        protectBackup: bool = False,
+        expectedRevision: int | None = None,
     ) -> dict[str, Any]:
-        return self.api.writeVaultEnvelope(envelopeText, protectBackup)
+        return self.api.writeVaultEnvelope(envelopeText, protectBackup, expectedRevision)
 
     def readLegacyLocalStorage(self) -> dict[str, Any]:
         return self.api.readLegacyLocalStorage()
+
+    def cleanupLegacyStorage(
+        self,
+        expectedDigest: str,
+        expectedVaultDigest: str | None = None,
+    ) -> dict[str, Any]:
+        return self.api.cleanupLegacyStorage(expectedDigest, expectedVaultDigest)
 
     def createVault(self, password: str, importLegacy: bool = True) -> dict[str, Any]:
         return self.api.createVault(password, importLegacy)
@@ -130,8 +140,12 @@ class DesktopPasswordManagerApi:
     def getVault(self) -> dict[str, Any]:
         return self.api.getVault()
 
-    def saveVault(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.api.saveVault(payload)
+    def saveVault(
+        self,
+        payload: dict[str, Any],
+        expectedRevision: int | None = None,
+    ) -> dict[str, Any]:
+        return self.api.saveVault(payload, expectedRevision)
 
     def changePassword(self, newPassword: str) -> dict[str, Any]:
         return self.api.changePassword(newPassword)

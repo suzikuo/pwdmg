@@ -11,6 +11,9 @@ param(
     [string] $JavaHome = "",
     [string] $Notes = "",
     [string] $Mode = "",
+    [string] $PrivateKeyPath = ".\.update-signing\mypwdmg-update-private-key.pem",
+    [string] $PublicKeyPath = ".\.update-signing\mypwdmg-update-public-key.pem",
+    [string] $PythonExe = "",
     [switch] $Clean,
     [switch] $SkipFrontend,
     [switch] $IncludeAndroid,
@@ -24,6 +27,7 @@ param(
     [switch] $PublishOnly,
     [switch] $Draft,
     [switch] $Prerelease,
+    [switch] $GenerateSigningKey,
     [switch] $Help
 )
 
@@ -42,7 +46,7 @@ function Show-Help {
     Write-Host "  2. Updates pwdmg_core/version.py, front package versions, Android versionName/versionCode, and front manifest version."
     Write-Host "  3. Runs scripts\package_desktop.ps1."
     Write-Host "  4. Builds the Android release APK unless -DesktopOnly is used."
-    Write-Host "  5. Generates release\update-manifest.json for GitHub Releases and optional mirrors."
+    Write-Host "  5. Generates and Ed25519-signs release\update-manifest.json for GitHub Releases."
     Write-Host "  6. Publishes the GitHub Release unless -NoPublish is used."
     Write-Host "  If no flow option is provided in an interactive shell, a release mode menu is shown."
     Write-Host ""
@@ -69,6 +73,9 @@ function Show-Help {
     Write-Host "  -AndroidAssetMirrorUrls URLS  Optional Android mirror URLs, separated by comma/semicolon/space."
     Write-Host "  -JavaHome PATH           Optional JDK/JBR path for Android Gradle."
     Write-Host "  -Notes TEXT              Release notes for manifest and optional GitHub release."
+    Write-Host "  -PrivateKeyPath PATH     Gitignored Ed25519 manifest signing key."
+    Write-Host "  -PythonExe PATH          Python executable with requirements.txt installed."
+    Write-Host "  -GenerateSigningKey      Generate the one-time workspace signing key, then exit."
     Write-Host "  -Mode MODE               Release flow: full, build, publish, or menu."
     Write-Host "  -Clean                   Pass -Clean to package_desktop.ps1."
     Write-Host "  -SkipFrontend            Pass -SkipFrontend to package_desktop.ps1."
@@ -242,9 +249,10 @@ if ($Help) {
     exit 0
 }
 
-$ReleaseMode = Resolve-ReleaseMode
+$ReleaseMode = if ($GenerateSigningKey) { "build" } else { Resolve-ReleaseMode }
 Apply-ReleaseMode $ReleaseMode
-$HasExplicitBuildOption = $PSBoundParameters.ContainsKey("Clean") -or
+$HasExplicitBuildOption = $GenerateSigningKey -or
+    $PSBoundParameters.ContainsKey("Clean") -or
     $PSBoundParameters.ContainsKey("SkipFrontend") -or
     $PSBoundParameters.ContainsKey("DesktopOnly") -or
     $PSBoundParameters.ContainsKey("SkipDesktopBuild") -or
@@ -272,11 +280,49 @@ $AndroidReleaseOutput = Join-Path $RootPath "android\app\build\outputs\apk\relea
 $AndroidBuildLog = Join-Path $RootPath "release\android-gradle-build.log"
 $ManifestPath = Join-Path $RootPath "release\update-manifest.json"
 $DefaultAndroidKeystore = Join-Path $RootPath "pwdmg-release.jks"
+$SigningPrivateKeyPath = if ([System.IO.Path]::IsPathRooted($PrivateKeyPath)) { [System.IO.Path]::GetFullPath($PrivateKeyPath) } else { [System.IO.Path]::GetFullPath((Join-Path $RootPath $PrivateKeyPath)) }
+$SigningPublicKeyPath = if ([System.IO.Path]::IsPathRooted($PublicKeyPath)) { [System.IO.Path]::GetFullPath($PublicKeyPath) } else { [System.IO.Path]::GetFullPath((Join-Path $RootPath $PublicKeyPath)) }
 $ShouldIncludeAndroid = -not $DesktopOnly
 $ShouldPublish = $PublishOnly -or -not $NoPublish
 $WindowsDesktopExcludedRelativePaths = @(
     "_internal\webview\lib\pywebview-android.jar"
 )
+
+function Resolve-ProjectPython {
+    $Candidates = New-Object System.Collections.Generic.List[string]
+    if ($PythonExe.Trim()) {
+        $Candidates.Add($PythonExe.Trim())
+    }
+    $Candidates.Add((Join-Path $RootPath ".env\Scripts\python.exe"))
+    $Candidates.Add((Join-Path $RootPath ".venv\Scripts\python.exe"))
+    $Candidates.Add("python")
+    foreach ($Candidate in $Candidates) {
+        try {
+            & $Candidate -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey" *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return $Candidate
+            }
+        }
+        catch { }
+    }
+    throw "Python with the cryptography package was not found. Pass -PythonExe or install requirements.txt."
+}
+
+if ($GenerateSigningKey) {
+    $SigningPython = Resolve-ProjectPython
+    Push-Location $RootPath
+    try {
+        & $SigningPython -m pwdmg_core.updater generate-signing-key --private-key $SigningPrivateKeyPath --public-key $SigningPublicKeyPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Signing key generation failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    Write-Host "Keep the private key offline and backed up securely. Never commit .update-signing."
+    exit 0
+}
 
 function Read-Text {
     param([string] $Path)
@@ -463,7 +509,7 @@ function Build-AssetUrl {
     if (-not $Repository) {
         throw "Repo is required to generate the GitHub Release asset URL. Pass -Repo OWNER/REPO or -AssetUrl URL."
     }
-    return "https://ghproxy.net/https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordDesktop-windows.zip"
+    return "https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordDesktop-windows.zip"
 }
 
 function Build-AndroidAssetUrl {
@@ -471,7 +517,7 @@ function Build-AndroidAssetUrl {
     if (-not $Repository) {
         throw "Repo is required to generate the Android APK asset URL. Pass -Repo OWNER/REPO or -AndroidAssetUrl URL."
     }
-    return "https://ghproxy.net/https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordAndroid-release.apk"
+    return "https://github.com/$Repository/releases/download/v$ReleaseVersion/MyPasswordAndroid-release.apk"
 }
 
 function Resolve-JavaHome {
@@ -773,7 +819,9 @@ function Invoke-Manifest {
             -AndroidAssetMirrorUrls $AndroidAssetMirrorUrls `
             -AndroidVersionCode $NextVersionCode `
             -OutPath $ManifestPath `
-            -Notes $Notes
+            -Notes $Notes `
+            -PrivateKeyPath $SigningPrivateKeyPath `
+            -PythonExe $PythonExe
     }
     else {
         & $ManifestScript `
@@ -782,13 +830,30 @@ function Invoke-Manifest {
             -AssetMirrorUrls $AssetMirrorUrls `
             -PackagePath $ArchivePath `
             -OutPath $ManifestPath `
-            -Notes $Notes
+            -Notes $Notes `
+            -PrivateKeyPath $SigningPrivateKeyPath `
+            -PythonExe $PythonExe
     }
     Assert-LastExitCode "Update manifest script"
 }
 
+function Assert-SignedManifest {
+    param([string] $Path)
+    Require-ReleaseFile $Path
+    $SigningPython = Resolve-ProjectPython
+    Push-Location $RootPath
+    try {
+        & $SigningPython -m pwdmg_core.updater verify-manifest --input $Path
+        Assert-LastExitCode "Update manifest signature verification"
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 function Publish-GitHubRelease {
     param([string] $Repository, [string] $ReleaseVersion)
+    Assert-SignedManifest $ManifestPath
     $Gh = Resolve-GitHubCli
     if (-not $Gh) {
         throw "GitHub CLI (gh) was not found. Restart PowerShell after installing GitHub CLI, then run: .\scripts\release_desktop.ps1 -NoVersionBump -PublishOnly. Or rerun with -NoPublish and upload the files manually."
@@ -842,12 +907,12 @@ $AssetUrl = $AssetUrl.Trim()
 $AssetMirrorUrls = $AssetMirrorUrls.Trim()
 $AndroidAssetUrl = $AndroidAssetUrl.Trim()
 $AndroidAssetMirrorUrls = $AndroidAssetMirrorUrls.Trim()
-function Assert-HttpsUrlList {
+function Assert-GitHubReleaseUrlList {
     param([string] $Urls, [string] $Label)
     foreach ($Raw in ($Urls -split '[\s,;]+')) {
         $Value = $Raw.Trim()
-        if ($Value -and -not ($Value -match '^https://')) {
-            throw "$Label must contain only HTTPS URLs: $Value"
+        if ($Value -and -not ($Value -match '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/?#]+/[^/?#]+$')) {
+            throw "$Label must contain only trusted GitHub Release asset URLs: $Value"
         }
     }
 }
@@ -855,20 +920,19 @@ if (-not $PublishOnly) {
     if (-not $AssetUrl) {
         $AssetUrl = Build-AssetUrl $Repo $NextVersion
     }
-    if (-not ($AssetUrl -match '^https://')) {
-        throw "AssetUrl must be HTTPS: $AssetUrl"
-    }
-    Assert-HttpsUrlList $AssetMirrorUrls "AssetMirrorUrls"
+    Assert-GitHubReleaseUrlList $AssetUrl "AssetUrl"
+    Assert-GitHubReleaseUrlList $AssetMirrorUrls "AssetMirrorUrls"
 
     if ($ShouldIncludeAndroid -and -not $AndroidAssetUrl) {
         $AndroidAssetUrl = Build-AndroidAssetUrl $Repo $NextVersion
     }
-    if ($ShouldIncludeAndroid -and -not ($AndroidAssetUrl -match '^https://')) {
-        throw "AndroidAssetUrl must be HTTPS: $AndroidAssetUrl"
-    }
     if ($ShouldIncludeAndroid) {
-        Assert-HttpsUrlList $AndroidAssetMirrorUrls "AndroidAssetMirrorUrls"
+        Assert-GitHubReleaseUrlList $AndroidAssetUrl "AndroidAssetUrl"
+        Assert-GitHubReleaseUrlList $AndroidAssetMirrorUrls "AndroidAssetMirrorUrls"
     }
+}
+if (-not $PublishOnly -and -not (Test-Path -LiteralPath $SigningPrivateKeyPath -PathType Leaf)) {
+    throw "Update signing private key was not found: $SigningPrivateKeyPath. Generate it once with -GenerateSigningKey."
 }
 
 Write-Host "Release mode: $ReleaseMode"
@@ -903,6 +967,7 @@ if ($ShouldIncludeAndroid) {
     }
 }
 Write-Host "Publish GitHub Release: $(if ($ShouldPublish) { 'enabled' } else { 'disabled' })"
+Write-Host "Manifest signing key: $(if ($PublishOnly) { 'verify existing manifest' } else { $SigningPrivateKeyPath })"
 
 if ($PublishOnly) {
     Write-Host ""

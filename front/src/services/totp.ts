@@ -2,7 +2,10 @@ type TotpOptions = {
   timestamp?: number
   digits?: number
   period?: number
+  algorithm?: TotpAlgorithm
 }
+
+export type TotpAlgorithm = 'SHA-1' | 'SHA-256' | 'SHA-512'
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
 const DEFAULT_DIGITS = 6
@@ -12,14 +15,15 @@ export async function generateTotp(secretValue: string, options: TotpOptions = {
   const secret = extractTotpSecret(secretValue)
   if (!secret) return ''
 
-  const digits = clampDigits(options.digits ?? readTotpNumberParam(secretValue, 'digits') ?? DEFAULT_DIGITS)
-  const period = clampPeriod(options.period ?? readTotpNumberParam(secretValue, 'period') ?? DEFAULT_PERIOD)
+  const digits = validateDigits(options.digits ?? readTotpNumberParam(secretValue, 'digits') ?? DEFAULT_DIGITS)
+  const period = validatePeriod(options.period ?? readTotpNumberParam(secretValue, 'period') ?? DEFAULT_PERIOD)
+  const algorithm = options.algorithm || readTotpAlgorithm(secretValue)
   const timestamp = options.timestamp ?? Date.now()
   const keyBytes = base32ToBytes(secret)
   if (!keyBytes.length) return ''
 
   const counter = Math.floor(timestamp / 1000 / period)
-  const hmac = await hmacSha1(keyBytes, counterToBytes(counter))
+  const hmac = await hmacDigest(keyBytes, counterToBytes(counter), algorithm)
   const offset = hmac[hmac.length - 1] & 0x0f
   const binary = (
     ((hmac[offset] & 0x7f) << 24) |
@@ -39,6 +43,22 @@ export function extractTotpSecret(value: string) {
   return normalizeBase32(urlSecret || raw)
 }
 
+export function readTotpPeriod(value: string) {
+  try {
+    return validatePeriod(readTotpNumberParam(value, 'period') ?? DEFAULT_PERIOD)
+  } catch {
+    return DEFAULT_PERIOD
+  }
+}
+
+export function readTotpAlgorithm(value: string): TotpAlgorithm {
+  const algorithm = readTotpTextParam(value, 'algorithm').replace(/[-_]/g, '').toUpperCase()
+  if (algorithm === 'SHA256') return 'SHA-256'
+  if (algorithm === 'SHA512') return 'SHA-512'
+  if (algorithm && algorithm !== 'SHA1') throw new Error(`Unsupported TOTP algorithm: ${algorithm}`)
+  return 'SHA-1'
+}
+
 function readTotpNumberParam(value: string, key: string) {
   const raw = readTotpTextParam(value, key)
   if (!raw) return undefined
@@ -49,9 +69,12 @@ function readTotpNumberParam(value: string, key: string) {
 function readTotpTextParam(value: string, key: string) {
   const raw = String(value || '').trim()
   if (!/^otpauth:\/\//i.test(raw)) return ''
+  if (!/^otpauth:\/\/totp(?:\/|$)/i.test(raw)) throw new Error('Only otpauth TOTP URIs are supported')
 
   try {
-    return new URL(raw).searchParams.get(key) || ''
+    const parsed = new URL(raw)
+    if (parsed.hostname.toLowerCase() !== 'totp') throw new Error('Only otpauth TOTP URIs are supported')
+    return parsed.searchParams.get(key) || ''
   } catch {
     const match = raw.match(new RegExp(`[?&]${key}=([^&]+)`, 'i'))
     return match ? decodeURIComponent(match[1].replace(/\+/g, ' ')) : ''
@@ -65,17 +88,18 @@ function normalizeBase32(value: string) {
     .toUpperCase()
 }
 
-function clampDigits(value: number) {
-  if (!Number.isFinite(value)) return DEFAULT_DIGITS
-  return Math.min(8, Math.max(6, Math.floor(value)))
+function validateDigits(value: number) {
+  if (!Number.isInteger(value) || value < 6 || value > 8) throw new Error('TOTP digits must be between 6 and 8')
+  return value
 }
 
-function clampPeriod(value: number) {
-  if (!Number.isFinite(value)) return DEFAULT_PERIOD
-  return Math.min(120, Math.max(10, Math.floor(value)))
+function validatePeriod(value: number) {
+  if (!Number.isInteger(value) || value < 1 || value > 300) throw new Error('TOTP period must be between 1 and 300 seconds')
+  return value
 }
 
 function base32ToBytes(secret: string) {
+  if (!/^[A-Z2-7]+$/.test(secret)) return new Uint8Array()
   let buffer = 0
   let bitsLeft = 0
   const bytes: number[] = []
@@ -105,17 +129,18 @@ function counterToBytes(counter: number) {
   return bytes
 }
 
-async function hmacSha1(key: Uint8Array, message: Uint8Array) {
+async function hmacDigest(key: Uint8Array, message: Uint8Array, algorithm: TotpAlgorithm) {
   const subtle = globalThis.crypto?.subtle
   if (subtle) {
     try {
-      const cryptoKey = await subtle.importKey('raw', toArrayBuffer(key), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'])
+      const cryptoKey = await subtle.importKey('raw', toArrayBuffer(key), { name: 'HMAC', hash: algorithm }, false, ['sign'])
       return new Uint8Array(await subtle.sign('HMAC', cryptoKey, toArrayBuffer(message)))
     } catch {
-      // Fall through to the local implementation for older WebViews.
+      // SHA-1 retains a local fallback for older WebViews.
     }
   }
 
+  if (algorithm !== 'SHA-1') throw new Error(`${algorithm} TOTP requires WebCrypto support`)
   return hmacSha1Fallback(key, message)
 }
 

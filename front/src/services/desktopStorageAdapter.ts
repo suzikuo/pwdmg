@@ -10,8 +10,11 @@ export const desktopStorageAdapter: VaultStorageAdapter = {
   getAppInfo: () => call<AppInfo>('getAppInfo'),
   getStorageState: () => call<StorageState>('getStorageState'),
   readVaultEnvelope: () => call<string>('readVaultEnvelope'),
-  writeVaultEnvelope: (envelopeText, protectBackup = false) => call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup),
+  writeVaultEnvelope: (envelopeText, protectBackup = false, expectedRevision) => expectedRevision === undefined
+    ? call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup)
+    : call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup, expectedRevision),
   readLegacyLocalStorage: () => call<string>('readLegacyLocalStorage'),
+  cleanupLegacyStorage: (expectedDigest) => call<unknown>('cleanupLegacyStorage', expectedDigest),
   getPluginListenerState: () => call<PluginListenerState>('getPluginListenerState'),
   enablePluginListener: (extensionId, browsers) => call<PluginListenerState>('enablePluginListener', extensionId, browsers),
   disablePluginListener: () => call<PluginListenerState>('disablePluginListener'),

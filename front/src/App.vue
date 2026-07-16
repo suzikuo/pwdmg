@@ -697,7 +697,8 @@ import DetailContent from './components/DetailContent.vue'
 import EntryList from './components/EntryList.vue'
 import { AliyunOSSAPI, APIResponseStatus, DEFAULT_OSS_OBJECT_NAME, normalizeObjectName, type OSSFileInfo } from './services/aliyunOss'
 import { api } from './services/api'
-import { generateTotp } from './services/totp'
+import { hasCloudSyncPositionChanged } from './services/cloudSyncPosition'
+import { generateTotp, readTotpPeriod } from './services/totp'
 import type {
   AndroidAutofillState,
   ApiResult,
@@ -749,6 +750,7 @@ type EntryIndexMeta = {
   index: number
   path: string
   ancestorIds: string[]
+  siblingIds: string[]
 }
 type CloudSyncDiffItem = {
   id: string
@@ -791,6 +793,10 @@ type CloudSyncPreview = {
   basePayload: VaultPayload
   items: CloudSyncDiffItem[]
   automatic: boolean
+  localFingerprint: string
+  remoteFingerprint: string
+  remoteObjectFingerprint: string
+  remoteExists: boolean
 }
 type CloudSyncLogStatus = 'started' | 'success' | 'review' | 'error' | 'skipped'
 type CloudSyncLogEntry = {
@@ -824,7 +830,8 @@ const FONT_SIZE_KEY = 'mypwdmg.fontSizePercent'
 const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
 const CLOUD_SYNC_LOGS_KEY = 'mypwdmg.cloudSyncLogs.v1'
 const CLOUD_SYNC_LOG_LIMIT_KEY = 'mypwdmg.cloudSyncLogLimit'
-const CLOUD_SYNC_STATE_KEY = 'mypwdmg.cloudSyncState.v1'
+const LEGACY_CLOUD_SYNC_STATE_KEY = 'mypwdmg.cloudSyncState.v1'
+const CLOUD_SYNC_STATE_KEY = 'mypwdmg.cloudSyncState.v2'
 const CLOUD_SYNC_LOG_LIMIT_DEFAULT = 50
 const CLOUD_SYNC_LOG_LIMIT_MIN = 10
 const CLOUD_SYNC_LOG_LIMIT_MAX = 200
@@ -873,9 +880,8 @@ const CLOUD_SYNC_MANUAL_REVIEW_FIELDS = new Set<CloudSyncChangeField>([
   'loginAccountSource',
   'totpSecret'
 ])
-const GITHUB_PROXY_PREFIX = 'https://ghproxy.net/'
 const GITHUB_UPDATE_MANIFEST_URL = 'https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json'
-const DEFAULT_UPDATE_MANIFEST_URL = `${GITHUB_PROXY_PREFIX}${GITHUB_UPDATE_MANIFEST_URL}`
+const DEFAULT_UPDATE_MANIFEST_URL = GITHUB_UPDATE_MANIFEST_URL
 const BUILT_IN_MANIFEST_URL_PATTERN =
   /^(?:https:\/\/ghproxy\.net\/)?https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/(?:latest\/download|download\/[^/]+)\/update-manifest\.json$/i
 const packagedAppVersion = String(import.meta.env.PACKAGE_VERSION || '').trim()
@@ -963,6 +969,7 @@ const cloudSyncLogs = ref<CloudSyncLogEntry[]>(loadCloudSyncLogs())
 const cloudSyncLogLimit = ref(loadCloudSyncLogLimit())
 const showPassword = ref(false)
 const totpRemaining = ref(TOTP_PERIOD_SECONDS)
+const totpPeriodSeconds = ref(TOTP_PERIOD_SECONDS)
 const totpRequestId = ref(0)
 const isWide = ref(false)
 const isDrawerWide = ref(false)
@@ -1041,7 +1048,7 @@ const loginAccountSourceOptions: Array<{ label: string; value: LoginAccountSourc
 const unlocked = computed(() => Boolean(vault.value) && !state.locked)
 const filteredEntries = computed(() => filterEntries(activeTree(vault.value?.entries || []), keyword.value.trim().toLowerCase()))
 const passwordMask = computed(() => selectedEntry.value?.password ? '••••••••••••' : '未设置')
-const totpProgress = computed(() => Math.round((totpRemaining.value / TOTP_PERIOD_SECONDS) * 100))
+const totpProgress = computed(() => Math.round((totpRemaining.value / totpPeriodSeconds.value) * 100))
 const drawerSectionTitle = computed(() => {
   if (drawerSection.value === 'settings') return '设置'
   if (drawerSection.value === 'updates') return '更新'
@@ -1161,6 +1168,7 @@ let lastExternalVaultRefreshAt = 0
 let externalVaultRefreshing = false
 
 onMounted(() => {
+  purgeLegacyCloudSyncState()
   applyTheme()
   applyLayoutScale(false)
   applyFontSize(false)
@@ -1380,7 +1388,11 @@ async function createVault() {
   state.hasVault = true
   state.locked = false
   applyAndroidAutofillSearch()
-  showSuccessToast(result.data.migrated ? `已迁移 ${result.data.migrated} 条` : '保险库已创建')
+  if (result.data.legacyCleanupPending) {
+    showFailToast(`已迁移 ${result.data.migrated} 条，但旧数据清理失败；请暂时保留并手动检查旧文件`)
+  } else {
+    showSuccessToast(result.data.migrated ? `已迁移 ${result.data.migrated} 条并清理旧数据` : '保险库已创建')
+  }
 }
 
 async function unlockVault() {
@@ -1648,6 +1660,21 @@ function openEdit(entry: VaultEntry) {
   if (entry.kind === 'login' && entry.totpSecret) scheduleTotpRefresh(entry.id)
 }
 
+async function handleVaultWriteError(result: ApiResult<unknown>, fallback: string) {
+  if (result.code === 'CONFLICT') {
+    const selectedId = selectedEntry.value?.id || ''
+    const latest = await api.getVault()
+    if (latest.ok && latest.data) {
+      vault.value = latest.data
+      syncSettings(vault.value.settings)
+      selectedEntry.value = selectedId ? findEntry(vault.value.entries, selectedId) : null
+    }
+    showFailToast('保险库已被其他窗口或插件更新，已重新载入；当前操作未保存，请重试')
+    return
+  }
+  showFailToast(result.message || fallback)
+}
+
 async function saveEntry() {
   if (!vault.value) return
   busy.value = true
@@ -1662,7 +1689,7 @@ async function saveEntry() {
   }
   const result = await api.saveVault(payload)
   busy.value = false
-  if (!result.ok || !result.data) return showFailToast(result.message || '保存失败')
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '保存失败')
   vault.value = result.data
   syncSettings(vault.value.settings)
   selectedEntry.value = findEntry(vault.value.entries, entry.id)
@@ -1704,7 +1731,7 @@ async function archiveEntry(entryId: string) {
   const reason = target.kind === 'folder' ? '分组已归档' : '登录已归档，暂不在正常列表使用'
   if (!updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'disabled', reason))) return
   const result = await api.saveVault(payload)
-  if (!result.ok || !result.data) return showFailToast(result.message || '归档失败')
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '归档失败')
   vault.value = result.data
   scheduleAutoCloudUpload()
   if (selectedEntry.value && (selectedEntry.value.id === entryId || isDescendant(target, selectedEntry.value.id))) {
@@ -1743,7 +1770,7 @@ async function trashEntry(entryId: string) {
   const payload = cloneVault()
   if (!updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'trashed', '已移入回收站'))) return
   const result = await api.saveVault(payload)
-  if (!result.ok || !result.data) return showFailToast(result.message || '删除失败')
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '删除失败')
   vault.value = result.data
   scheduleAutoCloudUpload()
   if (shouldClearSelection) {
@@ -1768,7 +1795,7 @@ async function restoreEntry(entryId: string) {
     return showToast('条目不存在')
   }
   const result = await api.saveVault(payload)
-  if (!result.ok || !result.data) return showFailToast(result.message || '恢复失败')
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '恢复失败')
   vault.value = result.data
   scheduleAutoCloudUpload()
   selectedEntry.value = findEntry(vault.value.entries, entryId)
@@ -1804,7 +1831,7 @@ async function purgeEntry(entryId: string) {
   const payload = cloneVault()
   removeEntry(payload.entries, entryId)
   const result = await api.saveVault(payload)
-  if (!result.ok || !result.data) return showFailToast(result.message || '彻底删除失败')
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '彻底删除失败')
   vault.value = result.data
   scheduleAutoCloudUpload()
   if (shouldClearSelection) clearSelectedEntry()
@@ -1832,7 +1859,7 @@ async function moveEntry(payload: MoveEntryPayload) {
   insertEntryAt(nextVault.entries, payload.targetParentId, moved.entry, targetIndex)
 
   const result = await api.saveVault(nextVault)
-  if (!result.ok || !result.data) return showFailToast(result.message || '移动失败')
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '移动失败')
   vault.value = result.data
   scheduleAutoCloudUpload()
   if (selectedEntry.value) selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
@@ -1991,14 +2018,82 @@ async function changeMasterPassword() {
   }
 
   busy.value = true
+  let cloudRewrite: { objectName: string; remoteObjectFingerprint: string } | null = null
+  try {
+    cloudRewrite = await prepareCloudRewriteForPasswordChange()
+  } catch (error) {
+    busy.value = false
+    showFailToast(error instanceof Error ? error.message : String(error))
+    return
+  }
+
   const result = await api.changePassword(changePasswordValue.value)
-  busy.value = false
-  if (!result.ok || !result.data) return showFailToast(result.message || '修改失败')
+  if (!result.ok || !result.data) {
+    busy.value = false
+    return showFailToast(result.message || '修改失败')
+  }
   Object.assign(state, result.data)
+  const refreshedVault = await api.getVault()
+  if (refreshedVault.ok && refreshedVault.data) vault.value = refreshedVault.data
+
+  let cloudRewriteError = ''
+  if (cloudRewrite && vault.value) {
+    const exported = await api.exportVaultBackup()
+    if (!exported.ok || !exported.data) {
+      cloudRewriteError = exported.message || '无法生成使用新主密码加密的云端文件'
+    } else {
+      const client = createOssClient()
+      const validation = await validateCloudObjectRevision(
+        client,
+        cloudRewrite.objectName,
+        cloudRewrite.remoteObjectFingerprint,
+        true
+      )
+      if (!validation.ok) {
+        cloudRewriteError = validation.message
+      } else {
+        const response = await client.uploadFile(cloudRewrite.objectName, exported.data.content, 'application/json')
+        if (response.status !== APIResponseStatus.Success) {
+          cloudRewriteError = String(response.content || '云端保险库重新加密失败')
+        } else {
+          await rememberCloudSyncState(cloudRewrite.objectName, vault.value, vault.value)
+        }
+      }
+    }
+  }
+
+  busy.value = false
   changePasswordValue.value = ''
   changePasswordConfirm.value = ''
   passwordSheetOpen.value = false
-  showSuccessToast('主密码已修改')
+  if (cloudRewriteError) {
+    backupStatus.value = `本地主密码已修改，但${cloudRewriteError}`
+    showFailToast(backupStatus.value)
+  } else {
+    showSuccessToast(cloudRewrite ? '主密码及云端保险库已重新加密' : '主密码已修改')
+  }
+}
+
+async function prepareCloudRewriteForPasswordChange() {
+  if (!vault.value || !hasCompleteOssSettings()) return null
+  const objectName = normalizeObjectName(settings.oss.objectName)
+  const response = await createOssClient().downloadFile(objectName, 'text/plain')
+  if (response.status === APIResponseStatus.FileNotExist) return null
+  if (response.status !== APIResponseStatus.Success || typeof response.content !== 'string') {
+    throw new Error(String(response.content || '无法检查云端保险库'))
+  }
+
+  const remote = await api.previewVaultBackup(response.content)
+  if (!remote.ok || !remote.data) {
+    throw new Error('云端保险库无法用当前主密码解密，请先完成云同步再修改主密码')
+  }
+  if (await cloudSyncPayloadFingerprint(remote.data) !== await cloudSyncPayloadFingerprint(vault.value)) {
+    throw new Error('云端与本地保险库存在差异，请先完成同步再修改主密码')
+  }
+  return {
+    objectName,
+    remoteObjectFingerprint: response.revision || await sha256Text(response.content)
+  }
 }
 
 async function loadPluginListenerState() {
@@ -2124,7 +2219,7 @@ async function persistSettings(options: { closeDrawer?: boolean; toast?: boolean
   payload.settings = normalizeSettings(settings)
   const result = await api.saveVault(payload)
   if (!result.ok || !result.data) {
-    showFailToast(result.message || '保存失败')
+    await handleVaultWriteError(result, '保存失败')
     return false
   }
   vault.value = result.data
@@ -2275,7 +2370,7 @@ async function uploadCloudVault(asDatedBackup: boolean) {
     if (!asDatedBackup && vault.value) {
       const uploadedPayload = clonePayload(vault.value)
       uploadedPayload.updatedAt = Number(exported.data.updatedAt || uploadedPayload.updatedAt || 0)
-      rememberCloudSyncState(objectName, uploadedPayload, vault.value)
+      await rememberCloudSyncState(objectName, uploadedPayload, vault.value)
     }
     appendCloudSyncLog({
       direction: 'backup',
@@ -2285,6 +2380,17 @@ async function uploadCloudVault(asDatedBackup: boolean) {
       message: asDatedBackup ? '云端备份已创建' : '云端文件已上传'
     })
     showSuccessToast(asDatedBackup ? '云端备份已创建' : '云端文件已上传')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || '云端上传失败')
+    backupStatus.value = message
+    appendCloudSyncLog({
+      direction: 'backup',
+      automatic: false,
+      status: 'error',
+      objectName,
+      message
+    })
+    showFailToast(message)
   } finally {
     cloudBusy.value = false
   }
@@ -2483,7 +2589,7 @@ async function startCloudSyncReview(
     if (!remotePayload) return
 
     let effectiveDirection = direction
-    if (direction === 'upload' && shouldPreferCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)) {
+    if (direction === 'upload' && await shouldPreferCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)) {
       effectiveDirection = 'download'
       const message = options.automatic
         ? '云端数据已更新，已跳过自动上传并改为下载校验'
@@ -2505,7 +2611,7 @@ async function startCloudSyncReview(
     if (
       options.automatic &&
       effectiveDirection === 'download' &&
-      shouldSkipAutomaticCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)
+      await shouldSkipAutomaticCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)
     ) {
       cloudSyncPreview.value = null
       scheduleUploadAfterSkip = true
@@ -2525,7 +2631,7 @@ async function startCloudSyncReview(
 
     if (!items.length) {
       cloudSyncPreview.value = null
-      rememberCloudSyncState(objectName, remotePayload, localPayload)
+      await rememberCloudSyncState(objectName, remotePayload, localPayload)
       backupStatus.value = '两端条目一致'
       if (!options.automatic) showToast('两端条目一致')
       appendCloudSyncLog({
@@ -2544,7 +2650,13 @@ async function startCloudSyncReview(
       sourcePayload,
       basePayload,
       items,
-      automatic: options.automatic === true
+      automatic: options.automatic === true,
+      localFingerprint: await cloudSyncPayloadFingerprint(localPayload),
+      remoteFingerprint: await cloudSyncPayloadFingerprint(remotePayload),
+      remoteObjectFingerprint: response.status === APIResponseStatus.Success && typeof response.content === 'string'
+        ? response.revision || await sha256Text(response.content)
+        : 'missing',
+      remoteExists: response.status === APIResponseStatus.Success
     }
     cloudSyncPreview.value = preview
 
@@ -2627,9 +2739,66 @@ type CloudSyncApplyOptions = {
   successMessage?: string
 }
 
+async function validateCloudSyncPreview(preview: CloudSyncPreview): Promise<{ ok: boolean; message: string }> {
+  const currentLocal = await api.getVault()
+  if (!currentLocal.ok || !currentLocal.data) {
+    return { ok: false, message: currentLocal.message || '无法重新读取本地保险库' }
+  }
+  if (await cloudSyncPayloadFingerprint(currentLocal.data) !== preview.localFingerprint) {
+    return { ok: false, message: '本地保险库在确认期间已变化，请重新检测同步差异' }
+  }
+
+  return validateCloudObjectRevision(
+    createOssClient(),
+    preview.objectName,
+    preview.remoteObjectFingerprint,
+    preview.remoteExists
+  )
+}
+
+async function validateCloudObjectRevision(
+  client: AliyunOSSAPI,
+  objectName: string,
+  expectedFingerprint: string,
+  expectedExists: boolean
+): Promise<{ ok: boolean; message: string }> {
+  const currentRemote = await client.downloadFile(objectName, 'text/plain')
+  if (!expectedExists) {
+    if (currentRemote.status !== APIResponseStatus.FileNotExist) {
+      return { ok: false, message: '云端文件在确认期间已创建，请重新检测同步差异' }
+    }
+    return { ok: true, message: '' }
+  }
+  if (currentRemote.status !== APIResponseStatus.Success || typeof currentRemote.content !== 'string') {
+    return { ok: false, message: String(currentRemote.content || '无法重新读取云端保险库') }
+  }
+  const currentFingerprint = currentRemote.revision || await sha256Text(currentRemote.content)
+  if (currentFingerprint !== expectedFingerprint) {
+    return { ok: false, message: '云端保险库在确认期间已变化，请重新检测同步差异' }
+  }
+  return { ok: true, message: '' }
+}
+
 async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: CloudSyncDiffItem[], options: CloudSyncApplyOptions = {}) {
   backupStatus.value = preview.direction === 'download' ? '正在应用下载差异' : '正在应用上传差异'
   try {
+    const validation = await validateCloudSyncPreview(preview)
+    if (!validation.ok) {
+      backupStatus.value = validation.message
+      appendCloudSyncLog({
+        direction: preview.direction,
+        automatic: preview.automatic,
+        status: 'error',
+        objectName: preview.objectName,
+        message: validation.message,
+        total: preview.items.length
+      })
+      if (cloudSyncPreview.value === preview) cloudSyncPreview.value = null
+      cloudSyncReviewOpen.value = false
+      if (options.showErrors !== false) showFailToast(validation.message)
+      return false
+    }
+
     const nextPayload = clonePayload(preview.basePayload)
     nextPayload.settings = normalizeSettings(settings)
     for (const item of selectedItems) {
@@ -2641,24 +2810,28 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
     if (preview.direction === 'download') {
       const result = await api.saveVault(nextPayload)
       if (!result.ok || !result.data) {
-        backupStatus.value = result.message || '应用下载差异失败'
+        const failureMessage = result.code === 'CONFLICT'
+          ? '本地保险库在应用同步期间已变化，请重新检测差异'
+          : result.message || '应用下载差异失败'
+        backupStatus.value = failureMessage
         appendCloudSyncLog({
           direction: preview.direction,
           automatic: preview.automatic,
           status: 'error',
           objectName: preview.objectName,
-          message: result.message || '应用下载差异失败',
+          message: failureMessage,
           selected: selectedStats.selected,
           total: previewStats.total,
           ...cloudSyncDiffCountsForItems(selectedItems)
         })
-        if (options.showErrors !== false) showFailToast(result.message || '应用下载差异失败')
+        if (result.code === 'CONFLICT') await handleVaultWriteError(result, failureMessage)
+        else if (options.showErrors !== false) showFailToast(failureMessage)
         if (options.clearPreview && cloudSyncPreview.value === preview) cloudSyncPreview.value = null
         return false
       }
       vault.value = result.data
       syncSettings(vault.value.settings)
-      rememberCloudSyncState(preview.objectName, preview.sourcePayload, vault.value)
+      await rememberCloudSyncState(preview.objectName, preview.sourcePayload, vault.value)
       if (selectedEntry.value) {
         selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
         if (!selectedEntry.value) clearSelectedEntry()
@@ -2725,7 +2898,7 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
     }
     const uploadedPayload = clonePayload(nextPayload)
     uploadedPayload.updatedAt = Number(exported.data.updatedAt || uploadedPayload.updatedAt || 0)
-    rememberCloudSyncState(preview.objectName, uploadedPayload, vault.value || uploadedPayload)
+    await rememberCloudSyncState(preview.objectName, uploadedPayload, vault.value || uploadedPayload)
     const message = options.successMessage || `已上传 ${selectedItems.length} 项差异`
     backupStatus.value = options.successMessage || `已上传 ${selectedItems.length} 项差异到 ${settings.oss.bucketName}/${preview.objectName}`
     appendCloudSyncLog({
@@ -2987,14 +3160,14 @@ function clearCloudSyncLogs() {
   showToast('同步记录已清空')
 }
 
-function shouldPreferCloudDownload(
+async function shouldPreferCloudDownload(
   objectName: string,
   localPayload: VaultPayload,
   remotePayload: VaultPayload,
   localFreshnessPayload: VaultPayload
 ) {
-  const remoteFingerprint = cloudSyncPayloadFingerprint(remotePayload)
-  const localFingerprint = cloudSyncPayloadFingerprint(localPayload)
+  const remoteFingerprint = await cloudSyncPayloadFingerprint(remotePayload)
+  const localFingerprint = await cloudSyncPayloadFingerprint(localPayload)
   if (remoteFingerprint === localFingerprint) return false
   if (isLocalPayloadNewerThanRemote(localFreshnessPayload, remotePayload)) return false
 
@@ -3010,7 +3183,7 @@ function shouldPreferCloudDownload(
   return remoteUpdatedAt > 0 && localUpdatedAt > 0 && remoteUpdatedAt > localUpdatedAt
 }
 
-function shouldSkipAutomaticCloudDownload(
+async function shouldSkipAutomaticCloudDownload(
   objectName: string,
   localPayload: VaultPayload,
   remotePayload: VaultPayload,
@@ -3019,13 +3192,13 @@ function shouldSkipAutomaticCloudDownload(
   return hasLocalCloudSyncChanges(objectName, localPayload, remotePayload, localFreshnessPayload)
 }
 
-function hasLocalCloudSyncChanges(
+async function hasLocalCloudSyncChanges(
   objectName: string,
   localPayload: VaultPayload,
   remotePayload: VaultPayload,
   localFreshnessPayload: VaultPayload
 ) {
-  const localFingerprint = cloudSyncPayloadFingerprint(localPayload)
+  const localFingerprint = await cloudSyncPayloadFingerprint(localPayload)
   const state = readCloudSyncState(objectName)
   if (state?.localFingerprint) {
     if (localFingerprint !== state.localFingerprint) return true
@@ -3041,18 +3214,26 @@ function isLocalPayloadNewerThanRemote(localPayload: VaultPayload, remotePayload
   return localUpdatedAt > 0 && (remoteUpdatedAt <= 0 || localUpdatedAt > remoteUpdatedAt)
 }
 
-function rememberCloudSyncState(objectName: string, remotePayload: VaultPayload, localPayload: VaultPayload = remotePayload) {
+async function rememberCloudSyncState(objectName: string, remotePayload: VaultPayload, localPayload: VaultPayload = remotePayload) {
   try {
     const state = loadCloudSyncStateMap()
     state[cloudSyncStateKey(objectName)] = {
       remoteUpdatedAt: cloudSyncPayloadUpdatedAt(remotePayload),
-      remoteFingerprint: cloudSyncPayloadFingerprint(remotePayload),
-      localFingerprint: cloudSyncPayloadFingerprint(localPayload),
+      remoteFingerprint: await cloudSyncPayloadFingerprint(remotePayload),
+      localFingerprint: await cloudSyncPayloadFingerprint(localPayload),
       recordedAt: Date.now()
     }
     localStorage.setItem(CLOUD_SYNC_STATE_KEY, JSON.stringify(state))
   } catch {
     // Sync state is only a safety hint; failing to persist it must not block vault use.
+  }
+}
+
+function purgeLegacyCloudSyncState() {
+  try {
+    localStorage.removeItem(LEGACY_CLOUD_SYNC_STATE_KEY)
+  } catch {
+    // A storage failure must not block vault startup.
   }
 }
 
@@ -3080,10 +3261,13 @@ function normalizeCloudSyncStateRecord(value: unknown): CloudSyncStateRecord | n
   const item = value as Partial<CloudSyncStateRecord>
   const remoteUpdatedAt = Number(item.remoteUpdatedAt || 0)
   const recordedAt = Number(item.recordedAt || 0)
+  const remoteFingerprint = String(item.remoteFingerprint || '')
+  const localFingerprint = String(item.localFingerprint || '')
+  if (!isSha256(remoteFingerprint) || !isSha256(localFingerprint)) return null
   return {
     remoteUpdatedAt: Number.isFinite(remoteUpdatedAt) ? remoteUpdatedAt : 0,
-    remoteFingerprint: String(item.remoteFingerprint || ''),
-    localFingerprint: String(item.localFingerprint || ''),
+    remoteFingerprint,
+    localFingerprint,
     recordedAt: Number.isFinite(recordedAt) ? recordedAt : 0
   }
 }
@@ -3098,8 +3282,18 @@ function cloudSyncPayloadUpdatedAt(payload: VaultPayload | null | undefined) {
   return Number.isFinite(value) ? value : 0
 }
 
-function cloudSyncPayloadFingerprint(payload: VaultPayload) {
-  return JSON.stringify((payload.entries || []).map(cloudSyncEntryFingerprint))
+async function cloudSyncPayloadFingerprint(payload: VaultPayload) {
+  return sha256Text(JSON.stringify((payload.entries || []).map(cloudSyncEntryFingerprint)))
+}
+
+async function sha256Text(value: string) {
+  if (!crypto.subtle) throw new Error('当前环境不支持安全的 SHA-256 同步摘要')
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function isSha256(value: string) {
+  return /^[a-f0-9]{64}$/i.test(value)
 }
 
 function cloudSyncEntryFingerprint(entry: VaultEntry): unknown {
@@ -3158,7 +3352,7 @@ function buildCloudSyncDiff(sourcePayload: VaultPayload, basePayload: VaultPaylo
       continue
     }
     if (sourceMeta && baseMeta) {
-      const changes = diffEntryChanges(sourceMeta, baseMeta)
+      const changes = diffEntryChanges(sourceMeta, baseMeta, sourceIndex, baseIndex)
       if (changes.length) items.push(makeCloudSyncDiffItem('modified', sourceMeta, baseMeta, changes))
     }
   }
@@ -3188,6 +3382,7 @@ function makeCloudSyncDiffItem(
 }
 
 function indexEntries(entries: VaultEntry[], parentId = '', parents: string[] = [], ancestorIds: string[] = [], result = new Map<string, EntryIndexMeta>()) {
+  const siblingIds = entries.map((entry) => entry.id)
   entries.forEach((entry, index) => {
     const title = entry.title || '未命名'
     const path = [...parents, title].join(' / ') || title
@@ -3196,7 +3391,8 @@ function indexEntries(entries: VaultEntry[], parentId = '', parents: string[] = 
       parentId,
       index,
       path,
-      ancestorIds
+      ancestorIds,
+      siblingIds
     })
     indexEntries(entry.children || [], entry.id, [...parents, title], [...ancestorIds, entry.id], result)
   })
@@ -3207,9 +3403,14 @@ function hasMissingAncestor(meta: EntryIndexMeta, otherIndex: Map<string, EntryI
   return meta.ancestorIds.some((ancestorId) => !otherIndex.has(ancestorId))
 }
 
-function diffEntryChanges(sourceMeta: EntryIndexMeta, baseMeta: EntryIndexMeta) {
+function diffEntryChanges(
+  sourceMeta: EntryIndexMeta,
+  baseMeta: EntryIndexMeta,
+  sourceIndex: ReadonlyMap<string, EntryIndexMeta>,
+  baseIndex: ReadonlyMap<string, EntryIndexMeta>
+) {
   const changes: CloudSyncChangeDetail[] = []
-  if (sourceMeta.parentId !== baseMeta.parentId) {
+  if (hasCloudSyncPositionChanged(sourceMeta.entry.id, sourceMeta, baseMeta, sourceIndex, baseIndex)) {
     changes.push(makeCloudSyncChangeDetail('position', sourceMeta.path, baseMeta.path))
   }
   const source = comparableEntry(sourceMeta.entry)
@@ -3378,6 +3579,7 @@ function cloudSyncEntryLabel(item: CloudSyncDiffItem) {
 function emptyCloudPayload(): VaultPayload {
   return {
     version: 1,
+    revision: 1,
     entries: [],
     settings: normalizeSettings(settings),
     updatedAt: 0
@@ -3431,7 +3633,10 @@ function stopTotpTimer(reset = true) {
   if (totpTimer) window.clearInterval(totpTimer)
   totpTimer = 0
   totpCurrentStep = -1
-  if (reset) totpRemaining.value = TOTP_PERIOD_SECONDS
+  if (reset) {
+    totpPeriodSeconds.value = TOTP_PERIOD_SECONDS
+    totpRemaining.value = TOTP_PERIOD_SECONDS
+  }
 }
 
 function updateTotpClock(entryId: string) {
@@ -3439,10 +3644,12 @@ function updateTotpClock(entryId: string) {
     stopTotpTimer()
     return
   }
+  const period = readTotpPeriod(selectedEntry.value.totpSecret)
+  totpPeriodSeconds.value = period
   const nowSeconds = Math.floor(Date.now() / 1000)
-  const elapsed = nowSeconds % TOTP_PERIOD_SECONDS
-  const step = Math.floor(nowSeconds / TOTP_PERIOD_SECONDS)
-  totpRemaining.value = elapsed === 0 ? TOTP_PERIOD_SECONDS : TOTP_PERIOD_SECONDS - elapsed
+  const elapsed = nowSeconds % period
+  const step = Math.floor(nowSeconds / period)
+  totpRemaining.value = elapsed === 0 ? period : period - elapsed
   if (step !== totpCurrentStep || !totpCode.value) {
     totpCurrentStep = step
     refreshTotp(entryId)
@@ -3534,7 +3741,8 @@ function makeDatedBackupName(fileName: string) {
     padDatePart(now.getDate())
   ].join('-')
   const timePart = [padDatePart(now.getHours()), padDatePart(now.getMinutes()), padDatePart(now.getSeconds())].join('')
-  return `${objectName}.${datePart}-${timePart}`
+  const millisecondPart = String(now.getMilliseconds()).padStart(3, '0')
+  return `${objectName}.${datePart}-${timePart}-${millisecondPart}`
 }
 
 function padDatePart(value: number) {

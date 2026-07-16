@@ -1,4 +1,4 @@
-#mypwdmg-autofill-root {
+:host {
   position: fixed;
   right: var(--mypwdmg-right, 16px);
   top: var(--mypwdmg-top, 76px);
@@ -8,8 +8,8 @@
   pointer-events: none;
 }
 
-#mypwdmg-autofill-root,
-#mypwdmg-autofill-root * {
+:host,
+:host * {
   box-sizing: border-box;
 }
 

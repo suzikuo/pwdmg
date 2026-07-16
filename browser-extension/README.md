@@ -17,6 +17,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_native_host.ps1 -Exte
 
 The extension only detects and fills web forms. Password data stays in the encrypted local vault and is read through the native host. If the vault has an empty master password, the popup will try an empty-password unlock automatically. If the vault has a password, click the toolbar icon and unlock it first.
 
+Fill payloads require a real click in extension-owned UI and a short-lived authorization bound to the current tab, frame, document, and origin. Run the extension regression tests with:
+
+```powershell
+node --test .\browser-extension\tests\security-core.test.js
+```
+
 ## Troubleshooting
 
 If Chrome/Edge shows `Error when communicating with the native messaging host`, check:

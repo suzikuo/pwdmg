@@ -37,6 +37,7 @@ export interface VaultEntry {
 
 export interface VaultPayload {
   version: number
+  revision: number
   entries: VaultEntry[]
   settings: {
     oss: {

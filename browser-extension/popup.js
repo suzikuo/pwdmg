@@ -55,17 +55,15 @@ function sendToActiveTab(message) {
         resolve({ ok: false, message: String(error.message || error) })
         return
       }
-      chrome.scripting.insertCSS({ target: { tabId: activeTab.id }, files: ['content.css'] }, () => {
-        chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['content.js'] }, () => {
-          const injectError = chrome.runtime.lastError
-          if (injectError) {
-            resolve({ ok: false, message: String(injectError.message || injectError) })
-            return
-          }
-          chrome.tabs.sendMessage(activeTab.id, message, (retryResponse) => {
-            const retryError = chrome.runtime.lastError
-            resolve(retryError ? { ok: false, message: String(retryError.message || retryError) } : (retryResponse || { ok: true }))
-          })
+      chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['security-core.js', 'content.js'] }, () => {
+        const injectError = chrome.runtime.lastError
+        if (injectError) {
+          resolve({ ok: false, message: String(injectError.message || injectError) })
+          return
+        }
+        chrome.tabs.sendMessage(activeTab.id, message, (retryResponse) => {
+          const retryError = chrome.runtime.lastError
+          resolve(retryError ? { ok: false, message: String(retryError.message || retryError) } : (retryResponse || { ok: true }))
         })
       })
     })
@@ -331,7 +329,7 @@ async function loadMatches() {
 
   statusEl.textContent = '已连接本地保险库。'
   matchInfoEl.textContent = autoFillEnabled ? '正在查询当前站点...' : '自动填充已关闭，下面账号仍可手动填充。'
-  const response = await send({ type: 'MYPWDMG_QUERY_MATCHES', hostname: activeHost })
+  const response = await send({ type: 'MYPWDMG_QUERY_MATCHES' })
   if (!response?.ok) {
     if (response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
       showLocked('请输入主密码解锁插件。')
@@ -497,6 +495,7 @@ showPanelButton.addEventListener('click', async () => {
 })
 
 matchListEl.addEventListener('click', async (event) => {
+  if (!event.isTrusted) return
   const button = event.target?.closest?.('.fill-button')
   if (!button) return
   button.disabled = true

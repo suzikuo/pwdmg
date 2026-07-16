@@ -3,6 +3,7 @@ import type { VaultPayload } from '../types'
 export type VaultEnvelope = {
   format: 'mypwdmg-vault'
   version: 1
+  revision?: number
   cipher: 'AES-256-GCM'
   passwordless?: boolean
   kdf: {
@@ -22,6 +23,11 @@ export type VaultKey = {
 
 const AAD = new TextEncoder().encode('mypwdmg-vault-v1')
 const DEFAULT_ITERATIONS = 390_000
+const MIN_ITERATIONS = 10_000
+const MAX_ITERATIONS = 2_000_000
+const SALT_BYTES = 16
+const NONCE_BYTES = 12
+const MAX_CIPHERTEXT_BYTES = 16 * 1024 * 1024 + 16
 
 export async function encryptPayload(password: string, payload: VaultPayload) {
   const salt = randomBytes(16)
@@ -47,6 +53,7 @@ export async function encryptPayloadWithKey(vaultKey: VaultKey, payload: VaultPa
   return {
     format: 'mypwdmg-vault',
     version: 1,
+    revision: Math.max(1, Math.floor(Number(payload.revision || 1))),
     cipher: 'AES-256-GCM',
     kdf: {
       name: 'PBKDF2-HMAC-SHA256',
@@ -87,22 +94,36 @@ export async function decryptPayloadWithKey(vaultKey: VaultKey, envelope: VaultE
     vaultKey.key,
     toArrayBuffer(base64ToBytes(envelope.ciphertext))
   )
-  return JSON.parse(new TextDecoder().decode(decrypted)) as VaultPayload
+  const payload = JSON.parse(new TextDecoder().decode(decrypted)) as VaultPayload
+  assertEnvelopeRevision(envelope, payload)
+  return payload
 }
 
 export function validateEnvelope(value: unknown): VaultEnvelope {
   const envelope = value as VaultEnvelope
+  const iterations = Number(envelope?.kdf?.iterations)
+  const revision = envelope?.revision === undefined ? 1 : Number(envelope.revision)
   if (
     !envelope ||
     envelope.format !== 'mypwdmg-vault' ||
     envelope.version !== 1 ||
     envelope.cipher !== 'AES-256-GCM' ||
     envelope.kdf?.name !== 'PBKDF2-HMAC-SHA256' ||
-    !Number.isFinite(Number(envelope.kdf?.iterations)) ||
+    !Number.isSafeInteger(iterations) ||
+    iterations < MIN_ITERATIONS ||
+    iterations > MAX_ITERATIONS ||
+    !Number.isSafeInteger(revision) ||
+    revision < 1 ||
     !envelope.kdf?.salt ||
     !envelope.nonce ||
     !envelope.ciphertext
   ) {
+    throw new Error('Vault file is malformed')
+  }
+  const salt = decodeBase64Bounded(envelope.kdf.salt, SALT_BYTES)
+  const nonce = decodeBase64Bounded(envelope.nonce, NONCE_BYTES)
+  const ciphertext = decodeBase64Bounded(envelope.ciphertext, MAX_CIPHERTEXT_BYTES)
+  if (salt.byteLength !== SALT_BYTES || nonce.byteLength !== NONCE_BYTES || ciphertext.byteLength < 16) {
     throw new Error('Vault file is malformed')
   }
   return envelope
@@ -161,11 +182,33 @@ function base64ToBytes(value: string) {
   return bytes
 }
 
+function decodeBase64Bounded(value: string, maxBytes: number) {
+  const text = String(value || '')
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) {
+    throw new Error('Vault file is malformed')
+  }
+  if (text.length > Math.ceil(maxBytes / 3) * 4 + 4) throw new Error('Vault file is too large')
+  try {
+    const bytes = base64ToBytes(text)
+    if (bytes.byteLength > maxBytes) throw new Error('Vault file is too large')
+    return bytes
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Vault file is too large') throw error
+    throw new Error('Vault file is malformed')
+  }
+}
+
 function sameBytes(left: Uint8Array, right: Uint8Array) {
   if (left.length !== right.length) return false
   let diff = 0
   for (let index = 0; index < left.length; index += 1) diff |= left[index] ^ right[index]
   return diff === 0
+}
+
+function assertEnvelopeRevision(envelope: VaultEnvelope, payload: VaultPayload) {
+  if (envelope.revision === undefined) return
+  const payloadRevision = Math.max(1, Math.floor(Number(payload?.revision || 1)))
+  if (payloadRevision !== envelope.revision) throw new Error('Vault revision metadata does not match its payload')
 }
 
 function toArrayBuffer(bytes: Uint8Array) {

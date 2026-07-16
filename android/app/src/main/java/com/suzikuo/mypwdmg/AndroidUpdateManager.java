@@ -3,6 +3,10 @@ package com.suzikuo.mypwdmg;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -18,16 +22,25 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 final class AndroidUpdateManager {
     private static final int CONNECT_TIMEOUT_MS = 15000;
     private static final int READ_TIMEOUT_MS = 30000;
     private static final int MAX_MANIFEST_BYTES = 1024 * 1024;
+    private static final int MAX_VERIFICATION_RECORD_BYTES = 64 * 1024;
     private static final long MAX_PACKAGE_BYTES = 500L * 1024L * 1024L;
     private static final Pattern SHA256_PATTERN = Pattern.compile("^[a-fA-F0-9]{64}$");
+    private static final Pattern GITHUB_RELEASE_ASSET_PATH = Pattern.compile(
+        "^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/]+/[^/]+$"
+    );
+    private static final String VERIFIED_RECORD_SUFFIX = ".verified.json";
+    private static final int VERIFIED_RECORD_VERSION = 1;
 
     private final Activity activity;
     private final File updateDir;
@@ -73,6 +86,14 @@ final class AndroidUpdateManager {
             asset.getString("fileName"),
             progress
         );
+        try {
+            verifyApkIdentity(packageFile, update.optString("latestVersion", ""), update.optLong("latestCode", 0));
+            writeVerificationRecord(packageFile, update);
+        } catch (Exception error) {
+            packageFile.delete();
+            verificationRecordFile(packageFile).delete();
+            throw error;
+        }
 
         return new JSONObject()
             .put("update", update)
@@ -83,6 +104,8 @@ final class AndroidUpdateManager {
 
     JSONObject apply(String packagePath) throws Exception {
         File apk = resolveDownloadedApk(packagePath);
+        JSONObject verified = readVerificationRecord(apk);
+        verifyPackageAgainstRecord(apk, verified);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.getPackageManager().canRequestPackageInstalls()) {
             Intent settings = new Intent(
                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -139,8 +162,16 @@ final class AndroidUpdateManager {
             throw new IllegalArgumentException("Update manifest must include a valid SHA256 for the Android APK");
         }
         long size = asset.optLong("size", 0);
-        if (size < 0 || size > MAX_PACKAGE_BYTES) {
+        if (size <= 0 || size > MAX_PACKAGE_BYTES) {
             throw new IllegalArgumentException("Android APK size is invalid");
+        }
+
+        String fileName = safeApkName(asset.optString("fileName", fileNameFromUrl(url, version)));
+        for (String candidate : urls) {
+            validateTrustedGithubReleaseAssetUrl(candidate);
+            if (!safeApkName(fileNameFromUrl(candidate, version)).equalsIgnoreCase(fileName)) {
+                throw new IllegalArgumentException("Android APK URL and fileName do not match");
+            }
         }
 
         return new JSONObject()
@@ -155,7 +186,7 @@ final class AndroidUpdateManager {
                 .put("urls", new org.json.JSONArray(urls))
                 .put("sha256", sha256)
                 .put("size", size)
-                .put("fileName", safeApkName(asset.optString("fileName", fileNameFromUrl(url, version)))));
+                .put("fileName", fileName));
     }
 
     private JSONObject selectAndroidAsset(JSONObject manifest) throws Exception {
@@ -174,7 +205,11 @@ final class AndroidUpdateManager {
     private File downloadAsset(List<String> urls, String expectedSha256, long expectedSize, String fileName, ProgressCallback progress) throws Exception {
         updateDir.mkdirs();
         File destination = new File(updateDir, safeApkName(fileName));
-        if (destination.isFile() && sha256File(destination).equals(expectedSha256)) {
+        if (
+            destination.isFile()
+                && destination.length() == expectedSize
+                && sha256File(destination).equals(expectedSha256)
+        ) {
             notifyProgress(progress, "download", destination.length(), expectedSize, "已存在可用安装包");
             return destination;
         }
@@ -271,6 +306,133 @@ final class AndroidUpdateManager {
         return apk;
     }
 
+    private void writeVerificationRecord(File apk, JSONObject update) throws Exception {
+        JSONObject asset = update.getJSONObject("asset");
+        JSONObject record = new JSONObject()
+            .put("formatVersion", VERIFIED_RECORD_VERSION)
+            .put("packageName", activity.getPackageName())
+            .put("fileName", apk.getName())
+            .put("version", update.optString("latestVersion", ""))
+            .put("versionCode", update.optLong("latestCode", 0))
+            .put("sha256", asset.getString("sha256").toLowerCase(Locale.ROOT))
+            .put("size", asset.getLong("size"));
+        byte[] encoded = record.toString().getBytes(StandardCharsets.UTF_8);
+        if (encoded.length > MAX_VERIFICATION_RECORD_BYTES) {
+            throw new IllegalArgumentException("APK verification record is too large");
+        }
+
+        File destination = verificationRecordFile(apk);
+        File temp = new File(destination.getPath() + ".tmp");
+        try (FileOutputStream output = new FileOutputStream(temp)) {
+            output.write(encoded);
+            output.getFD().sync();
+        }
+        if (destination.exists() && !destination.delete()) {
+            temp.delete();
+            throw new IllegalStateException("Could not replace APK verification record");
+        }
+        if (!temp.renameTo(destination)) {
+            temp.delete();
+            throw new IllegalStateException("Could not save APK verification record");
+        }
+    }
+
+    private JSONObject readVerificationRecord(File apk) throws Exception {
+        File recordFile = verificationRecordFile(apk);
+        if (!recordFile.isFile()) {
+            throw new IllegalArgumentException("APK verification record is missing; download the update again");
+        }
+        try (InputStream input = new FileInputStream(recordFile)) {
+            return new JSONObject(new String(readLimited(input, MAX_VERIFICATION_RECORD_BYTES), StandardCharsets.UTF_8));
+        }
+    }
+
+    private File verificationRecordFile(File apk) {
+        return new File(apk.getParentFile(), apk.getName() + VERIFIED_RECORD_SUFFIX);
+    }
+
+    private void verifyPackageAgainstRecord(File apk, JSONObject record) throws Exception {
+        if (record.optInt("formatVersion", 0) != VERIFIED_RECORD_VERSION) {
+            throw new IllegalArgumentException("APK verification record format is unsupported");
+        }
+        if (!activity.getPackageName().equals(record.optString("packageName", ""))) {
+            throw new IllegalArgumentException("APK verification record belongs to another application");
+        }
+        if (!apk.getName().equals(record.optString("fileName", ""))) {
+            throw new IllegalArgumentException("APK name does not match its verification record");
+        }
+        String expectedSha256 = record.optString("sha256", "").toLowerCase(Locale.ROOT);
+        long expectedSize = record.optLong("size", 0);
+        if (!SHA256_PATTERN.matcher(expectedSha256).matches() || expectedSize <= 0 || expectedSize > MAX_PACKAGE_BYTES) {
+            throw new IllegalArgumentException("APK verification record is invalid");
+        }
+        if (apk.length() != expectedSize) {
+            throw new IllegalArgumentException("Android APK size verification failed before install");
+        }
+        if (!sha256File(apk).equals(expectedSha256)) {
+            throw new IllegalArgumentException("Android APK SHA256 verification failed before install");
+        }
+        verifyApkIdentity(apk, record.optString("version", ""), record.optLong("versionCode", 0));
+    }
+
+    private void verifyApkIdentity(File apk, String expectedVersion, long expectedVersionCode) throws Exception {
+        PackageManager packageManager = activity.getPackageManager();
+        int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+            ? PackageManager.GET_SIGNING_CERTIFICATES
+            : PackageManager.GET_SIGNATURES;
+        PackageInfo archive = packageManager.getPackageArchiveInfo(apk.getAbsolutePath(), flags);
+        if (archive == null || !activity.getPackageName().equals(archive.packageName)) {
+            throw new IllegalArgumentException("Android APK package name does not match this app");
+        }
+
+        long archiveVersionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+            ? archive.getLongVersionCode()
+            : archive.versionCode;
+        if (archiveVersionCode <= BuildConfig.VERSION_CODE) {
+            throw new IllegalArgumentException("Android APK is not newer than the installed app");
+        }
+        if (expectedVersionCode > 0 && archiveVersionCode != expectedVersionCode) {
+            throw new IllegalArgumentException("Android APK versionCode does not match the verified update");
+        }
+        if (
+            expectedVersion != null
+                && !expectedVersion.trim().isEmpty()
+                && !expectedVersion.trim().equals(String.valueOf(archive.versionName))
+        ) {
+            throw new IllegalArgumentException("Android APK versionName does not match the verified update");
+        }
+
+        PackageInfo installed = packageManager.getPackageInfo(activity.getPackageName(), flags);
+        Set<String> installedCertificates = signingCertificateDigests(installed);
+        Set<String> archiveCertificates = signingCertificateDigests(archive);
+        archiveCertificates.retainAll(installedCertificates);
+        if (archiveCertificates.isEmpty()) {
+            throw new SecurityException("Android APK signing certificate does not match the installed app");
+        }
+    }
+
+    private Set<String> signingCertificateDigests(PackageInfo packageInfo) throws Exception {
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            SigningInfo signingInfo = packageInfo.signingInfo;
+            if (signingInfo == null) return new HashSet<>();
+            signatures = signingInfo.hasMultipleSigners()
+                ? signingInfo.getApkContentsSigners()
+                : signingInfo.getSigningCertificateHistory();
+        } else {
+            signatures = packageInfo.signatures;
+        }
+        Set<String> result = new HashSet<>();
+        if (signatures == null) return result;
+        for (Signature signature : signatures) {
+            if (signature != null) {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                result.add(hex(digest.digest(signature.toByteArray())));
+            }
+        }
+        return result;
+    }
+
     private String fetchText(String url, int maxBytes) throws Exception {
         HttpURLConnection connection = openConnection(url);
         int code = connection.getResponseCode();
@@ -330,6 +492,20 @@ final class AndroidUpdateManager {
             throw new IllegalArgumentException("Update URLs must use HTTPS");
         }
         return url;
+    }
+
+    private void validateTrustedGithubReleaseAssetUrl(String value) throws Exception {
+        URL url = new URL(normalizeHttpsUrl(value));
+        if (
+            !"github.com".equalsIgnoreCase(url.getHost())
+                || url.getPort() != -1
+                || url.getUserInfo() != null
+                || url.getQuery() != null
+                || url.getRef() != null
+                || !GITHUB_RELEASE_ASSET_PATH.matcher(url.getPath()).matches()
+        ) {
+            throw new IllegalArgumentException("Android update assets must use an official GitHub Release URL");
+        }
     }
 
     private List<String> normalizeHttpsUrls(String value) {
@@ -405,7 +581,7 @@ final class AndroidUpdateManager {
     private String safeApkName(String value) {
         String name = value == null ? "" : new File(value).getName().trim();
         name = name.replaceAll("[^A-Za-z0-9._ -]", "_");
-        if (!name.endsWith(".apk")) {
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".apk")) {
             name = (name.isEmpty() ? "MyPasswordAndroid-release" : name) + ".apk";
         }
         return name.length() > 120 ? name.substring(0, 120) : name;

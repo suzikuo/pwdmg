@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import base64
 import hashlib
 import json
 import os
@@ -13,6 +15,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+
 from .paths import UPDATE_DIR, ensure_app_dir
 from .version import APP_VERSION
 
@@ -23,6 +29,13 @@ HTTP_TIMEOUT_SECONDS = 20
 WINDOWS_ASSET_KEYS = ("windows", "win64", "win")
 HEX_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/suzikuo/pwdmg/releases/latest/download/update-manifest.json"
+UPDATE_SIGNING_KEY_ID = "mypwdmg-update-2026-01"
+UPDATE_PUBLIC_KEY_B64 = "YvQQkegFxgCmfPe23B1HctOqXf+DALTv2dFBXIy4Apk="
+VERIFIED_METADATA_SUFFIX = ".verified.json"
+VERIFIED_METADATA_VERSION = 1
+GITHUB_RELEASE_ASSET_PATH_RE = re.compile(
+    r"^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/]+/[^/]+$"
+)
 PACKAGED_HOST_EXE = "My Password Host.exe"
 
 
@@ -31,22 +44,33 @@ class UpdateError(Exception):
 
 
 class DesktopUpdateService:
-    def __init__(self, *, current_version: str = APP_VERSION, update_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        current_version: str = APP_VERSION,
+        update_dir: Path | None = None,
+        public_key_b64: str = UPDATE_PUBLIC_KEY_B64,
+    ) -> None:
         ensure_app_dir()
         self.current_version = current_version
         self.update_dir = update_dir or UPDATE_DIR
+        self.public_key_b64 = public_key_b64
 
     def check(self, manifest_url: str) -> Dict[str, Any]:
+        parsed, _manifest = self._load_verified_update(manifest_url)
+        return parsed
+
+    def _load_verified_update(self, manifest_url: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
         manifest_urls = self._normalize_manifest_urls(manifest_url)
         manifest_url, manifest = self._fetch_manifest_from_candidates(manifest_urls)
         parsed = self._parse_manifest(manifest, manifest_url)
         parsed["currentVersion"] = self.current_version
         parsed["updateAvailable"] = compare_versions(parsed["latestVersion"], self.current_version) > 0
         parsed["canApply"] = is_packaged_windows()
-        return parsed
+        return parsed, manifest
 
     def download(self, manifest_url: str) -> Dict[str, Any]:
-        update = self.check(manifest_url)
+        update, manifest = self._load_verified_update(manifest_url)
         if not update["updateAvailable"]:
             raise UpdateError("Already on the latest version")
 
@@ -59,6 +83,7 @@ class DesktopUpdateService:
             expected_size=asset.get("size", 0),
             file_name=asset["fileName"],
         )
+        self._write_verified_download_record(package_path, update["manifestUrl"], manifest)
 
         return {
             "update": update,
@@ -78,10 +103,18 @@ class DesktopUpdateService:
         if not is_relative_to(package, update_root):
             raise UpdateError("Update package must be downloaded by this app before it can be applied")
 
+        update = self._verify_downloaded_package(package)
+        asset = update["asset"]
         self._cleanup_update_dir(keep=package)
         exe_path = Path(sys.executable).resolve()
         install_dir = exe_path.parent
-        script_path = self._write_apply_script(package, install_dir, exe_path.name)
+        script_path = self._write_apply_script(
+            package,
+            install_dir,
+            exe_path.name,
+            expected_sha256=asset["sha256"],
+            expected_size=asset["size"],
+        )
         launch_hidden_powershell(script_path)
 
         return {
@@ -109,6 +142,7 @@ class DesktopUpdateService:
                 name.startswith("apply-")
                 or name.startswith("backup-")
                 or (name.startswith("apply-update-") and name.endswith(".ps1"))
+                or name.endswith(VERIFIED_METADATA_SUFFIX)
                 or name.endswith(".tmp")
                 or name.lower().endswith(".zip")
             )
@@ -160,6 +194,7 @@ class DesktopUpdateService:
         raise UpdateError(str(last_error or "Update manifest request failed"))
 
     def _parse_manifest(self, manifest: Dict[str, Any], manifest_url: str) -> Dict[str, Any]:
+        verify_manifest_signature(manifest, self.public_key_b64)
         version = str(manifest.get("version") or "").strip()
         if not version:
             raise UpdateError("Update manifest is missing version")
@@ -171,13 +206,18 @@ class DesktopUpdateService:
         if not url:
             raise UpdateError("Update manifest is missing the Windows asset URL")
         for candidate_url in urls:
-            validate_download_url(candidate_url)
+            validate_github_release_asset_url(candidate_url)
         if not HEX_SHA256_RE.match(sha256):
             raise UpdateError("Update manifest must include a valid SHA256 for the Windows asset")
 
         size = to_int(asset.get("size"), 0)
-        if size < 0 or size > MAX_PACKAGE_BYTES:
+        if size <= 0 or size > MAX_PACKAGE_BYTES:
             raise UpdateError("Update package size is invalid")
+
+        file_name = safe_file_name(asset.get("fileName") or file_name_from_url(url, version))
+        for candidate_url in urls:
+            if safe_file_name(file_name_from_url(candidate_url, version)).lower() != file_name.lower():
+                raise UpdateError("Update asset URL and fileName do not match")
 
         return {
             "supported": True,
@@ -187,14 +227,69 @@ class DesktopUpdateService:
             "notes": str(manifest.get("notes") or ""),
             "publishedAt": str(manifest.get("publishedAt") or ""),
             "canApply": False,
+            "signatureVerified": True,
+            "signatureKeyId": UPDATE_SIGNING_KEY_ID,
             "asset": {
                 "url": url,
                 "urls": urls,
                 "sha256": sha256,
                 "size": size,
-                "fileName": safe_file_name(asset.get("fileName") or file_name_from_url(url, version)),
+                "fileName": file_name,
             },
         }
+
+    def _write_verified_download_record(
+        self,
+        package: Path,
+        manifest_url: str,
+        manifest: Dict[str, Any],
+    ) -> Path:
+        record_path = verified_metadata_path(package)
+        temp_path = record_path.with_suffix(record_path.suffix + ".tmp")
+        record = {
+            "formatVersion": VERIFIED_METADATA_VERSION,
+            "manifestUrl": manifest_url,
+            "manifest": manifest,
+        }
+        encoded = json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+        if len(encoded) > MAX_MANIFEST_BYTES:
+            raise UpdateError("Verified update metadata is too large")
+        temp_path.write_bytes(encoded)
+        os.replace(temp_path, record_path)
+        return record_path
+
+    def _verify_downloaded_package(self, package: Path) -> Dict[str, Any]:
+        record_path = verified_metadata_path(package)
+        if not record_path.is_file():
+            raise UpdateError("Verified update metadata is missing; download the update again")
+        try:
+            encoded = record_path.read_bytes()
+            if len(encoded) > MAX_MANIFEST_BYTES:
+                raise UpdateError("Verified update metadata is too large")
+            record = json.loads(encoded.decode("utf-8"))
+        except UpdateError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise UpdateError("Verified update metadata is invalid; download the update again") from exc
+        if not isinstance(record, dict) or record.get("formatVersion") != VERIFIED_METADATA_VERSION:
+            raise UpdateError("Verified update metadata format is unsupported")
+        manifest = record.get("manifest")
+        if not isinstance(manifest, dict):
+            raise UpdateError("Verified update metadata does not contain a manifest")
+
+        update = self._parse_manifest(manifest, str(record.get("manifestUrl") or ""))
+        if compare_versions(update["latestVersion"], self.current_version) <= 0:
+            raise UpdateError("Refusing to apply an older or current update version")
+        asset = update["asset"]
+        if package.name.lower() != asset["fileName"].lower():
+            raise UpdateError("Update package name does not match verified metadata")
+
+        actual_size = package.stat().st_size
+        if actual_size != asset["size"]:
+            raise UpdateError("Update package size verification failed before apply")
+        if sha256_file(package) != asset["sha256"]:
+            raise UpdateError("Update package SHA256 verification failed before apply")
+        return update
 
     def _download_asset(
         self,
@@ -206,7 +301,11 @@ class DesktopUpdateService:
     ) -> Path:
         self.update_dir.mkdir(parents=True, exist_ok=True)
         destination = self.update_dir / safe_file_name(file_name)
-        if destination.exists() and sha256_file(destination) == expected_sha256:
+        if (
+            destination.exists()
+            and destination.stat().st_size == expected_size
+            and sha256_file(destination) == expected_sha256
+        ):
             return destination
 
         urls = url if isinstance(url, list) else [url]
@@ -240,7 +339,7 @@ class DesktopUpdateService:
         destination: Path,
         temp_path: Path,
     ) -> Path:
-        validate_download_url(url)
+        validate_github_release_asset_url(url)
         digest = hashlib.sha256()
         total = 0
 
@@ -279,7 +378,15 @@ class DesktopUpdateService:
         os.replace(temp_path, destination)
         return destination
 
-    def _write_apply_script(self, package: Path, install_dir: Path, exe_name: str) -> Path:
+    def _write_apply_script(
+        self,
+        package: Path,
+        install_dir: Path,
+        exe_name: str,
+        *,
+        expected_sha256: str = "",
+        expected_size: int = 0,
+    ) -> Path:
         self.update_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         script_path = self.update_dir / f"apply-update-{stamp}.ps1"
@@ -291,6 +398,8 @@ class DesktopUpdateService:
         script = f"""$ErrorActionPreference = 'Stop'
 $ProcessIdToWait = {pid}
 $PackagePath = {ps_quote(str(package))}
+$ExpectedSha256 = {ps_quote(expected_sha256.lower())}
+$ExpectedSize = {int(expected_size)}
 $InstallDir = {ps_quote(str(install_dir))}
 $ExeName = {ps_quote(exe_name)}
 $HostExeName = {ps_quote(PACKAGED_HOST_EXE)}
@@ -301,6 +410,8 @@ $WorkDir = {ps_quote(str(work_dir))}
 $BackupDir = {ps_quote(str(backup_dir))}
 $UpdateDir = {ps_quote(str(self.update_dir))}
 $LogPath = {ps_quote(str(log_path))}
+$BackupComplete = $false
+$InstallMutationStarted = $false
 
 function Resolve-FullPath {{
     param([string] $Path)
@@ -401,6 +512,23 @@ function Start-UpdatedApp {{
     }}
 }}
 
+function Restore-InstallBackup {{
+    if (-not $BackupComplete) {{
+        throw "A complete backup is not available"
+    }}
+    Write-UpdateLog "Rolling back installation from $BackupDir"
+    Get-ChildItem -LiteralPath $InstallDir -Force | ForEach-Object {{
+        Remove-Item -LiteralPath (Assert-DeleteTarget $_.FullName $InstallDir 'Rollback target') -Recurse -Force -ErrorAction Stop
+    }}
+    Get-ChildItem -LiteralPath $BackupDir -Force | ForEach-Object {{
+        Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force -ErrorAction Stop
+    }}
+    if (-not (Test-Path -LiteralPath (Join-Path $InstallDir $ExeName) -PathType Leaf)) {{
+        throw "Rollback did not restore $ExeName"
+    }}
+    Write-UpdateLog "Rollback completed"
+}}
+
 try {{
     Write-UpdateLog "Update started"
     $InstallDir = Resolve-FullPath $InstallDir
@@ -409,6 +537,16 @@ try {{
     $WorkDir = Assert-DeleteTarget $WorkDir $UpdateDir 'WorkDir'
     $BackupDir = Assert-DeleteTarget $BackupDir $UpdateDir 'BackupDir'
     $LogPath = Assert-UnderPath $LogPath $UpdateDir 'LogPath'
+    if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {{
+        throw "Update package was not found: $PackagePath"
+    }}
+    $PackageItem = Get-Item -LiteralPath $PackagePath -ErrorAction Stop
+    if ($ExpectedSize -le 0 -or $PackageItem.Length -ne $ExpectedSize) {{
+        throw "Update package size verification failed before extraction"
+    }}
+    if (-not $ExpectedSha256 -or (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $ExpectedSha256) {{
+        throw "Update package SHA256 verification failed before extraction"
+    }}
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir $ExeName))) {{
         throw "InstallDir does not contain $ExeName"
     }}
@@ -454,13 +592,24 @@ try {{
     }}
     $PayloadDir = Assert-UnderPath $PayloadDir $WorkDir 'PayloadDir'
 
-    Copy-Item -Path (Join-Path $InstallDir '*') -Destination $BackupDir -Recurse -Force -ErrorAction SilentlyContinue
+    $InstallItems = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction Stop)
+    if ($InstallItems.Count -eq 0) {{
+        throw "Install directory is empty; refusing to continue"
+    }}
+    foreach ($InstallItem in $InstallItems) {{
+        Copy-Item -LiteralPath $InstallItem.FullName -Destination $BackupDir -Recurse -Force -ErrorAction Stop
+    }}
+    if (-not (Test-Path -LiteralPath (Join-Path $BackupDir $ExeName) -PathType Leaf)) {{
+        throw "Backup verification failed: $ExeName is missing"
+    }}
+    $BackupComplete = $true
+    $InstallMutationStarted = $true
     Get-ChildItem -LiteralPath $PayloadDir -Force | ForEach-Object {{
         $Target = Join-Path $InstallDir $_.Name
         if (Test-Path -LiteralPath $Target) {{
-            Remove-Item -LiteralPath (Assert-DeleteTarget $Target $InstallDir 'Install target') -Recurse -Force
+            Remove-Item -LiteralPath (Assert-DeleteTarget $Target $InstallDir 'Install target') -Recurse -Force -ErrorAction Stop
         }}
-        Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force
+        Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force -ErrorAction Stop
     }}
 
     Restore-NativeHostRegistration $ChromeHostKey $ChromeHostValue
@@ -482,10 +631,27 @@ try {{
         Remove-Item -LiteralPath (Assert-DeleteTarget $_.FullName $UpdateDir 'Update cleanup target') -Recurse -Force -ErrorAction SilentlyContinue
     }}
 }} catch {{
+    $FailureMessage = $_.Exception.Message
+    $RollbackFailure = $null
+    if ($InstallMutationStarted) {{
+        try {{
+            Restore-InstallBackup
+            try {{ Start-UpdatedApp }} catch {{ Write-UpdateLog "Could not restart rolled back app: $($_.Exception.Message)" }}
+        }} catch {{
+            $RollbackFailure = $_.Exception.Message
+            Write-UpdateLog "Rollback failed: $RollbackFailure"
+        }}
+    }}
     Restore-NativeHostRegistration $ChromeHostKey $ChromeHostValue
     Restore-NativeHostRegistration $EdgeHostKey $EdgeHostValue
-    Write-UpdateLog "Update failed: $($_.Exception.Message)"
-    throw
+    Write-UpdateLog "Update failed: $FailureMessage"
+    if ($RollbackFailure) {{
+        throw "Update failed: $FailureMessage. Rollback also failed: $RollbackFailure"
+    }}
+    if ($InstallMutationStarted) {{
+        throw "Update failed and the previous installation was restored: $FailureMessage"
+    }}
+    throw "Update failed before installation changes: $FailureMessage"
 }}
 """
         script = sanitize_powershell_variable_colons(script)
@@ -501,6 +667,98 @@ def sanitize_powershell_variable_colons(script: str) -> str:
         return f"${{{name}}}:"
 
     return re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*):", replace, script)
+
+
+def canonical_manifest_bytes(manifest: Dict[str, Any]) -> bytes:
+    if not isinstance(manifest, dict):
+        raise UpdateError("Update manifest must be a JSON object")
+    unsigned = dict(manifest)
+    unsigned.pop("signature", None)
+    try:
+        canonical = json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise UpdateError("Update manifest cannot be canonicalized") from exc
+    return canonical.encode("utf-8")
+
+
+def verify_manifest_signature(manifest: Dict[str, Any], public_key_b64: str = UPDATE_PUBLIC_KEY_B64) -> None:
+    signature_block = manifest.get("signature") if isinstance(manifest, dict) else None
+    if not isinstance(signature_block, dict):
+        raise UpdateError("Update manifest signature is missing")
+    if signature_block.get("algorithm") != "Ed25519":
+        raise UpdateError("Update manifest signature algorithm is unsupported")
+    if signature_block.get("keyId") != UPDATE_SIGNING_KEY_ID:
+        raise UpdateError("Update manifest signature key is not trusted")
+    try:
+        public_key_bytes = base64.b64decode(str(public_key_b64), validate=True)
+        signature = base64.b64decode(str(signature_block.get("value") or ""), validate=True)
+        if len(public_key_bytes) != 32 or len(signature) != 64:
+            raise ValueError("invalid Ed25519 key or signature length")
+        public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
+        public_key.verify(signature, canonical_manifest_bytes(manifest))
+    except (InvalidSignature, TypeError, ValueError) as exc:
+        raise UpdateError("Update manifest signature verification failed") from exc
+
+
+def sign_manifest(manifest: Dict[str, Any], private_key_path: Path) -> Dict[str, Any]:
+    try:
+        private_key = serialization.load_pem_private_key(private_key_path.read_bytes(), password=None)
+    except (OSError, TypeError, ValueError) as exc:
+        raise UpdateError("Update signing private key could not be loaded") from exc
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise UpdateError("Update signing private key must be Ed25519")
+    signed = dict(manifest)
+    signed.pop("signature", None)
+    signature = private_key.sign(canonical_manifest_bytes(signed))
+    signed["signature"] = {
+        "algorithm": "Ed25519",
+        "keyId": UPDATE_SIGNING_KEY_ID,
+        "value": base64.b64encode(signature).decode("ascii"),
+    }
+    return signed
+
+
+def generate_signing_key(private_key_path: Path, public_key_path: Path) -> str:
+    if private_key_path.exists() or public_key_path.exists():
+        raise UpdateError("Signing key already exists; refusing to overwrite it")
+    private_key_path.parent.mkdir(parents=True, exist_ok=True)
+    public_key_path.parent.mkdir(parents=True, exist_ok=True)
+    private_key = Ed25519PrivateKey.generate()
+    private_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    raw_public = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    private_key_path.write_bytes(private_bytes)
+    try:
+        private_key_path.chmod(0o600)
+        public_key_path.write_bytes(public_pem)
+    except Exception:
+        try:
+            private_key_path.unlink()
+        except OSError:
+            pass
+        raise
+    return base64.b64encode(raw_public).decode("ascii")
+
+
+def verified_metadata_path(package: Path) -> Path:
+    return package.with_name(package.name + VERIFIED_METADATA_SUFFIX)
 
 
 def fetch_url(url: str, max_bytes: int) -> bytes:
@@ -521,6 +779,26 @@ def validate_download_url(url: str) -> None:
     if parsed.scheme == "http" and host in {"localhost", "127.0.0.1", "::1"}:
         return
     raise UpdateError("Update downloads must use HTTPS")
+
+
+def validate_github_release_asset_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(str(url or ""))
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise UpdateError("Update asset URL is invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or (parsed.hostname or "").lower() != "github.com"
+        or port not in {None, 443}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or not GITHUB_RELEASE_ASSET_PATH_RE.fullmatch(parsed.path)
+        or urllib.parse.unquote(parsed.path) != parsed.path
+    ):
+        raise UpdateError("Update assets must use a trusted GitHub Release download URL")
 
 
 def split_url_candidates(value: Any) -> list[str]:
@@ -632,3 +910,69 @@ def launch_hidden_powershell(script_path: Path) -> None:
     ]
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     subprocess.Popen(command, close_fds=True, creationflags=creationflags)
+
+
+def _write_json_atomic(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    encoded = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    temp_path.write_bytes(encoded)
+    os.replace(temp_path, path)
+
+
+def _updater_cli(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="My Password signed update manifest tools")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    sign_parser = subparsers.add_parser("sign-manifest", help="Sign a canonical JSON update manifest")
+    sign_parser.add_argument("--input", required=True, type=Path)
+    sign_parser.add_argument("--output", required=True, type=Path)
+    sign_parser.add_argument("--private-key", required=True, type=Path)
+
+    verify_parser = subparsers.add_parser("verify-manifest", help="Verify a signed update manifest")
+    verify_parser.add_argument("--input", required=True, type=Path)
+
+    key_parser = subparsers.add_parser("generate-signing-key", help="Generate a one-time Ed25519 signing key")
+    key_parser.add_argument("--private-key", required=True, type=Path)
+    key_parser.add_argument("--public-key", required=True, type=Path)
+
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "sign-manifest":
+            raw = args.input.read_bytes()
+            if len(raw) > MAX_MANIFEST_BYTES:
+                raise UpdateError("Unsigned manifest is too large")
+            manifest = json.loads(raw.decode("utf-8"))
+            if not isinstance(manifest, dict):
+                raise UpdateError("Unsigned manifest must be a JSON object")
+            signed = sign_manifest(manifest, args.private_key)
+            verify_manifest_signature(signed)
+            _write_json_atomic(args.output, signed)
+            print(f"Signed update manifest: {args.output}")
+            return 0
+        if args.command == "verify-manifest":
+            raw = args.input.read_bytes()
+            if len(raw) > MAX_MANIFEST_BYTES:
+                raise UpdateError("Signed manifest is too large")
+            manifest = json.loads(raw.decode("utf-8"))
+            if not isinstance(manifest, dict):
+                raise UpdateError("Signed manifest must be a JSON object")
+            verify_manifest_signature(manifest)
+            print(f"Verified update manifest: {args.input}")
+            return 0
+        if args.command == "generate-signing-key":
+            public_key_b64 = generate_signing_key(args.private_key, args.public_key)
+            fingerprint = hashlib.sha256(base64.b64decode(public_key_b64)).hexdigest()
+            print(f"Private key: {args.private_key}")
+            print(f"Public key: {args.public_key}")
+            print(f"UPDATE_PUBLIC_KEY_B64={public_key_b64}")
+            print(f"Raw public key SHA256={fingerprint}")
+            print("Update UPDATE_PUBLIC_KEY_B64 before distributing a client that trusts this key.")
+            return 0
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, UpdateError) as exc:
+        parser.exit(1, f"error: {exc}\n")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_updater_cli())

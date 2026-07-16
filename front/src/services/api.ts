@@ -9,6 +9,7 @@ import { decryptPayload, decryptPayloadWithKey, encryptPayload, encryptPayloadWi
 import { webStorageAdapter } from './webStorageAdapter'
 
 const UNLOCKED_EXPIRES_AT = Number.MAX_SAFE_INTEGER
+const MAX_VAULT_ENVELOPE_TEXT_LENGTH = 24 * 1024 * 1024
 
 let payload: VaultPayload | null = null
 let vaultKey: VaultKey | null = null
@@ -88,33 +89,52 @@ async function createVault(password: string, importLegacy: boolean): Promise<Cre
 
   let nextPayload = defaultVaultPayload()
   let migrated = 0
+  let legacyDigest = ''
   if (importLegacy && storageState.legacyAvailable) {
     const legacyText = unwrap(await storage.readLegacyLocalStorage())
     const migratedResult = migrateLegacyStorageText(legacyText)
+    if (migratedResult.failed > 0) {
+      throw new Error(`旧数据中有 ${migratedResult.failed} 条损坏记录，保险库尚未创建；请先保留并修复旧数据`)
+    }
     nextPayload = migratedResult.payload
     migrated = migratedResult.migrated
+    legacyDigest = await sha256Text(legacyText)
   }
 
   const normalized = normalizeVaultPayload(nextPayload)
   const encrypted = await encryptPayload(password || '', normalized)
-  unwrap(await storage.writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false))
+  unwrap(await storage.writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false, 0))
+  const persistedEnvelope = parseEnvelopeText(unwrap(await storage.readVaultEnvelope()))
+  const verified = normalizeVaultPayload(await decryptPayloadWithKey(encrypted.vaultKey, persistedEnvelope))
+  if (JSON.stringify(verified) !== JSON.stringify(normalized)) {
+    throw new Error('Encrypted vault verification failed; legacy data was not removed')
+  }
+  let legacyCleanupPending = false
+  if (legacyDigest) {
+    const cleanup = storage.cleanupLegacyStorage
+    const cleanupResult = cleanup ? await cleanup(legacyDigest) : fail('UNSUPPORTED', 'Legacy cleanup is unavailable')
+    legacyCleanupPending = !cleanupResult.ok
+  }
   payload = normalized
   vaultKey = encrypted.vaultKey
   passwordless = (password || '') === ''
   refreshSession()
   await cacheNativeSession(password || '')
-  return { vault: cloneVaultPayload(normalized), migrated }
+  return { vault: cloneVaultPayload(normalized), migrated, legacyCleanupPending }
 }
 
 async function unlock(password: string): Promise<VaultPayload> {
-  const envelope = JSON.parse(unwrap(await selectedStorage().readVaultEnvelope()))
-  const decrypted = await decryptPayload(password || '', validateEnvelope(envelope))
+  const envelope = parseEnvelopeText(unwrap(await selectedStorage().readVaultEnvelope()))
+  const decrypted = await decryptPayload(password || '', envelope)
   payload = normalizeVaultPayload(decrypted.payload)
   vaultKey = decrypted.vaultKey
   passwordless = (password || '') === ''
   if (passwordless && envelope.passwordless !== true) {
-    envelope.passwordless = true
-    unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(envelope, null, 2), false))
+    const expectedRevision = payload.revision
+    payload = normalizeVaultPayload({ ...payload, revision: expectedRevision + 1 })
+    const upgradedEnvelope = await encryptPayloadWithKey(vaultKey, payload)
+    upgradedEnvelope.passwordless = true
+    unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(upgradedEnvelope, null, 2), false, expectedRevision))
   }
   refreshSession()
   await cacheNativeSession(password || '')
@@ -135,21 +155,27 @@ async function getVault(): Promise<VaultPayload> {
 }
 
 async function saveVault(nextPayload: VaultPayload): Promise<VaultPayload> {
-  await requirePayload()
+  const current = await requirePayload()
   if (!vaultKey) throw new Error('Vault is locked')
+  const expectedRevision = Math.max(1, Math.floor(Number(nextPayload.revision || 1)))
+  if (expectedRevision !== current.revision) {
+    throw new ApiResultError('CONFLICT', 'Vault changed in another window; reload before saving')
+  }
 
-  payload = normalizeVaultPayload({ ...nextPayload, updatedAt: nowSeconds() })
+  payload = normalizeVaultPayload({ ...nextPayload, revision: expectedRevision + 1, updatedAt: nowSeconds() })
   const envelope = await encryptPayloadWithKey(vaultKey, payload)
   envelope.passwordless = passwordless
-  unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(envelope, null, 2), false))
+  unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(envelope, null, 2), false, expectedRevision))
   refreshSession()
   return cloneVaultPayload(payload)
 }
 
 async function changePassword(newPassword: string): Promise<AppState> {
-  const current = cloneVaultPayload(await requirePayload())
+  const currentPayload = cloneVaultPayload(await requirePayload())
+  const expectedRevision = currentPayload.revision
+  const current = normalizeVaultPayload({ ...currentPayload, revision: expectedRevision + 1, updatedAt: nowSeconds() })
   const encrypted = await encryptPayload(newPassword || '', current)
-  unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false))
+  unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false, expectedRevision))
   payload = current
   vaultKey = encrypted.vaultKey
   passwordless = (newPassword || '') === ''
@@ -184,7 +210,7 @@ async function exportVaultBackupForPayload(nextPayload: VaultPayload): Promise<V
 async function previewVaultBackup(envelopeText: string): Promise<VaultPayload> {
   await requirePayload()
   if (!vaultKey) throw new Error('Vault is locked')
-  const envelope = validateEnvelope(JSON.parse(envelopeText))
+  const envelope = parseEnvelopeText(envelopeText)
   const decrypted = await decryptPayloadWithKey(vaultKey, envelope)
   refreshSession()
   return cloneVaultPayload(normalizeVaultPayload(decrypted))
@@ -192,7 +218,7 @@ async function previewVaultBackup(envelopeText: string): Promise<VaultPayload> {
 
 async function previewVaultBackupWithPassword(envelopeText: string, password: string): Promise<VaultPayload> {
   await requirePayload()
-  const envelope = validateEnvelope(JSON.parse(envelopeText))
+  const envelope = parseEnvelopeText(envelopeText)
   const decrypted = await decryptPayload(password || '', envelope)
   refreshSession()
   return cloneVaultPayload(normalizeVaultPayload(decrypted.payload))
@@ -200,7 +226,7 @@ async function previewVaultBackupWithPassword(envelopeText: string, password: st
 
 async function importVaultBackup(envelopeText: string): Promise<VaultBackupImport> {
   await requirePayload()
-  validateEnvelope(JSON.parse(envelopeText))
+  parseEnvelopeText(envelopeText)
   const writeResult = unwrap(await selectedStorage().writeVaultEnvelope(envelopeText, true))
   await lock()
   return {
@@ -216,7 +242,7 @@ async function requirePayload(): Promise<VaultPayload> {
     throw new Error('Vault is locked')
   }
 
-  const envelope = validateEnvelope(JSON.parse(unwrap(await selectedStorage().readVaultEnvelope())))
+  const envelope = parseEnvelopeText(unwrap(await selectedStorage().readVaultEnvelope()))
   payload = normalizeVaultPayload(await decryptPayloadWithKey(vaultKey, envelope))
   refreshSession()
   return payload
@@ -290,10 +316,22 @@ async function guard<T>(fn: () => Promise<T> | T): Promise<ApiResult<T>> {
 
 function errorCode(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
+  if (/conflict|revision/i.test(message)) return 'CONFLICT'
   if (/locked/i.test(message)) return 'LOCKED'
   if (/password|decrypt|corrupt|operationerror|malformed/i.test(message)) return 'BAD_PASSWORD'
   if (/exist/i.test(message)) return 'ERROR'
   return 'ERROR'
+}
+
+async function sha256Text(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function parseEnvelopeText(value: string) {
+  const text = String(value || '')
+  if (text.length > MAX_VAULT_ENVELOPE_TEXT_LENGTH) throw new Error('Vault file exceeds the safe size limit')
+  return validateEnvelope(JSON.parse(text))
 }
 
 class ApiResultError extends Error {

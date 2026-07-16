@@ -1,6 +1,10 @@
+import './security-core.js'
+
+const Security = globalThis.MyPwdMgSecurity
 const HOST_NAME = 'com.suzikuo.mypwdmg'
 const REQUEST_TIMEOUT_MS = 15000
 const SAVE_CAPTURE_TTL_MS = 5 * 60 * 1000
+const FILL_AUTH_TTL_MS = 8000
 const QUERY_CACHE_TTL_MS = 8000
 const QUERY_CACHE_MAX = 64
 const CONTEXT_MENU_SHOW_PANEL_ID = 'mypwdmg-show-panel'
@@ -15,8 +19,9 @@ let port = null
 let nextId = 1
 const pending = new Map()
 const pendingCaptures = new Map()
-const pendingPromptsByTab = new Map()
-const pendingLockedCapturesByTab = new Map()
+const pendingPromptsByContext = new Map()
+const pendingLockedCapturesByContext = new Map()
+const fillAuthorizations = new Map()
 const queryCache = new Map()
 const inflightQueryMatches = new Map()
 let queryCacheVersion = 0
@@ -75,11 +80,14 @@ function prunePendingCaptures() {
   for (const [token, item] of pendingCaptures) {
     if (item.expiresAt <= now) pendingCaptures.delete(token)
   }
-  for (const [tabId, item] of pendingPromptsByTab) {
-    if (item.expiresAt <= now) pendingPromptsByTab.delete(tabId)
+  for (const [key, item] of pendingPromptsByContext) {
+    if (item.expiresAt <= now || !pendingCaptures.has(item.token)) pendingPromptsByContext.delete(key)
   }
-  for (const [tabId, item] of pendingLockedCapturesByTab) {
-    if (item.expiresAt <= now) pendingLockedCapturesByTab.delete(tabId)
+  for (const [key, item] of pendingLockedCapturesByContext) {
+    if (item.expiresAt <= now) pendingLockedCapturesByContext.delete(key)
+  }
+  for (const [token, item] of fillAuthorizations) {
+    if (item.expiresAt <= now) fillAuthorizations.delete(token)
   }
 }
 
@@ -187,11 +195,11 @@ function clearPendingCapturesForHost(hostname = '') {
   for (const [token, item] of pendingCaptures) {
     if (hostMatchesIgnore(item.capture?.hostname, hostname)) pendingCaptures.delete(token)
   }
-  for (const [tabId, item] of pendingPromptsByTab) {
-    if (hostMatchesIgnore(item.preview?.hostname, hostname)) pendingPromptsByTab.delete(tabId)
+  for (const [key, item] of pendingPromptsByContext) {
+    if (hostMatchesIgnore(item.preview?.hostname, hostname)) pendingPromptsByContext.delete(key)
   }
-  for (const [tabId, item] of pendingLockedCapturesByTab) {
-    if (hostMatchesIgnore(item.capture?.hostname, hostname)) pendingLockedCapturesByTab.delete(tabId)
+  for (const [key, item] of pendingLockedCapturesByContext) {
+    if (hostMatchesIgnore(item.capture?.hostname, hostname)) pendingLockedCapturesByContext.delete(key)
   }
 }
 
@@ -243,13 +251,9 @@ function receivingEndMissing(error) {
 }
 
 async function ensureContentScript(tabId) {
-  await chrome.scripting.insertCSS({
-    target: { tabId },
-    files: ['content.css']
-  }).catch(() => {})
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ['content.js']
+    files: ['security-core.js', 'content.js']
   })
 }
 
@@ -297,11 +301,53 @@ function publicCapturePreview(preview, placement = null) {
 }
 
 function normalizeHost(value = '') {
-  let host = String(value || '').trim().toLowerCase()
-  const schemeIndex = host.indexOf('://')
-  if (schemeIndex >= 0) host = host.slice(schemeIndex + 3)
-  host = host.split('/', 1)[0].replace(/^\.+|\.+$/g, '')
-  return host.startsWith('www.') ? host.slice(4) : host
+  return Security.normalizeHost(value)
+}
+
+function senderWebContext(sender) {
+  return Security.webContext({
+    tabId: sender?.tab?.id,
+    frameId: sender?.frameId ?? 0,
+    documentId: sender?.documentId || '',
+    url: sender?.url || sender?.tab?.url || ''
+  })
+}
+
+function isExtensionPageSender(sender) {
+  if (!sender || sender.id !== chrome.runtime.id) return false
+  try {
+    const url = new URL(sender.url || '')
+    return url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id
+  } catch {
+    return false
+  }
+}
+
+async function activeTabWebContext() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  return Security.webContext({ tabId: tab?.id, frameId: 0, url: tab?.url || '' })
+}
+
+async function queryContextForSender(sender) {
+  return senderWebContext(sender) || (isExtensionPageSender(sender) ? activeTabWebContext() : null)
+}
+
+function contextKey(context) {
+  if (!context) return ''
+  const documentKey = context.documentId || context.url
+  return `${context.tabId}:${context.frameId}:${documentKey}`
+}
+
+function contextError(code = 'INVALID_PAGE_CONTEXT') {
+  return { ok: false, code, message: 'The request is not authorized for this page.' }
+}
+
+async function sendMessageToContext(context, message) {
+  if (!context?.tabId && context?.tabId !== 0) return
+  const options = context.documentId
+    ? { documentId: context.documentId }
+    : { frameId: context.frameId || 0 }
+  return chrome.tabs.sendMessage(context.tabId, message, options)
 }
 
 async function activeTabId() {
@@ -309,9 +355,9 @@ async function activeTabId() {
   return tab?.id || 0
 }
 
-function notifyTabCaptureReady(tabId) {
-  if (!tabId) return
-  sendMessageToTab(tabId, { type: 'MYPWDMG_CAPTURE_READY' }).catch(() => {})
+function notifyContextCaptureReady(context) {
+  if (!context) return
+  sendMessageToContext(context, { type: 'MYPWDMG_CAPTURE_READY' }).catch(() => {})
 }
 
 function queryCacheKey(hostname = '') {
@@ -350,10 +396,74 @@ async function queryMatchesCached(hostname = '') {
   return request
 }
 
+function matchingEntry(response, entryId, hostname) {
+  if (!response?.ok || !Array.isArray(response.data)) return null
+  const requestedId = String(entryId || '')
+  if (!requestedId) return null
+  return response.data.find((entry) => (
+    String(entry?.id || '') === requestedId
+    && Security.entryMatchesHostname(entry, hostname)
+  )) || null
+}
+
+function payloadMatchesEntry(payload, entry) {
+  if (!payload || !entry) return false
+  return ['id', 'title', 'username', 'email', 'phone', 'loginAccountSource']
+    .every((key) => String(payload[key] ?? '') === String(entry[key] ?? ''))
+}
+
+async function authorizeFill(entryId, sender) {
+  prunePendingCaptures()
+  const context = senderWebContext(sender)
+  if (!context) return contextError()
+
+  const matches = await queryMatchesCached(context.hostname)
+  if (!matches?.ok) return matches
+  const matchedEntry = matchingEntry(matches, entryId, context.hostname)
+  if (!matchedEntry) {
+    return contextError('ENTRY_NOT_AUTHORIZED_FOR_SITE')
+  }
+
+  const token = newToken()
+  fillAuthorizations.set(token, {
+    context,
+    entryId: String(entryId),
+    expiresAt: Date.now() + FILL_AUTH_TTL_MS
+  })
+  return { ok: true, data: { token, expiresAt: Date.now() + FILL_AUTH_TTL_MS } }
+}
+
+async function getAuthorizedFill(entryId, token, sender) {
+  prunePendingCaptures()
+  const context = senderWebContext(sender)
+  const authorization = fillAuthorizations.get(String(token || ''))
+  if (!context || !authorization) return contextError('FILL_AUTH_REQUIRED')
+
+  fillAuthorizations.delete(String(token))
+  if (authorization.entryId !== String(entryId || '')
+    || !Security.sameDocumentContext(authorization.context, context)) {
+    return contextError('FILL_AUTH_CONTEXT_MISMATCH')
+  }
+
+  const matches = await nativeCall('queryMatches', { hostname: context.hostname })
+  if (!matches?.ok) return matches
+  const matchedEntry = matchingEntry(matches, entryId, context.hostname)
+  if (!matchedEntry) {
+    return contextError('ENTRY_NOT_AUTHORIZED_FOR_SITE')
+  }
+
+  const response = await nativeCall('getFillPayload', { entryId: String(entryId) })
+  if (!response?.ok) return response
+  if (!payloadMatchesEntry(response.data, matchedEntry)) {
+    return contextError('ENTRY_ID_MISMATCH')
+  }
+  return response
+}
+
 function forgetPromptToken(token) {
   if (!token) return
-  for (const [tabId, item] of pendingPromptsByTab) {
-    if (item.preview?.token === token) pendingPromptsByTab.delete(tabId)
+  for (const [key, item] of pendingPromptsByContext) {
+    if (item.token === token || item.preview?.token === token) pendingPromptsByContext.delete(key)
   }
 }
 
@@ -382,16 +492,18 @@ function applyCaptureOverrides(capture = {}, overrides = {}) {
   return next
 }
 
-async function prepareCapturedLogin(capture, tabId = 0, placement = null) {
+async function prepareCapturedLogin(capture, context, placement = null) {
   prunePendingCaptures()
+  if (!context) return contextError()
   const settings = await getAutoSettings()
   if (isHostIgnored(capture?.hostname || '', settings.ignoredSites)) {
     return { ok: true, data: { shouldPrompt: false } }
   }
   const previewResponse = await nativeCall('previewCapturedLogin', { capture })
-  if (!previewResponse?.ok && tabId && (previewResponse?.code === 'LOCKED' || previewResponse?.code === 'BAD_PASSWORD')) {
-    pendingLockedCapturesByTab.set(tabId, {
+  if (!previewResponse?.ok && (previewResponse?.code === 'LOCKED' || previewResponse?.code === 'BAD_PASSWORD')) {
+    pendingLockedCapturesByContext.set(contextKey(context), {
       capture,
+      context,
       placement: publicPromptPlacement(placement),
       expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
     })
@@ -410,69 +522,109 @@ async function prepareCapturedLogin(capture, tabId = 0, placement = null) {
   const token = newToken()
   pendingCaptures.set(token, {
     capture,
+    context,
+    saving: false,
     expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
   })
   const preview = {
     ...publicCapturePreview(nativePreview, placement),
     token
   }
-  if (tabId) {
-    pendingPromptsByTab.set(tabId, {
-      preview,
-      expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
-    })
-    notifyTabCaptureReady(tabId)
-  }
+  pendingPromptsByContext.set(contextKey(context), {
+    token,
+    preview,
+    context,
+    expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
+  })
+  notifyContextCaptureReady(context)
   return {
     ok: true,
     data: preview
   }
 }
 
-async function prepareLockedCaptureForTab(tabId = 0) {
+async function prepareLockedCapturesForTab(tabId = 0) {
   prunePendingCaptures()
-  const item = pendingLockedCapturesByTab.get(tabId)
-  if (!item) return
-  pendingLockedCapturesByTab.delete(tabId)
-  await prepareCapturedLogin(item.capture, tabId, item.placement)
+  const items = [...pendingLockedCapturesByContext.entries()]
+    .filter(([, item]) => item.context?.tabId === tabId)
+  for (const [key, item] of items) {
+    pendingLockedCapturesByContext.delete(key)
+    await prepareCapturedLogin(item.capture, item.context, item.placement)
+  }
 }
 
-async function savePreparedCapture(token, parentId = '', updateEntryId = '', overrides = {}) {
+async function savePreparedCapture(token, context, parentId = '', updateEntryId = '', overrides = {}) {
   prunePendingCaptures()
   const item = pendingCaptures.get(token)
   if (!item) {
     return { ok: false, code: 'CAPTURE_EXPIRED', message: '保存请求已过期，请重新提交登录表单。' }
   }
-  pendingCaptures.delete(token)
-  forgetPromptToken(token)
+  if (!context || !Security.sameDocumentContext(item.context, context)) {
+    return contextError('CAPTURE_CONTEXT_MISMATCH')
+  }
+  if (item.saving) {
+    return { ok: false, code: 'CAPTURE_SAVE_IN_PROGRESS', message: 'Save already in progress.' }
+  }
+  item.saving = true
   const capture = applyCaptureOverrides(item.capture, overrides)
-  const response = await nativeCall('saveCapturedLogin', {
-    capture,
-    parentId: parentId || '',
-    updateEntryId: updateEntryId || ''
-  })
+  let response
+  try {
+    response = await nativeCall('saveCapturedLogin', {
+      capture,
+      parentId: parentId || '',
+      updateEntryId: updateEntryId || ''
+    })
+  } finally {
+    item.saving = false
+  }
   if (response?.ok) {
+    pendingCaptures.delete(token)
+    forgetPromptToken(token)
     clearQueryCache()
     refreshActiveTab()
   }
   return response
 }
 
-function takePreparedPrompt(tabId = 0) {
+function takePreparedPrompt(context) {
   prunePendingCaptures()
-  const item = pendingPromptsByTab.get(tabId)
+  if (!context) return contextError()
+  let key = contextKey(context)
+  let item = pendingPromptsByContext.get(key)
+  if (!item) {
+    const redirected = [...pendingPromptsByContext.entries()]
+      .find(([, candidate]) => Security.sameOriginFrame(candidate.context, context))
+    if (redirected) {
+      const [oldKey, candidate] = redirected
+      pendingPromptsByContext.delete(oldKey)
+      candidate.context = context
+      key = contextKey(context)
+      pendingPromptsByContext.set(key, candidate)
+      const captureItem = pendingCaptures.get(candidate.token)
+      if (captureItem) captureItem.context = context
+      item = candidate
+    }
+  }
   if (!item) return { ok: true, data: null }
-  // Keep the prompt available after rendering so it can survive same-tab redirects.
+  if (!pendingCaptures.has(item.token)) {
+    pendingPromptsByContext.delete(key)
+    return { ok: true, data: null }
+  }
   return { ok: true, data: item.preview }
 }
 
-function dismissPreparedCapture(token) {
+function dismissPreparedCapture(token, context) {
+  const item = pendingCaptures.get(token)
+  if (!item) return { ok: true, data: null }
+  if (!context || !Security.sameDocumentContext(item.context, context)) {
+    return contextError('CAPTURE_CONTEXT_MISMATCH')
+  }
   pendingCaptures.delete(token)
   forgetPromptToken(token)
   return { ok: true, data: null }
 }
 
-async function addIgnoredSite(hostname = '', token = '') {
+async function addIgnoredSite(hostname = '', token = '', context = null) {
   const targetHost = normalizeHost(hostname)
   if (!targetHost) return getAutoSettings()
 
@@ -486,7 +638,7 @@ async function addIgnoredSite(hostname = '', token = '') {
   const settings = alreadySaved ? current : await setAutoSettings({ ignoredSites })
 
   clearPendingCapturesForHost(targetHost)
-  if (token) dismissPreparedCapture(token)
+  if (token) dismissPreparedCapture(token, context)
   return settings
 }
 
@@ -539,14 +691,15 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ;(async () => {
     if (message?.type === 'MYPWDMG_QUERY_MATCHES') {
-      sendResponse(await queryMatchesCached(message.hostname))
+      const context = await queryContextForSender(sender)
+      sendResponse(context ? await queryMatchesCached(context.hostname) : contextError())
       return
     }
     if (message?.type === 'MYPWDMG_UNLOCK') {
       const response = await nativeCall('unlock', { password: message.password || '' })
       if (response?.ok) {
         clearQueryCache()
-        await prepareLockedCaptureForTab(await activeTabId())
+        await prepareLockedCapturesForTab(await activeTabId())
         refreshActiveTab()
       }
       sendResponse(response)
@@ -554,46 +707,85 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === 'MYPWDMG_LOCK') {
       const response = await nativeCall('lock')
-      if (response?.ok) clearQueryCache()
+      if (response?.ok) {
+        clearQueryCache()
+        fillAuthorizations.clear()
+      }
       sendResponse(response)
       return
     }
+    if (message?.type === 'MYPWDMG_AUTHORIZE_FILL') {
+      sendResponse(await authorizeFill(message.entryId, sender))
+      return
+    }
     if (message?.type === 'MYPWDMG_GET_FILL') {
-      sendResponse(await nativeCall('getFillPayload', { entryId: message.entryId }))
+      sendResponse(await getAuthorizedFill(message.entryId, message.authorizationToken, sender))
       return
     }
     if (message?.type === 'MYPWDMG_PREPARE_CAPTURE') {
+      const context = senderWebContext(sender)
+      if (!context) {
+        sendResponse(contextError())
+        return
+      }
+      const capture = { ...(message.capture || {}), hostname: context.hostname }
       const settings = await getAutoSettings()
-      if (!settings.autoSaveEnabled || isHostIgnored(message.capture?.hostname || '', settings.ignoredSites)) {
+      if (!settings.autoSaveEnabled || isHostIgnored(context.hostname, settings.ignoredSites)) {
         sendResponse({ ok: true, data: { shouldPrompt: false } })
         return
       }
-      sendResponse(await prepareCapturedLogin(message.capture || {}, sender?.tab?.id || 0, message.placement || null))
+      sendResponse(await prepareCapturedLogin(capture, context, message.placement || null))
       return
     }
     if (message?.type === 'MYPWDMG_SAVE_CAPTURE') {
-      sendResponse(await savePreparedCapture(message.token, message.parentId, message.updateEntryId, message.overrides || {}))
+      sendResponse(await savePreparedCapture(
+        message.token,
+        senderWebContext(sender),
+        message.parentId,
+        message.updateEntryId,
+        message.overrides || {}
+      ))
       return
     }
     if (message?.type === 'MYPWDMG_TAKE_SAVE_PROMPT') {
+      const context = senderWebContext(sender)
+      if (!context) {
+        sendResponse(contextError())
+        return
+      }
       const settings = await getAutoSettings()
-      if (!settings.autoSaveEnabled || isHostIgnored(message.hostname || '', settings.ignoredSites)) {
+      if (!settings.autoSaveEnabled || isHostIgnored(context.hostname, settings.ignoredSites)) {
         sendResponse({ ok: true, data: null })
         return
       }
-      sendResponse(takePreparedPrompt(sender?.tab?.id || 0))
+      sendResponse(takePreparedPrompt(context))
       return
     }
     if (message?.type === 'MYPWDMG_ADD_IGNORED_SITE') {
-      sendResponse({ ok: true, data: await addIgnoredSite(message.hostname || '', message.token || '') })
+      const contentContext = senderWebContext(sender)
+      if (contentContext) {
+        const item = pendingCaptures.get(String(message.token || ''))
+        if (!item || !Security.sameDocumentContext(item.context, contentContext)) {
+          sendResponse(contextError('CAPTURE_CONTEXT_MISMATCH'))
+          return
+        }
+        sendResponse({ ok: true, data: await addIgnoredSite(contentContext.hostname, message.token, contentContext) })
+        return
+      }
+      const popupContext = isExtensionPageSender(sender) ? await activeTabWebContext() : null
+      sendResponse(popupContext
+        ? { ok: true, data: await addIgnoredSite(popupContext.hostname) }
+        : contextError())
       return
     }
     if (message?.type === 'MYPWDMG_REMOVE_IGNORED_SITE') {
-      sendResponse({ ok: true, data: await removeIgnoredSite(message.hostname || '') })
+      sendResponse(isExtensionPageSender(sender)
+        ? { ok: true, data: await removeIgnoredSite(message.hostname || '') }
+        : contextError())
       return
     }
     if (message?.type === 'MYPWDMG_DISMISS_CAPTURE') {
-      sendResponse(dismissPreparedCapture(message.token))
+      sendResponse(dismissPreparedCapture(message.token, senderWebContext(sender)))
       return
     }
     if (message?.type === 'MYPWDMG_LIST_SAVE_TARGETS') {
@@ -613,6 +805,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return
     }
     sendResponse({ ok: false, code: 'UNKNOWN_MESSAGE', message: 'Unknown extension message.' })
-  })()
+  })().catch((error) => {
+    sendResponse({ ok: false, code: 'EXTENSION_INTERNAL_ERROR', message: String(error?.message || error) })
+  })
   return true
 })

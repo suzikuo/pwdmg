@@ -40,6 +40,7 @@
 *.backup.json
 
 # Signing/secrets
+/.update-signing/
 *.jks
 *.keystore
 !/android/app/debug.keystore

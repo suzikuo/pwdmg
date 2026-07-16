@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import shutil
 import time
@@ -8,9 +9,21 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from .crypto import VaultCryptoError, VaultKey, decrypt_payload, decrypt_payload_with_key, encrypt_payload, encrypt_payload_with_key
-from .domain import domain_matches, find_entry, flatten_entries, normalize_domain
-from .legacy import convert_legacy_cards, load_legacy_cards
+from .crypto import (
+    MAX_REVISION,
+    VaultCryptoError,
+    VaultKey,
+    decrypt_payload,
+    decrypt_payload_with_key,
+    encrypt_payload,
+    encrypt_payload_with_key,
+    envelope_revision,
+    validate_envelope,
+    validate_revision,
+)
+from .domain import domain_matches, find_entry, normalize_domain
+from .file_lock import FileLockTimeoutError, exclusive_file_lock
+from .legacy import legacy_file_digest, migrate_legacy_file
 from .paths import LEGACY_LOCAL_STORAGE_FILE, LOCAL_BACKUP_DIR, VAULT_FILE, ensure_app_dir
 from .totp import generate_totp
 from .vault_index import VaultIndex
@@ -26,15 +39,22 @@ CAPTURE_ACCOUNT_KINDS = {"generic", "username", "email", "phone"}
 ENTRY_STATUSES = {"active", "disabled", "trashed"}
 MAX_CAPTURE_TEXT_LENGTH = 512
 MAX_CAPTURE_PASSWORD_LENGTH = 4096
+MAX_VAULT_ENVELOPE_BYTES = 24 * 1024 * 1024
+VAULT_LOCK_TIMEOUT_SECONDS = 5.0
 
 
 class VaultLockedError(Exception):
     pass
 
 
+class VaultConflictError(Exception):
+    pass
+
+
 def default_payload(entries: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     return {
         "version": 1,
+        "revision": 1,
         "entries": entries or [],
         "settings": {
             "oss": {
@@ -61,6 +81,7 @@ class VaultService:
     ) -> None:
         ensure_app_dir()
         self.vault_path = vault_path or VAULT_FILE
+        self.vault_lock_path = self.vault_path.with_name(f"{self.vault_path.name}.lock")
         self.backup_dir = LOCAL_BACKUP_DIR if vault_path is None else self.vault_path.parent / "backups"
         self.legacy_path = legacy_path or LEGACY_LOCAL_STORAGE_FILE
         self.session_seconds = session_seconds
@@ -69,7 +90,7 @@ class VaultService:
         self._index: VaultIndex | None = None
         self._passwordless = False
         self._expires_at = 0.0
-        self._vault_mtime_ns = 0
+        self._vault_file_signature = (0, 0, 0)
 
     def state(self) -> Dict[str, Any]:
         return {
@@ -92,17 +113,42 @@ class VaultService:
     def read_vault_envelope(self) -> str:
         if not self.vault_path.exists():
             raise FileNotFoundError("Vault does not exist")
-        return self.vault_path.read_text(encoding="utf-8")
+        return self._read_envelope_text()
 
-    def write_vault_envelope(self, envelope_text: str, *, protect_backup: bool = False) -> Dict[str, Any]:
+    def write_vault_envelope(
+        self,
+        envelope_text: str,
+        *,
+        protect_backup: bool = False,
+        expected_revision: int | None = None,
+    ) -> Dict[str, Any]:
         envelope = self._validate_backup_envelope(envelope_text)
-        backup_path = self._backup_current_vault() if protect_backup else None
-        self.vault_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_envelope(envelope)
+        incoming_revision = envelope_revision(envelope)
+        backup_path = None
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            current_envelope = self._read_envelope() if self.vault_path.exists() else None
+            current_revision = envelope_revision(current_envelope) if current_envelope else 0
+            if expected_revision is not None and validate_revision(expected_revision) != current_revision:
+                raise VaultConflictError(
+                    f"Vault revision conflict: expected {expected_revision}, current {current_revision}"
+                )
+            if (
+                current_envelope is not None
+                and not protect_backup
+                and "revision" in envelope
+                and incoming_revision != current_revision + 1
+            ):
+                raise VaultConflictError(
+                    f"Vault revision conflict: next revision must be {current_revision + 1}"
+                )
+            backup_path = self._backup_current_vault() if protect_backup else None
+            self.vault_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_envelope_unlocked(envelope)
         self.lock()
         return {
             "vaultPath": str(self.vault_path),
             "backupPath": str(backup_path) if backup_path else "",
+            "revision": incoming_revision,
         }
 
     def read_legacy_local_storage(self) -> str:
@@ -110,29 +156,103 @@ class VaultService:
             return "{}"
         return self.legacy_path.read_text(encoding="utf-8")
 
+    def cleanup_legacy_local_storage(
+        self,
+        expected_digest: str,
+        expected_vault_digest: str | None = None,
+    ) -> Dict[str, Any]:
+        normalized_digest = self._validate_sha256_digest(
+            expected_digest,
+            "legacy source",
+        )
+        normalized_vault_digest = (
+            self._validate_sha256_digest(expected_vault_digest, "vault")
+            if expected_vault_digest is not None
+            else ""
+        )
+
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            if not self.vault_path.exists():
+                raise FileNotFoundError("Vault does not exist")
+            vault_bytes = self.vault_path.read_bytes()
+            if len(vault_bytes) > MAX_VAULT_ENVELOPE_BYTES:
+                raise ValueError("Vault envelope is too large")
+            current_vault_digest = hashlib.sha256(vault_bytes).hexdigest()
+            if normalized_vault_digest and current_vault_digest != normalized_vault_digest:
+                raise VaultConflictError("Vault changed after migration verification")
+            try:
+                persisted_envelope = validate_envelope(json.loads(vault_bytes.decode("utf-8")))
+            except (UnicodeDecodeError, json.JSONDecodeError, VaultCryptoError) as exc:
+                raise ValueError("Vault envelope is invalid") from exc
+            if envelope_revision(persisted_envelope) < 1:
+                raise ValueError("Vault revision is invalid")
+            if not self.legacy_path.exists():
+                return {"removed": False, "sourceDigest": normalized_digest}
+            current_digest = legacy_file_digest(self.legacy_path)
+            if current_digest != normalized_digest:
+                raise VaultConflictError("Legacy storage changed after migration")
+            self.legacy_path.unlink()
+        return {
+            "removed": True,
+            "sourceDigest": normalized_digest,
+            "vaultDigest": current_vault_digest,
+        }
+
+    def _validate_sha256_digest(self, value: Any, label: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if len(normalized) != 64 or any(ch not in "0123456789abcdef" for ch in normalized):
+            raise ValueError(f"A valid {label} digest is required")
+        return normalized
+
     def create_vault(self, password: str, *, import_legacy: bool = True) -> Dict[str, Any]:
-        if self.vault_path.exists():
-            raise FileExistsError("Vault already exists; unlock it instead")
         entries: List[Dict[str, Any]] = []
-        migrated = 0
+        migration = {
+            "sourcePath": str(self.legacy_path),
+            "sourceExists": self.legacy_path.exists(),
+            "sourceDigest": "",
+            "encodedItems": 0,
+            "decodedItems": 0,
+            "migrated": 0,
+            "skipped": 0,
+            "failureCount": 0,
+            "failures": [],
+        }
         if import_legacy:
-            legacy_cards = load_legacy_cards(self.legacy_path)
-            entries = convert_legacy_cards(legacy_cards)
-            migrated = len(flatten_entries(entries))
+            entries, migration = migrate_legacy_file(self.legacy_path)
         payload = default_payload(entries)
         self._write_new_envelope(password, payload)
-        return {"vault": copy.deepcopy(payload), "migrated": migrated}
+        return {
+            "vault": copy.deepcopy(self._payload),
+            "migrated": int(migration.get("migrated") or 0),
+            "migration": migration,
+        }
 
     def unlock(self, password: str) -> Dict[str, Any]:
-        envelope = self._read_envelope()
-        payload, key = decrypt_payload(password, envelope)
-        self._set_payload(self._normalize_payload(payload))
-        self._key = key
-        self._passwordless = password == ""
-        self._vault_mtime_ns = self._current_vault_mtime_ns()
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            envelope = self._read_envelope()
+            payload, key = decrypt_payload(password, envelope)
+            normalized = self._normalize_payload(payload)
+            original_revision = validate_revision(payload.get("revision", 0))
+            needs_rewrite = (
+                original_revision == 0
+                or self._entry_id_sequence(payload.get("entries") or [])
+                != self._entry_id_sequence(normalized["entries"])
+                or envelope.get("revision") != normalized["revision"]
+                or (password == "" and envelope.get("passwordless") is not True)
+            )
+            if needs_rewrite:
+                normalized["revision"] = 1 if original_revision == 0 else original_revision + 1
+                if normalized["revision"] > MAX_REVISION:
+                    raise VaultConflictError("Vault revision limit has been reached")
+                normalized["updatedAt"] = int(time.time())
+                repaired_envelope = encrypt_payload_with_key(key, normalized)
+                repaired_envelope["passwordless"] = password == ""
+                self._write_envelope_unlocked(repaired_envelope)
+            self._set_payload(normalized)
+            self._key = key
+            self._passwordless = password == ""
+            self._vault_file_signature = self._current_vault_file_signature()
         self._refresh_session()
-        if password == "" and envelope.get("passwordless") is not True:
-            self._save_current()
         return copy.deepcopy(self._payload)
 
     def lock(self) -> None:
@@ -141,30 +261,57 @@ class VaultService:
         self._index = None
         self._passwordless = False
         self._expires_at = 0.0
-        self._vault_mtime_ns = 0
+        self._vault_file_signature = (0, 0, 0)
 
     def get_vault(self) -> Dict[str, Any]:
         return copy.deepcopy(self._require_payload())
 
-    def save_vault(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        self._require_payload()
+    def save_vault(
+        self,
+        payload: Dict[str, Any],
+        *,
+        expected_revision: int | None = None,
+    ) -> Dict[str, Any]:
+        current = self._require_payload()
         if not self._key:
             raise VaultLockedError("Vault is locked")
+        if expected_revision is None:
+            # Legacy callers did not preserve revision. Explicit expected_revision
+            # enables strict CAS while the one-argument API keeps its old behavior.
+            expected_revision = validate_revision(current["revision"])
+        elif isinstance(payload, dict) and "revision" in payload:
+            payload_revision = validate_revision(payload["revision"])
+            if payload_revision != validate_revision(expected_revision):
+                raise VaultConflictError(
+                    f"Payload revision {payload_revision} does not match expected revision {expected_revision}"
+                )
         normalized = self._normalize_payload(payload)
-        normalized["updatedAt"] = int(time.time())
-        self._set_payload(normalized)
-        self._save_current()
+        saved = self._persist_payload_cas(normalized, validate_revision(expected_revision))
         self._refresh_session()
-        return copy.deepcopy(normalized)
+        return copy.deepcopy(saved)
 
     def change_password(self, new_password: str) -> Dict[str, Any]:
         payload = copy.deepcopy(self._require_payload())
-        envelope, key = encrypt_payload(new_password or "", payload)
-        self._write_envelope(envelope)
+        expected_revision = validate_revision(payload["revision"])
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            current_payload = self._normalize_payload(
+                decrypt_payload_with_key(self._key, self._read_envelope())
+            )
+            current_revision = validate_revision(current_payload["revision"])
+            if current_revision != expected_revision:
+                raise VaultConflictError(
+                    f"Vault revision conflict: expected {expected_revision}, current {current_revision}"
+                )
+            if current_revision >= MAX_REVISION:
+                raise VaultConflictError("Vault revision limit has been reached")
+            payload["revision"] = current_revision + 1
+            payload["updatedAt"] = int(time.time())
+            envelope, key = encrypt_payload(new_password or "", payload)
+            self._write_envelope_unlocked(envelope)
         self._set_payload(payload)
         self._key = key
         self._passwordless = new_password == ""
-        self._vault_mtime_ns = self._current_vault_mtime_ns()
+        self._vault_file_signature = self._current_vault_file_signature()
         self._refresh_session()
         return self.state()
 
@@ -174,21 +321,22 @@ class VaultService:
             raise FileNotFoundError("Vault does not exist")
         self._refresh_session()
         return {
-            "content": self.vault_path.read_text(encoding="utf-8"),
+            "content": self._read_envelope_text(),
             "vaultPath": str(self.vault_path),
             "updatedAt": int(self.vault_path.stat().st_mtime),
         }
 
     def import_backup(self, envelope_text: str) -> Dict[str, Any]:
-        self._require_payload()
-        envelope = self._validate_backup_envelope(envelope_text)
-        backup_path = self._backup_current_vault()
-        self._write_envelope(envelope)
-        self.lock()
+        payload = self._require_payload()
+        result = self.write_vault_envelope(
+            envelope_text,
+            protect_backup=True,
+            expected_revision=validate_revision(payload["revision"]),
+        )
         return {
             "state": self.state(),
-            "backupPath": str(backup_path) if backup_path else "",
-            "vaultPath": str(self.vault_path),
+            "backupPath": result["backupPath"],
+            "vaultPath": result["vaultPath"],
         }
 
     def query_matches(self, hostname: str) -> List[Dict[str, Any]]:
@@ -212,7 +360,10 @@ class VaultService:
             "totp": "",
         }
         if entry.get("totpSecret"):
-            result["totp"] = generate_totp(entry["totpSecret"])
+            try:
+                result["totp"] = generate_totp(entry["totpSecret"])
+            except (TypeError, ValueError):
+                result["totp"] = ""
         self._refresh_session()
         return result
 
@@ -248,20 +399,25 @@ class VaultService:
         parentId: str = "",
         updateEntryId: str = "",
     ) -> Dict[str, Any]:
-        payload = self._require_payload()
+        current_payload = self._require_payload()
+        expected_revision = validate_revision(current_payload["revision"])
+        payload = copy.deepcopy(current_payload)
+        working_index = VaultIndex.build(payload.get("entries") or [])
         normalized = self._normalize_capture(capture)
         if not normalized["password"]:
             raise ValueError("Captured password is empty")
 
         if updateEntryId:
-            entry = self._require_index().get_login(updateEntryId)
+            entry = working_index.get_login(updateEntryId)
             if not entry or entry.get("kind") != "login":
                 raise KeyError("Entry not found")
             self._apply_capture_update(entry, normalized)
             action = "updated"
         else:
             entry = self._entry_from_capture(normalized)
-            target = self._find_folder(payload.get("entries") or [], parentId)
+            target = find_entry(payload.get("entries") or [], parentId) if parentId else None
+            if target and (target.get("kind") != "folder" or target.get("status", "active") != "active"):
+                target = None
             if parentId and target is None:
                 raise KeyError("Folder not found")
             if target is None:
@@ -270,11 +426,10 @@ class VaultService:
                 target.setdefault("children", []).insert(0, entry)
             action = "created"
 
-        payload["updatedAt"] = int(time.time())
-        self._set_payload(self._normalize_payload(payload))
-        self._save_current()
+        saved_payload = self._persist_payload_cas(payload, expected_revision)
         self._refresh_session()
-        saved = self._require_index().get_entry(entry.get("id")) or entry
+        saved_index = VaultIndex.build(saved_payload.get("entries") or [])
+        saved = saved_index.get_entry(entry.get("id")) or entry
         return {
             "action": action,
             "entry": self._entry_summary(saved),
@@ -294,23 +449,50 @@ class VaultService:
     def _write_new_envelope(self, password: str, payload: Dict[str, Any]) -> None:
         normalized = self._normalize_payload(payload)
         envelope, key = encrypt_payload(password, normalized)
-        self._write_envelope(envelope)
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            if self.vault_path.exists():
+                raise FileExistsError("Vault already exists; unlock it instead")
+            self._write_envelope_unlocked(envelope)
         self._set_payload(normalized)
         self._key = key
         self._passwordless = password == ""
-        self._vault_mtime_ns = self._current_vault_mtime_ns()
+        self._vault_file_signature = self._current_vault_file_signature()
         self._refresh_session()
 
-    def _save_current(self) -> None:
-        if self._payload is None or self._key is None:
+    def _persist_payload_cas(
+        self,
+        payload: Dict[str, Any],
+        expected_revision: int,
+    ) -> Dict[str, Any]:
+        if self._key is None:
             raise VaultLockedError("Vault is locked")
-        envelope = encrypt_payload_with_key(self._key, self._payload)
-        envelope["passwordless"] = self._passwordless
-        self._write_envelope(envelope)
-        self._vault_mtime_ns = self._current_vault_mtime_ns()
+        expected_revision = validate_revision(expected_revision)
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            persisted = self._normalize_payload(
+                decrypt_payload_with_key(self._key, self._read_envelope())
+            )
+            current_revision = validate_revision(persisted["revision"])
+            if current_revision != expected_revision:
+                raise VaultConflictError(
+                    f"Vault revision conflict: expected {expected_revision}, current {current_revision}"
+                )
+            if current_revision >= MAX_REVISION:
+                raise VaultConflictError("Vault revision limit has been reached")
+            normalized = self._normalize_payload(payload)
+            normalized["revision"] = current_revision + 1
+            normalized["updatedAt"] = int(time.time())
+            envelope = encrypt_payload_with_key(self._key, normalized)
+            envelope["passwordless"] = self._passwordless
+            self._write_envelope_unlocked(envelope)
+        self._set_payload(normalized)
+        self._vault_file_signature = self._current_vault_file_signature()
+        return normalized
 
-    def _write_envelope(self, envelope: Dict[str, Any]) -> None:
+    def _write_envelope_unlocked(self, envelope: Dict[str, Any]) -> None:
+        validate_envelope(envelope)
         text = json.dumps(envelope, ensure_ascii=False, indent=2)
+        if len(text.encode("utf-8")) > MAX_VAULT_ENVELOPE_BYTES:
+            raise VaultCryptoError("Vault envelope is too large")
         self._write_text_atomic(self.vault_path, text)
 
     def _write_text_atomic(self, path: Path, content: str) -> None:
@@ -329,14 +511,28 @@ class VaultService:
     def _read_envelope(self) -> Dict[str, Any]:
         if not self.vault_path.exists():
             raise FileNotFoundError("Vault does not exist")
-        return json.loads(self.vault_path.read_text(encoding="utf-8"))
+        try:
+            envelope = json.loads(self._read_envelope_text())
+        except json.JSONDecodeError as exc:
+            raise VaultCryptoError("Vault file is malformed") from exc
+        return validate_envelope(envelope)
+
+    def _read_envelope_text(self) -> str:
+        if not self.vault_path.exists():
+            raise FileNotFoundError("Vault does not exist")
+        if self.vault_path.stat().st_size > MAX_VAULT_ENVELOPE_BYTES:
+            raise VaultCryptoError("Vault envelope is too large")
+        text = self.vault_path.read_text(encoding="utf-8")
+        if len(text.encode("utf-8")) > MAX_VAULT_ENVELOPE_BYTES:
+            raise VaultCryptoError("Vault envelope is too large")
+        return text
 
     def _is_passwordless_vault(self) -> bool:
         if not self.vault_path.exists():
             return False
         try:
             envelope = self._read_envelope()
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, VaultCryptoError):
             return False
         return envelope.get("passwordless") is True
 
@@ -376,20 +572,25 @@ class VaultService:
         if not self.vault_path.exists():
             self.lock()
             raise FileNotFoundError("Vault does not exist")
-        current_mtime_ns = self._current_vault_mtime_ns()
-        if self._vault_mtime_ns and current_mtime_ns <= self._vault_mtime_ns:
+        current_signature = self._current_vault_file_signature()
+        if self._vault_file_signature and current_signature == self._vault_file_signature:
             return
         if not self._key:
             return
         payload = decrypt_payload_with_key(self._key, self._read_envelope())
         self._set_payload(self._normalize_payload(payload))
-        self._vault_mtime_ns = current_mtime_ns
+        self._vault_file_signature = current_signature
 
-    def _current_vault_mtime_ns(self) -> int:
+    def _current_vault_file_signature(self) -> tuple[int, int, int]:
         try:
-            return self.vault_path.stat().st_mtime_ns
+            stat = self.vault_path.stat()
+            return (
+                stat.st_mtime_ns,
+                stat.st_size,
+                int(getattr(stat, "st_ino", 0)),
+            )
         except OSError:
-            return 0
+            return (0, 0, 0)
 
     def _is_unlocked(self) -> bool:
         if self._payload is None or self._key is None:
@@ -403,10 +604,20 @@ class VaultService:
             self._expires_at = time.time() + self.session_seconds
 
     def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Vault payload must be an object")
+        entries = payload.get("entries") or []
+        if not isinstance(entries, list):
+            raise ValueError("Vault entries must be an array")
+        settings = payload.get("settings") or default_payload()["settings"]
+        if not isinstance(settings, dict):
+            raise ValueError("Vault settings must be an object")
+        revision = validate_revision(payload["revision"]) if "revision" in payload else 1
         normalized = {
             "version": 1,
-            "entries": self._normalize_entries(payload.get("entries") or []),
-            "settings": payload.get("settings") or default_payload()["settings"],
+            "revision": max(1, revision),
+            "entries": self._normalize_entries(entries, set(), ()),
+            "settings": copy.deepcopy(settings),
             "updatedAt": int(payload.get("updatedAt") or time.time()),
         }
         normalized.setdefault("settings", {})
@@ -417,36 +628,89 @@ class VaultService:
         }
         return normalized
 
-    def _normalize_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [self._normalize_entry(entry) for entry in entries if entry]
+    def _entry_id_sequence(self, entries: List[Dict[str, Any]]) -> List[str]:
+        result: List[str] = []
+        for entry in entries:
+            if not entry or not isinstance(entry, dict):
+                continue
+            result.append(str(entry.get("id") or ""))
+            children = entry.get("children") or []
+            if isinstance(children, list):
+                result.extend(self._entry_id_sequence(children))
+        return result
 
-    def _normalize_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_entries(
+        self,
+        entries: List[Dict[str, Any]],
+        seen_ids: set[str],
+        parent_path: tuple[int, ...],
+    ) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for index, entry in enumerate(entries):
+            if not entry:
+                continue
+            if not isinstance(entry, dict):
+                raise ValueError("Vault entry must be an object")
+            path = (*parent_path, index)
+            normalized.append(self._normalize_entry(entry, seen_ids, path))
+        return normalized
+
+    def _normalize_entry(
+        self,
+        entry: Dict[str, Any],
+        seen_ids: set[str],
+        path: tuple[int, ...],
+    ) -> Dict[str, Any]:
         kind = entry.get("kind") if entry.get("kind") in {"login", "folder"} else "login"
+        original_id = str(entry.get("id") or "")
+        if not original_id:
+            original_id = "entry-missing-" + "-".join(str(index) for index in path)
+        entry_id = original_id
+        duplicate_index = 2
+        while entry_id in seen_ids:
+            entry_id = f"{original_id}-duplicate-{duplicate_index}"
+            duplicate_index += 1
+        seen_ids.add(entry_id)
+        raw_domains = entry.get("domains") or []
+        if not isinstance(raw_domains, list):
+            raise ValueError("Vault entry domains must be an array")
+        domains: List[str] = []
+        for raw_domain in raw_domains:
+            domain = normalize_domain(str(raw_domain or ""))
+            if domain and domain not in domains:
+                domains.append(domain)
         normalized = {
-            "id": entry.get("id") or str(uuid.uuid4()),
+            "id": entry_id,
             "kind": kind,
-            "title": entry.get("title") or "Untitled",
+            "title": str(entry.get("title") or "Untitled"),
             "status": self._normalize_entry_status(entry.get("status")),
-            "statusReason": entry.get("statusReason") or "",
+            "statusReason": str(entry.get("statusReason") or ""),
             "statusUpdatedAt": int(entry.get("statusUpdatedAt") or 0),
             "deletedAt": int(entry.get("deletedAt") or 0),
-            "domains": [normalize_domain(d) for d in entry.get("domains", []) if normalize_domain(d)],
+            "domains": domains,
         }
         if kind == "folder":
-            normalized["children"] = self._normalize_entries(entry.get("children") or [])
+            children = entry.get("children") or []
+            if not isinstance(children, list):
+                raise ValueError("Vault entry children must be an array")
+            normalized["children"] = self._normalize_entries(
+                children,
+                seen_ids,
+                path,
+            )
         else:
             normalized.update(
                 {
-                    "username": entry.get("username") or "",
-                    "email": entry.get("email") or "",
-                    "password": entry.get("password") or "",
-                    "phone": entry.get("phone") or "",
+                    "username": str(entry.get("username") or ""),
+                    "email": str(entry.get("email") or ""),
+                    "password": str(entry.get("password") or ""),
+                    "phone": str(entry.get("phone") or ""),
                     "loginAccountSource": self._normalize_login_account_source(
                         entry.get("loginAccountSource")
                     ),
-                    "note": entry.get("note") or "",
-                    "totpSecret": entry.get("totpSecret") or "",
-                    "history": entry.get("history") if isinstance(entry.get("history"), list) else [],
+                    "note": str(entry.get("note") or ""),
+                    "totpSecret": str(entry.get("totpSecret") or ""),
+                    "history": copy.deepcopy(entry.get("history")) if isinstance(entry.get("history"), list) else [],
                     "children": [],
                 }
             )
@@ -484,7 +748,11 @@ class VaultService:
                 else:
                     username = account_value
 
-        password = self._clean_capture_text(capture.get("password"), MAX_CAPTURE_PASSWORD_LENGTH)
+        password = self._clean_capture_text(
+            capture.get("password"),
+            MAX_CAPTURE_PASSWORD_LENGTH,
+            strip_whitespace=False,
+        )
         login_account_source = account_kind if account_kind in LOGIN_ACCOUNT_SOURCES else "auto"
         account_label = username or email or phone or account_value
         return {
@@ -501,11 +769,21 @@ class VaultService:
             "accountEdited": bool(capture.get("accountEdited")),
         }
 
-    def _clean_capture_text(self, value: Any, max_length: int = MAX_CAPTURE_TEXT_LENGTH) -> str:
+    def _clean_capture_text(
+        self,
+        value: Any,
+        max_length: int = MAX_CAPTURE_TEXT_LENGTH,
+        *,
+        strip_whitespace: bool = True,
+    ) -> str:
         if value is None:
             return ""
-        text = str(value).replace("\x00", "").strip()
-        return text[:max_length]
+        text = str(value).replace("\x00", "")
+        if strip_whitespace:
+            text = text.strip()
+        if len(text) > max_length:
+            raise ValueError(f"Captured value exceeds the {max_length}-character limit")
+        return text
 
     def _looks_like_email(self, value: str) -> bool:
         return "@" in value and "." in value.rsplit("@", 1)[-1]
@@ -688,25 +966,28 @@ class VaultService:
     def _validate_backup_envelope(self, envelope_text: str) -> Dict[str, Any]:
         if not envelope_text or not envelope_text.strip():
             raise ValueError("Backup content is empty")
+        if len(envelope_text) > MAX_VAULT_ENVELOPE_BYTES or len(envelope_text.encode("utf-8")) > MAX_VAULT_ENVELOPE_BYTES:
+            raise ValueError("Backup content is too large")
         try:
             envelope = json.loads(envelope_text)
         except json.JSONDecodeError as exc:
             raise ValueError("Backup content is not valid JSON") from exc
         if not isinstance(envelope, dict):
             raise ValueError("Backup content is not a vault envelope")
-        if envelope.get("format") != "mypwdmg-vault":
-            raise ValueError("Backup vault format is not supported")
-        for field in ("version", "cipher", "kdf", "nonce", "ciphertext"):
-            if field not in envelope:
-                raise ValueError("Backup vault file is incomplete")
-        return envelope
+        try:
+            return validate_envelope(envelope)
+        except VaultCryptoError as exc:
+            raise ValueError(str(exc)) from exc
 
     def _backup_current_vault(self) -> Path | None:
         if not self.vault_path.exists():
             return None
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_path = self.backup_dir / f"{LOCAL_IMPORT_BACKUP_PREFIX}{timestamp}{LOCAL_IMPORT_BACKUP_SUFFIX}"
+        unique_suffix = f"{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+        backup_path = self.backup_dir / (
+            f"{LOCAL_IMPORT_BACKUP_PREFIX}{timestamp}-{unique_suffix}{LOCAL_IMPORT_BACKUP_SUFFIX}"
+        )
         shutil.copy2(self.vault_path, backup_path)
         self._prune_local_import_backups()
         return backup_path
@@ -733,7 +1014,11 @@ def call_result(fn):
         return {"ok": True, "data": fn()}
     except VaultLockedError as exc:
         return {"ok": False, "code": "LOCKED", "message": str(exc)}
+    except (VaultConflictError, FileLockTimeoutError) as exc:
+        return {"ok": False, "code": "CONFLICT", "message": str(exc)}
     except VaultCryptoError as exc:
         return {"ok": False, "code": "BAD_PASSWORD", "message": str(exc)}
+    except ValueError as exc:
+        return {"ok": False, "code": "INVALID_INPUT", "message": str(exc)}
     except Exception as exc:
         return {"ok": False, "code": "ERROR", "message": str(exc)}

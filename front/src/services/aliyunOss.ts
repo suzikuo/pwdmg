@@ -8,11 +8,16 @@ export const APIResponseStatus = {
   QuotaExceeded: 5
 } as const
 
+export const MAX_OSS_OBJECT_BYTES = 16 * 1024 * 1024
+
 export type APIResponseStatusValue = (typeof APIResponseStatus)[keyof typeof APIResponseStatus]
 
 export interface OSSApiResponse<T = string | boolean | Blob> {
   status: APIResponseStatusValue
   content: T
+  etag?: string
+  versionId?: string
+  revision?: string
 }
 
 export interface OSSFileInfo {
@@ -20,6 +25,8 @@ export interface OSSFileInfo {
   exists: boolean
   size: number
   lastModified: string
+  etag?: string
+  versionId?: string
 }
 
 export interface OssClientSettings {
@@ -78,8 +85,15 @@ export class AliyunOSSAPI {
     return bytesToBase64(new Uint8Array(signature))
   }
 
-  async uploadFile(fileName: string, fileContent: string, mimeType = 'application/json'): Promise<OSSApiResponse> {
+  async uploadFile(
+    fileName: string,
+    fileContent: string,
+    mimeType = 'application/json'
+  ): Promise<OSSApiResponse> {
     if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
+    if (new TextEncoder().encode(fileContent).byteLength > MAX_OSS_OBJECT_BYTES) {
+      return { status: APIResponseStatus.Fail, content: '云端保险库超过 16 MiB 安全上限' }
+    }
 
     try {
       const objectName = normalizeObjectName(fileName)
@@ -87,29 +101,41 @@ export class AliyunOSSAPI {
       const resource = `/${this.bucketName}/${objectName}`
       const ossHeaders = `x-oss-date:${date}`
       const signature = await this.generateSignature('PUT', '', mimeType, date, ossHeaders, resource)
+      const headers = {
+        'x-oss-date': date,
+        'Content-Type': mimeType,
+        Authorization: `OSS ${this.accessKeyId}:${signature}`
+      }
       const response = await fetch(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'PUT',
-        headers: {
-          'x-oss-date': date,
-          'Content-Type': mimeType,
-          Authorization: `OSS ${this.accessKeyId}:${signature}`
-        },
+        headers,
         body: fileContent
       })
 
-      if (response.ok) return { status: APIResponseStatus.Success, content: '上传成功' }
+      if (response.ok) {
+        return {
+          status: APIResponseStatus.Success,
+          content: '上传成功',
+          etag: response.headers.get('ETag') || '',
+          versionId: response.headers.get('x-oss-version-id') || ''
+        }
+      }
 
       const errorText = await response.text()
       if (response.status === 403 && errorText.includes('QuotaExceeded')) {
         return { status: APIResponseStatus.QuotaExceeded, content: '存储空间配额已满' }
       }
-      return { status: APIResponseStatus.Fail, content: `上传失败: ${response.status} ${errorText}` }
+      return { status: APIResponseStatus.Fail, content: formatOssHttpError('上传', response.status, errorText) }
     } catch (error) {
       return { status: APIResponseStatus.Fail, content: formatOssError(error) }
     }
   }
 
-  async downloadFile(fileName: string, fileType = 'text/plain'): Promise<OSSApiResponse<string | Blob>> {
+  async downloadFile(
+    fileName: string,
+    fileType = 'text/plain',
+    maxBytes = MAX_OSS_OBJECT_BYTES
+  ): Promise<OSSApiResponse<string | Blob>> {
     if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
 
     try {
@@ -127,13 +153,23 @@ export class AliyunOSSAPI {
       })
 
       if (response.ok) {
-        const content = fileType === 'text/plain' ? await response.text() : await response.blob()
-        return { status: APIResponseStatus.Success, content }
+        const contentLength = Number(response.headers.get('Content-Length') || 0)
+        if (contentLength > maxBytes) throw new Error(`云端文件超过 ${Math.round(maxBytes / 1024 / 1024)} MiB 安全上限`)
+        const content = fileType === 'text/plain'
+          ? await readTextResponseLimited(response, maxBytes)
+          : await readBlobResponseLimited(response, maxBytes)
+        return {
+          status: APIResponseStatus.Success,
+          content,
+          etag: response.headers.get('ETag') || '',
+          versionId: response.headers.get('x-oss-version-id') || '',
+          revision: typeof content === 'string' ? await sha256Text(content) : ''
+        }
       }
       if (response.status === 404) return { status: APIResponseStatus.FileNotExist, content: '文件未找到' }
 
       const errorText = await response.text()
-      return { status: APIResponseStatus.Fail, content: `下载失败: ${response.status} ${errorText}` }
+      return { status: APIResponseStatus.Fail, content: formatOssHttpError('下载', response.status, errorText) }
     } catch (error) {
       return { status: APIResponseStatus.Fail, content: formatOssError(error) }
     }
@@ -171,7 +207,9 @@ export class AliyunOSSAPI {
             name: objectName,
             exists: true,
             size: Number(response.headers.get('Content-Length') || 0),
-            lastModified: response.headers.get('Last-Modified') || ''
+            lastModified: response.headers.get('Last-Modified') || '',
+            etag: response.headers.get('ETag') || '',
+            versionId: response.headers.get('x-oss-version-id') || ''
           }
         }
       }
@@ -252,7 +290,75 @@ function bytesToBase64(bytes: Uint8Array) {
   return btoa(binary)
 }
 
+async function sha256Text(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function readTextResponseLimited(response: Response, maxBytes: number) {
+  const bytes = await readResponseBytesLimited(response, maxBytes)
+  return new TextDecoder().decode(bytes)
+}
+
+async function readBlobResponseLimited(response: Response, maxBytes: number) {
+  const bytes = await readResponseBytesLimited(response, maxBytes)
+  return new Blob([bytes], { type: response.headers.get('Content-Type') || 'application/octet-stream' })
+}
+
+async function readResponseBytesLimited(response: Response, maxBytes: number) {
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength > maxBytes) throw new Error('云端文件超过安全上限')
+    return bytes
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel()
+      throw new Error('云端文件超过安全上限')
+    }
+    chunks.push(value)
+  }
+
+  const result = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    result.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return result
+}
+
 function formatOssError(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error || '网络请求失败')
+}
+
+function formatOssHttpError(action: string, status: number, errorText: string) {
+  const details = parseOssErrorDetails(errorText)
+  const code = details.code ? ` ${details.code}` : ''
+  const message = details.message ? `: ${details.message}` : ''
+  const requestId = details.requestId ? ` (RequestId: ${details.requestId})` : ''
+  return `${action}失败: ${status}${code}${message}${requestId}`
+}
+
+function parseOssErrorDetails(errorText: string) {
+  if (!errorText.trim()) return { code: '', message: '', requestId: '' }
+  try {
+    const doc = new DOMParser().parseFromString(errorText, 'application/xml')
+    if (doc.querySelector('parsererror')) throw new Error('Invalid OSS XML response')
+    return {
+      code: doc.querySelector('Code')?.textContent?.trim() || '',
+      message: doc.querySelector('Message')?.textContent?.trim() || '',
+      requestId: doc.querySelector('RequestId')?.textContent?.trim() || ''
+    }
+  } catch {
+    return { code: '', message: errorText.trim().slice(0, 240), requestId: '' }
+  }
 }

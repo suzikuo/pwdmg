@@ -8,9 +8,9 @@ export default defineConfig(({ mode }) => {
   const plugins = [vue()]
   const packageVersion = process.env.npm_package_version || '0.0.0'
 
-  if (target === 'desktop') {
+  if (target === 'desktop' || target === 'android') {
     plugins.push({
-      name: 'desktop-file-protocol-html',
+      name: 'file-protocol-html',
       transformIndexHtml(html) {
         return html
           .replace(/<script type="module" crossorigin src="([^"]+)"><\/script>/g, '<script defer src="$1"></script>')

@@ -30,8 +30,8 @@ android {
         applicationId "com.suzikuo.mypwdmg"
         minSdk 26
         targetSdk 34
-        versionCode 243
-        versionName "2.0.43"
+        versionCode 248
+        versionName "2.0.48"
     }
 
     buildFeatures {
@@ -67,4 +67,8 @@ android {
             assets.srcDirs = ["src/main/assets", "../../front/dist/android"]
         }
     }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
 }

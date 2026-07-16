@@ -1,6 +1,6 @@
 import { emptyPluginListenerState, fail, ok } from './apiTypes'
-import { idbGet, idbSet } from './indexedDbStore'
-import { currentLegacyStorageSnapshot, hasLegacyWebData } from './legacyWeb'
+import { idbGet, idbSet, idbSetIfRevision } from './indexedDbStore'
+import { clearLegacyWebData, currentLegacyStorageSnapshot, hasLegacyWebData } from './legacyWeb'
 import type { VaultStorageAdapter } from './storageTypes'
 
 type StoredBackup = {
@@ -34,12 +34,20 @@ export const webStorageAdapter: VaultStorageAdapter = {
     if (!envelope) throw new Error('Vault does not exist')
     return JSON.stringify(envelope, null, 2)
   }),
-  writeVaultEnvelope: async (envelopeText, protectBackup = false) => guard(async () => {
+  writeVaultEnvelope: async (envelopeText, protectBackup = false, expectedRevision) => guard(async () => {
     const backupPath = protectBackup ? await backupCurrentEnvelope() : ''
-    await idbSet(VAULT_KEY, JSON.parse(envelopeText))
+    const envelope = JSON.parse(envelopeText)
+    if (expectedRevision === undefined || protectBackup) await idbSet(VAULT_KEY, envelope)
+    else await idbSetIfRevision(VAULT_KEY, envelope, expectedRevision)
     return { vaultPath: VAULT_PATH_LABEL, backupPath }
   }),
   readLegacyLocalStorage: async () => ok(JSON.stringify(currentLegacyStorageSnapshot())),
+  cleanupLegacyStorage: (expectedDigest) => guard(async () => {
+    const current = JSON.stringify(currentLegacyStorageSnapshot())
+    if (await sha256Text(current) !== expectedDigest) throw new Error('Legacy data changed during migration')
+    clearLegacyWebData()
+    return true
+  }),
   getPluginListenerState: async () => ok(emptyPluginListenerState('web-indexeddb')),
   enablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
   disablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
@@ -82,4 +90,9 @@ async function guard<T>(fn: () => Promise<T> | T) {
   } catch (error) {
     return fail('WEB_STORAGE_ERROR', error instanceof Error ? error.message : String(error))
   }
+}
+
+async function sha256Text(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }

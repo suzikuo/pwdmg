@@ -1,5 +1,6 @@
 if (!window.__mypwdmgContentScriptLoaded) {
   window.__mypwdmgContentScriptLoaded = true
+  const Security = globalThis.MyPwdMgSecurity
   const ROOT_ID = 'mypwdmg-autofill-root'
   const FIELD_ID_ATTR = 'data-mypwdmg-field-id'
   const QUERY_DEBOUNCE_MS = 300
@@ -18,8 +19,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   const EMAIL_RE = /(email|e-mail|mail|\u90ae\u7bb1)/i
   const PHONE_RE = /(phone|mobile|tel|\u624b\u673a)/i
   const USERNAME_RE = /(user|username|userid|\u7528\u6237\u540d)/i
-  const PASSWORD_RE = /(password|passwd|pwd|pass|\u5bc6\u7801)/i
-  const OTP_RE = /(otp|totp|2fa|mfa|code|verification|verify|auth|token|\u9a8c\u8bc1\u7801|\u52a8\u6001|\u4e8c\u6b21|\u5b89\u5168\u7801)/i
+  const PASSWORD_RE = /(^|[^a-z0-9])(password|passwd|pwd|passphrase|pass[\s_-]*phrase|pass)(?=$|[^a-z0-9])|\u5bc6\u7801/i
   const NON_LOGIN_SECRET_RE = /(\bapi[-_\s]*key\b|\bapi[-_\s]*secret\b|\baccess[-_\s]*key\b|\bsecret[-_\s]*key\b|\bkey[-_\s]*secret\b|\bclient[-_\s]*secret\b|\bpersonal[-_\s]*access[-_\s]*token\b|\baccess[-_\s]*token\b|\brefresh[-_\s]*token\b|\bbearer\b|\bprivate[-_\s]*key\b|\bpublic[-_\s]*key\b|\bwebhook\b|\bbase[-_\s]*url\b|\bendpoint\b|\bopenai\b|\banthropic\b|\bgemini\b|\bmodel\b|\u63a5\u53e3|\u5bc6\u94a5|\u4ee4\u724c|\u6a21\u578b)/i
   const MANUAL_SECRET_FIELD_RE = /(\bapi[-_\s]*key\b|\bapi[-_\s]*secret\b|\baccess[-_\s]*key\b|\bsecret[-_\s]*key\b|\bkey[-_\s]*secret\b|\bclient[-_\s]*secret\b|\bpersonal[-_\s]*access[-_\s]*token\b|\baccess[-_\s]*token\b|\brefresh[-_\s]*token\b|\bprivate[-_\s]*key\b|\bbearer[-_\s]*token\b|\u5bc6\u94a5|\u4ee4\u724c)/i
   const LOGIN_SCOPE_RE = /(login|log in|sign in|signin|sign up|signup|register|create account|username|email|password|\u767b\u5f55|\u767b\u9646|\u6ce8\u518c|\u7528\u6237\u540d|\u8d26\u53f7|\u90ae\u7bb1|\u5bc6\u7801)/i
@@ -35,7 +35,6 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let lastInputCapture = null
   let savePromptTimer = 0
   let pendingSave = null
-  let lastOtpAutoFillKey = ''
   let extensionContextInvalidated = false
   let suppressCaptureUntil = 0
   let panelManualMode = false
@@ -48,6 +47,9 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let manualPanelShortcut = parseShortcut(SHOW_PANEL_SHORTCUT)
   const completedSaveTokens = new Set()
   const extensionFilledPasswords = new Map()
+  let rootHost = null
+  let rootView = null
+  let entryButtonIds = new WeakMap()
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -87,14 +89,6 @@ if (!window.__mypwdmgContentScriptLoaded) {
         resolve({ ok: false, code: 'EXTENSION_MESSAGE_ERROR', message: messageText })
       }
     })
-  }
-
-  function isTopFrame() {
-    try {
-      return window.top === window
-    } catch {
-      return false
-    }
   }
 
   function parseShortcut(value) {
@@ -247,22 +241,30 @@ if (!window.__mypwdmgContentScriptLoaded) {
     return (input.getAttribute('type') || 'text').toLowerCase()
   }
 
+  function fieldSignal(input) {
+    return {
+      type: inputType(input),
+      text: fieldText(input),
+      autocomplete: input.getAttribute('autocomplete') || '',
+      inputMode: input.getAttribute('inputmode') || '',
+      pattern: input.getAttribute('pattern') || '',
+      maxLength: Number(input.getAttribute('maxlength') || 0)
+    }
+  }
+
   function isPasswordInput(input) {
-    const type = inputType(input)
     if (isNonLoginSecretInput(input)) return false
-    return type === 'password' || PASSWORD_RE.test(fieldText(input))
+    return Security.passwordEvidence(fieldSignal(input)) === 'strong'
   }
 
   function isManualPasswordInput(input) {
-    const type = inputType(input)
-    return type === 'password' || PASSWORD_RE.test(fieldText(input)) || MANUAL_SECRET_FIELD_RE.test(fieldContextText(input))
+    return Security.passwordEvidence(fieldSignal(input)) === 'strong'
+      || MANUAL_SECRET_FIELD_RE.test(fieldContextText(input))
   }
 
   function isOtpInput(input) {
     if (isNonLoginSecretInput(input)) return false
-    const text = fieldText(input)
-    const maxLength = Number(input.getAttribute('maxlength') || 0)
-    return OTP_RE.test(text) || (maxLength >= 4 && maxLength <= 8 && /code|one-time-code/i.test(text))
+    return Security.otpEvidence(fieldSignal(input)) !== 'none'
   }
 
   function isUsernameInput(input) {
@@ -294,8 +296,9 @@ if (!window.__mypwdmgContentScriptLoaded) {
     const type = inputType(input)
     const text = fieldContextText(input)
     if (!text || !NON_LOGIN_SECRET_RE.test(text)) return false
-    if (PASSWORD_RE.test(fieldText(input))) return false
-    if (OTP_RE.test(fieldText(input)) && !/(api|access|secret|key|\u5bc6\u94a5|\u63a5\u53e3)/i.test(text)) return false
+    const signal = fieldSignal(input)
+    if (PASSWORD_RE.test(fieldText(input)) || /(^|\s)(current-password|new-password)(?=\s|$)/i.test(signal.autocomplete)) return false
+    if (Security.otpEvidence(signal) === 'strong' && !/(api|access|secret|key|\u5bc6\u94a5|\u63a5\u53e3)/i.test(text)) return false
     return type === 'password' || PASSWORD_RE.test(text) || /(key|token|secret|\u5bc6\u94a5|\u4ee4\u724c)/i.test(text)
   }
 
@@ -452,17 +455,26 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function ensureRoot() {
-    let root = document.getElementById(ROOT_ID)
-    if (!root) {
-      root = document.createElement('div')
-      root.id = ROOT_ID
-      document.documentElement.appendChild(root)
-    }
-    return root
+    if (rootHost?.isConnected && rootView) return rootView
+
+    rootHost = document.createElement('div')
+    rootHost.id = ROOT_ID
+    const shadow = rootHost.attachShadow({ mode: 'closed' })
+    const stylesheet = document.createElement('link')
+    stylesheet.rel = 'stylesheet'
+    stylesheet.href = chrome.runtime.getURL('content.css')
+    rootView = document.createElement('div')
+    rootView.className = 'mypwdmg-root'
+    shadow.append(stylesheet, rootView)
+    document.documentElement.appendChild(rootHost)
+    return rootView
   }
 
   function removeRoot() {
-    document.getElementById(ROOT_ID)?.remove()
+    rootHost?.remove()
+    rootHost = null
+    rootView = null
+    entryButtonIds = new WeakMap()
     panelManualMode = false
   }
 
@@ -476,7 +488,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function isRootOpen() {
-    return Boolean(document.getElementById(ROOT_ID))
+    return Boolean(rootHost?.isConnected && rootView)
   }
 
   function isManualPanelOpen() {
@@ -493,7 +505,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function positionRoot(anchor) {
-    const root = ensureRoot()
+    ensureRoot()
+    const root = rootHost
     if (panelPinned) {
       clampPanelPosition()
       return
@@ -548,25 +561,26 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function setPanelPosition(top, right) {
-    const panel = document.querySelector(`#${ROOT_ID} .mypwdmg-panel`)
+    const panel = ensureRoot().querySelector('.mypwdmg-panel')
     const panelWidth = panel?.getBoundingClientRect().width || 286
     const panelHeight = panel?.getBoundingClientRect().height || 220
     const nextTop = Math.max(8, Math.min(top, window.innerHeight - Math.min(panelHeight, window.innerHeight - 16) - 8))
     const nextRight = Math.max(8, Math.min(right, window.innerWidth - Math.min(panelWidth, window.innerWidth - 16) - 8))
-    const root = ensureRoot()
+    const root = rootHost
     root.style.setProperty('--mypwdmg-top', `${Math.round(nextTop)}px`)
     root.style.setProperty('--mypwdmg-right', `${Math.round(nextRight)}px`)
   }
 
   function clampPanelPosition() {
-    const root = ensureRoot()
+    ensureRoot()
+    const root = rootHost
     const top = Number.parseFloat(root.style.getPropertyValue('--mypwdmg-top')) || 76
     const right = Number.parseFloat(root.style.getPropertyValue('--mypwdmg-right')) || 16
     setPanelPosition(top, right)
   }
 
   function startPanelDrag(event) {
-    if (event.button !== 0 || event.target?.closest?.('.mypwdmg-close')) return
+    if (!event.isTrusted || event.button !== 0 || event.target?.closest?.('.mypwdmg-close')) return
     const root = ensureRoot()
     const panel = root.querySelector('.mypwdmg-panel')
     const rect = panel?.getBoundingClientRect()
@@ -596,10 +610,17 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function stopPanelDrag(event) {
     if (panelDrag && event.pointerId === panelDrag.pointerId) {
-      document.querySelector(`#${ROOT_ID} .mypwdmg-panel`)?.classList.remove('is-dragging')
+      rootView?.querySelector('.mypwdmg-panel')?.classList.remove('is-dragging')
       panelDrag = null
     }
     window.removeEventListener('pointermove', dragPanel)
+  }
+
+  function addTrustedClick(element, handler) {
+    element?.addEventListener('click', (event) => {
+      if (!event.isTrusted) return
+      handler(event)
+    })
   }
 
   function renderPanel(matches, statusText = '', anchor = null, manualMode = false) {
@@ -631,10 +652,12 @@ if (!window.__mypwdmgContentScriptLoaded) {
     </div>
   `
 
-    root.querySelector('.mypwdmg-close')?.addEventListener('click', removeRoot)
+    addTrustedClick(root.querySelector('.mypwdmg-close'), removeRoot)
     root.querySelector('.mypwdmg-title')?.addEventListener('pointerdown', startPanelDrag)
-    root.querySelectorAll('.mypwdmg-entry').forEach((button) => {
-      button.addEventListener('click', () => fillEntry(button.getAttribute('data-entry-id'), panelManualMode))
+    root.querySelectorAll('.mypwdmg-entry').forEach((button, index) => {
+      const entryId = String(matches[index]?.id || '')
+      entryButtonIds.set(button, entryId)
+      addTrustedClick(button, () => fillEntry(entryButtonIds.get(button), panelManualMode, true))
     })
   }
 
@@ -642,7 +665,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     const label = accountLabel(entry)
     const domain = entry.domains?.[0] || ''
     return `
-    <button class="mypwdmg-entry" type="button" data-entry-id="${escapeAttr(entry.id)}" role="listitem">
+    <button class="mypwdmg-entry" type="button" role="listitem">
       <span class="mypwdmg-entry-main">
         <span class="mypwdmg-entry-head">
           <strong>${escapeHtml(entry.title || 'Untitled')}</strong>
@@ -730,10 +753,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
     </div>
   `
 
-    root.querySelector('.mypwdmg-close')?.addEventListener('click', dismissSavePrompt)
-    root.querySelector('[data-action="dismiss"]')?.addEventListener('click', dismissSavePrompt)
-    root.querySelector('[data-action="ignore-site"]')?.addEventListener('click', ignoreCurrentSaveSite)
-    root.querySelector('[data-action="save"]')?.addEventListener('click', savePendingCapture)
+    addTrustedClick(root.querySelector('.mypwdmg-close'), dismissSavePrompt)
+    addTrustedClick(root.querySelector('[data-action="dismiss"]'), dismissSavePrompt)
+    addTrustedClick(root.querySelector('[data-action="ignore-site"]'), ignoreCurrentSaveSite)
+    addTrustedClick(root.querySelector('[data-action="save"]'), savePendingCapture)
     root.querySelector('.mypwdmg-title')?.addEventListener('pointerdown', startPanelDrag)
   }
 
@@ -758,7 +781,6 @@ if (!window.__mypwdmgContentScriptLoaded) {
     button?.setAttribute('disabled', 'true')
     const response = await sendMessage({
       type: 'MYPWDMG_ADD_IGNORED_SITE',
-      hostname,
       token
     })
     if (!response?.ok) {
@@ -804,7 +826,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
       }
     })
     if (!response?.ok) {
-      renderPanel([], response?.message || '保存失败。', pendingSave.anchor || document.activeElement)
+      renderSavePrompt({
+        ...pendingSave,
+        notice: response?.message || '保存失败，请重试。'
+      })
       return
     }
     renderPanel([], response.data?.action === 'updated' ? '已更新。' : '已保存。', pendingSave.anchor || document.activeElement)
@@ -847,8 +872,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     lastQueryKey = key
 
     const response = await sendMessage({
-      type: 'MYPWDMG_QUERY_MATCHES',
-      hostname: location.hostname
+      type: 'MYPWDMG_QUERY_MATCHES'
     })
 
     if (!response?.ok) {
@@ -862,41 +886,44 @@ if (!window.__mypwdmgContentScriptLoaded) {
     }
 
     lastMatches = response.data || []
-    if (fields.otpOnly && fields.otpInput) {
-      const totpMatches = lastMatches.filter((entry) => entry.hasTotp)
-      if (totpMatches.length === 1) {
-        const autoFillKey = [location.hostname, fieldId(fields.otpInput), totpMatches[0].id].join('|')
-        if (autoFillKey !== lastOtpAutoFillKey) {
-          lastOtpAutoFillKey = autoFillKey
-          await fillEntry(totpMatches[0].id)
-          return
-        }
-      }
-    }
     renderPanel(lastMatches, lastMatches.length ? '' : '当前站点暂无匹配账号。', fields.anchor, manualMode)
   }
 
-  async function fillEntry(entryId, manualMode = false) {
-    if (!entryId) return
-    if (extensionContextInvalidated) return
-    if (pendingSave?.token) return
+  async function fillEntry(entryId, manualMode = false, authorizedSelection = false) {
+    if (!entryId) return { ok: false, code: 'ENTRY_REQUIRED' }
+    if (extensionContextInvalidated) return { ok: false, code: 'EXTENSION_CONTEXT_INVALIDATED' }
+    if (pendingSave?.token) return { ok: false, code: 'SAVE_PROMPT_ACTIVE' }
+    if (!authorizedSelection) return { ok: false, code: 'TRUSTED_GESTURE_REQUIRED' }
+
+    const authorization = await sendMessage({ type: 'MYPWDMG_AUTHORIZE_FILL', entryId })
+    if (!authorization?.ok || !authorization.data?.token) {
+      const fields = detectLoginFields()
+      renderPanel(lastMatches, authorization?.message || '填充授权失败，请重试。', fields?.anchor, manualMode)
+      return authorization || { ok: false, code: 'FILL_AUTH_FAILED' }
+    }
+
     suppressCaptureUntil = Date.now() + FILL_CAPTURE_SUPPRESS_MS
-    const response = await sendMessage({ type: 'MYPWDMG_GET_FILL', entryId })
+    const response = await sendMessage({
+      type: 'MYPWDMG_GET_FILL',
+      entryId,
+      authorizationToken: authorization.data.token
+    })
     if (!response?.ok || !response.data) {
       const fields = detectLoginFields()
       if (response?.code === 'PLUGIN_DISABLED' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
         removeRoot()
-        return
+        return response
       }
       renderPanel(lastMatches, response?.message || 'Failed to read entry.', fields?.anchor, manualMode)
-      return
+      return response || { ok: false, code: 'FILL_FAILED' }
     }
     if (!applyFill(response.data, manualMode)) {
       renderPanel(lastMatches, '当前焦点附近没有可填充的登录字段。', activeInput(), manualMode)
-      return
+      return { ok: false, code: 'NO_FILLABLE_FIELDS' }
     }
     suppressCaptureUntil = Date.now() + FILL_CAPTURE_SUPPRESS_MS
     removeRoot()
+    return { ok: true }
   }
 
   function applyFill(payload, manualMode = false) {
@@ -1025,7 +1052,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     const response = await sendMessage({
       type: 'MYPWDMG_PREPARE_CAPTURE',
       capture: captureInfo.capture,
-      placement: isTopFrame() ? (captureInfo.placement || promptPlacementForAnchor(captureInfo.anchor)) : null
+      placement: captureInfo.placement || promptPlacementForAnchor(captureInfo.anchor)
     })
     if (!response?.ok) {
       if (response?.code === 'LOCKED_CAPTURE_PENDING' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
@@ -1039,14 +1066,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   async function takePreparedSavePrompt() {
     if (extensionContextInvalidated) return
-    if (!isTopFrame()) return
     if (!autoSaveEnabled) return
     if (pendingSave?.token) return
     if (isCurrentSiteIgnored()) return
-    const response = await sendMessage({
-      type: 'MYPWDMG_TAKE_SAVE_PROMPT',
-      hostname: location.hostname
-    })
+    const response = await sendMessage({ type: 'MYPWDMG_TAKE_SAVE_PROMPT' })
     if (!response?.ok || !response.data?.token) return
     if (completedSaveTokens.has(response.data.token) || pendingSave?.token === response.data.token) return
     renderSavePrompt({
@@ -1056,7 +1079,6 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function scheduleTakePreparedSavePrompt(delay = 0) {
     if (extensionContextInvalidated) return
-    if (!isTopFrame()) return
     window.clearTimeout(savePromptTimer)
     const run = () => {
       savePromptTimer = 0
@@ -1070,12 +1092,14 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function handleSubmitCapture(event) {
+    if (!event.isTrusted) return
     const form = event.target?.closest?.('form') || event.target
     if (scopeLooksLikeNonLoginSecretEditor(form)) return
     scheduleSaveCapture(captureLoginFromScope(form, event.target))
   }
 
   function handleClickCapture(event) {
+    if (!event.isTrusted) return
     const target = event.target instanceof Element ? event.target : null
     if (target?.closest?.(`#${ROOT_ID}`)) return
     const control = target?.closest(ACTION_CONTROL_SELECTOR)
@@ -1103,6 +1127,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function handleEnterCapture(event) {
+    if (!event.isTrusted) return
     if (event.key !== 'Enter') return
     const target = event.target instanceof Element ? event.target : null
     if (!target?.matches?.('input')) return
@@ -1133,6 +1158,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function rememberContextMenuInput(event) {
+    if (!event.isTrusted) return
     const input = inputFromEventTarget(event.target)
     if (!input) return
     contextMenuInput = input
@@ -1173,8 +1199,20 @@ if (!window.__mypwdmgContentScriptLoaded) {
       return true
     }
     if (message?.type === 'MYPWDMG_FILL_ENTRY') {
-      fillEntry(message.entryId, Boolean(message.manual))
-        .then(() => sendResponse({ ok: true }))
+      let popupSender = false
+      try {
+        const senderUrl = new URL(sender?.url || '')
+        popupSender = sender?.id === chrome.runtime.id
+          && senderUrl.protocol === 'chrome-extension:'
+          && senderUrl.hostname === chrome.runtime.id
+          && senderUrl.pathname.endsWith('/popup.html')
+      } catch { }
+      if (!popupSender) {
+        sendResponse({ ok: false, code: 'TRUSTED_GESTURE_REQUIRED' })
+        return
+      }
+      fillEntry(message.entryId, Boolean(message.manual), true)
+        .then((response) => sendResponse(response || { ok: false, code: 'FILL_FAILED' }))
         .catch((error) => sendResponse({ ok: false, message: String(error?.message || error) }))
       return true
     }
@@ -1191,10 +1229,11 @@ if (!window.__mypwdmgContentScriptLoaded) {
     rememberInputCapture(target)
   }, true)
   document.addEventListener('keydown', (event) => {
+    if (!event.isTrusted) return
     if (handleShowPanelShortcut(event)) return
     handleEnterCapture(event)
     if (event.key !== 'Escape') return
-    if (!document.getElementById(ROOT_ID)) return
+    if (!isRootOpen()) return
     if (pendingSave?.token) {
       dismissSavePrompt()
       return

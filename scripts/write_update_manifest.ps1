@@ -10,6 +10,8 @@ param(
     [int] $AndroidVersionCode = 0,
     [string] $OutPath = ".\release\update-manifest.json",
     [string] $Notes = "",
+    [string] $PrivateKeyPath = ".\.update-signing\mypwdmg-update-private-key.pem",
+    [string] $PythonExe = "",
     [switch] $Help
 )
 
@@ -30,6 +32,8 @@ function Show-Help {
     Write-Host "  -AndroidVersionCode  Optional Android versionCode."
     Write-Host "  -OutPath      Manifest output path. Default: .\release\update-manifest.json"
     Write-Host "  -Notes        Optional release notes text."
+    Write-Host "  -PrivateKeyPath  Gitignored Ed25519 private key used to sign the manifest."
+    Write-Host "  -PythonExe    Python executable with the project dependencies installed."
     Write-Host "  -Help         Show this help."
 }
 
@@ -46,7 +50,7 @@ if (-not $AssetUrl.Trim()) {
     throw "AssetUrl is required."
 }
 
-if (-not ($AssetUrl -match '^https://')) {
+if (-not ($AssetUrl -match '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/?#]+/[^/?#]+$')) {
     throw "AssetUrl must be an HTTPS GitHub Release asset URL."
 }
 
@@ -67,18 +71,18 @@ function Get-UrlCandidates {
     return @($Result.ToArray())
 }
 
-function Assert-HttpsUrls {
+function Assert-GitHubReleaseUrls {
     param([string[]] $Urls, [string] $Label)
 
     foreach ($Url in $Urls) {
-        if (-not ($Url -match '^https://')) {
-            throw "$Label must contain only HTTPS URLs: $Url"
+        if (-not ($Url -match '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/?#]+/[^/?#]+$')) {
+            throw "$Label must contain only trusted GitHub Release asset URLs: $Url"
         }
     }
 }
 
 $WindowsUrls = Get-UrlCandidates -MirrorUrls $AssetMirrorUrls -PrimaryUrl $AssetUrl
-Assert-HttpsUrls -Urls $WindowsUrls -Label "AssetMirrorUrls"
+Assert-GitHubReleaseUrls -Urls $WindowsUrls -Label "AssetMirrorUrls"
 
 if ($AndroidPackagePath.Trim() -or $AndroidAssetUrl.Trim()) {
     if (-not $AndroidPackagePath.Trim()) {
@@ -87,11 +91,33 @@ if ($AndroidPackagePath.Trim() -or $AndroidAssetUrl.Trim()) {
     if (-not $AndroidAssetUrl.Trim()) {
         throw "AndroidAssetUrl is required when AndroidPackagePath is set."
     }
-    if (-not ($AndroidAssetUrl -match '^https://')) {
+    if (-not ($AndroidAssetUrl -match '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/[^/?#]+/[^/?#]+$')) {
         throw "AndroidAssetUrl must be an HTTPS GitHub Release asset URL."
     }
     $AndroidUrls = Get-UrlCandidates -MirrorUrls $AndroidAssetMirrorUrls -PrimaryUrl $AndroidAssetUrl
-    Assert-HttpsUrls -Urls $AndroidUrls -Label "AndroidAssetMirrorUrls"
+    Assert-GitHubReleaseUrls -Urls $AndroidUrls -Label "AndroidAssetMirrorUrls"
+}
+
+function Resolve-SigningPython {
+    param([string] $ExplicitPython, [string] $RepositoryRoot)
+
+    $Candidates = New-Object System.Collections.Generic.List[string]
+    if ($ExplicitPython.Trim()) {
+        $Candidates.Add($ExplicitPython.Trim())
+    }
+    $Candidates.Add((Join-Path $RepositoryRoot ".env\Scripts\python.exe"))
+    $Candidates.Add((Join-Path $RepositoryRoot ".venv\Scripts\python.exe"))
+    $Candidates.Add("python")
+    foreach ($Candidate in $Candidates) {
+        try {
+            & $Candidate -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey" *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return $Candidate
+            }
+        }
+        catch { }
+    }
+    throw "Python with the cryptography package was not found. Pass -PythonExe or install requirements.txt."
 }
 
 if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
@@ -101,9 +127,19 @@ if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
 $PackageFull = Resolve-Path $PackagePath
 $OutFull = [System.IO.Path]::GetFullPath($OutPath)
 $OutDir = Split-Path -Parent $OutFull
+$RootPath = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$PrivateKeyFull = if ([System.IO.Path]::IsPathRooted($PrivateKeyPath)) {
+    [System.IO.Path]::GetFullPath($PrivateKeyPath)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $RootPath $PrivateKeyPath))
+}
 
 if (-not (Test-Path -LiteralPath $OutDir)) {
     New-Item -ItemType Directory -Path $OutDir | Out-Null
+}
+if (-not (Test-Path -LiteralPath $PrivateKeyFull -PathType Leaf)) {
+    throw "Update signing private key was not found: $PrivateKeyFull. Generate it once with release_desktop.ps1 -GenerateSigningKey."
 }
 
 $Hash = Get-FileHash -LiteralPath $PackageFull -Algorithm SHA256
@@ -153,9 +189,30 @@ $Manifest = [ordered]@{
 
 $ManifestJson = $Manifest | ConvertTo-Json -Depth 8
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($OutFull, $ManifestJson, $Utf8NoBom)
+$UnsignedPath = "$OutFull.unsigned.tmp"
+$SignedPath = "$OutFull.signed.tmp"
+$Python = Resolve-SigningPython -ExplicitPython $PythonExe -RepositoryRoot $RootPath
+try {
+    [System.IO.File]::WriteAllText($UnsignedPath, $ManifestJson, $Utf8NoBom)
+    Push-Location $RootPath
+    try {
+        & $Python -m pwdmg_core.updater sign-manifest --input $UnsignedPath --output $SignedPath --private-key $PrivateKeyFull
+        if ($LASTEXITCODE -ne 0) {
+            throw "Manifest signing failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    Move-Item -LiteralPath $SignedPath -Destination $OutFull -Force
+}
+finally {
+    Remove-Item -LiteralPath $UnsignedPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $SignedPath -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host "Update manifest written:"
 Write-Host "  $OutFull"
 Write-Host "SHA256:"
 Write-Host "  $($Hash.Hash.ToLowerInvariant())"
+Write-Host "Signature: Ed25519 / mypwdmg-update-2026-01"

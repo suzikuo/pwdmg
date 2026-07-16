@@ -6,6 +6,7 @@ const OSS_BUCKET_NAME = 'OSS_BUCKET_NAME'
 const OSS_ACCESS_KEY_ID = 'OSS_ACCESS_KEY_ID'
 const OSS_ACCESS_KEY_SECRET = 'OSS_ACCESS_KEY_SECRET'
 const OSS_REGION = 'OSS_REGION'
+const LEGACY_KEYS = [STORAGE_KEY, OSS_BUCKET_NAME, OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_REGION]
 const ORIG_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 const FORWARD_ALPHABETS: Record<string, string> = {
   QzA9J: 'f7Yemasx9Xl6ZgwrR2bUQtpPnMBikN0H83CKcFvDdLIVyTOhJWoq5EAjS4Guz1',
@@ -39,42 +40,57 @@ export function currentLegacyStorageSnapshot() {
   }
 }
 
-export function migrateLegacyWebData(): { payload: VaultPayload; migrated: number } {
+export function clearLegacyWebData() {
+  for (const key of LEGACY_KEYS) localStorage.removeItem(key)
+}
+
+export function migrateLegacyWebData(): { payload: VaultPayload; migrated: number; failed: number } {
   return migrateLegacyStorageSnapshot(currentLegacyStorageSnapshot())
 }
 
-export function migrateLegacyStorageText(text: string): { payload: VaultPayload; migrated: number } {
-  if (!text || !text.trim()) return { payload: defaultVaultPayload(), migrated: 0 }
+export function migrateLegacyStorageText(text: string): { payload: VaultPayload; migrated: number; failed: number } {
+  if (!text || !text.trim()) return { payload: defaultVaultPayload(), migrated: 0, failed: 0 }
   try {
     return migrateLegacyStorageSnapshot(JSON.parse(text) as Record<string, string>)
   } catch {
-    return { payload: defaultVaultPayload(), migrated: 0 }
+    return { payload: defaultVaultPayload(), migrated: 0, failed: 1 }
   }
 }
 
-export function migrateLegacyStorageSnapshot(snapshot: Record<string, string>): { payload: VaultPayload; migrated: number } {
-  const cards = loadLegacyCards(snapshot)
+export function migrateLegacyStorageSnapshot(snapshot: Record<string, string>): { payload: VaultPayload; migrated: number; failed: number } {
+  const loaded = loadLegacyCards(snapshot)
+  const cards = loaded.cards
   const payload = defaultVaultPayload(convertLegacyCards(cards))
+  const legacyOss = loadLegacyOssSettings(snapshot)
   payload.settings.oss = {
     ...payload.settings.oss,
-    ...loadLegacyOssSettings(snapshot)
+    ...legacyOss.settings
   }
-  return { payload, migrated: flattenEntries(payload.entries).length }
+  return { payload, migrated: flattenEntries(payload.entries).length, failed: loaded.failed + legacyOss.failed }
 }
 
 function loadLegacyCards(snapshot: Record<string, string>) {
   const rawCardData = snapshot[STORAGE_KEY]
-  if (!rawCardData) return []
+  if (!rawCardData) return { cards: [] as LegacyCard[], failed: 0 }
 
   try {
-    return (JSON.parse(rawCardData) as string[])
-      .map((item) => {
-        const raw = deobfuscate(item)
-        return raw ? JSON.parse(raw) as LegacyCard : null
-      })
-      .filter((item): item is LegacyCard => Boolean(item))
+    const encodedItems = JSON.parse(rawCardData)
+    if (!Array.isArray(encodedItems)) return { cards: [] as LegacyCard[], failed: 1 }
+    const cards: LegacyCard[] = []
+    let failed = 0
+    for (const encoded of encodedItems) {
+      try {
+        const raw = deobfuscate(String(encoded || ''))
+        const card = raw ? JSON.parse(raw) as LegacyCard : null
+        if (!card || typeof card !== 'object' || Array.isArray(card)) throw new Error('Invalid legacy card')
+        cards.push(card)
+      } catch {
+        failed += 1
+      }
+    }
+    return { cards, failed }
   } catch {
-    return []
+    return { cards: [] as LegacyCard[], failed: 1 }
   }
 }
 
@@ -110,11 +126,21 @@ function convertLegacyCard(card: LegacyCard): VaultEntry {
 }
 
 function loadLegacyOssSettings(snapshot: Record<string, string>) {
+  let failed = 0
+  const decode = (key: string) => {
+    const encoded = snapshot[key] || ''
+    const decoded = deobfuscate(encoded)
+    if (encoded && !decoded) failed += 1
+    return decoded
+  }
   return {
-    bucketName: deobfuscate(snapshot[OSS_BUCKET_NAME] || ''),
-    accessKeyId: deobfuscate(snapshot[OSS_ACCESS_KEY_ID] || ''),
-    accessKeySecret: deobfuscate(snapshot[OSS_ACCESS_KEY_SECRET] || ''),
-    region: deobfuscate(snapshot[OSS_REGION] || '')
+    settings: {
+      bucketName: decode(OSS_BUCKET_NAME),
+      accessKeyId: decode(OSS_ACCESS_KEY_ID),
+      accessKeySecret: decode(OSS_ACCESS_KEY_SECRET),
+      region: decode(OSS_REGION)
+    },
+    failed
   }
 }
 

@@ -35,10 +35,10 @@ import java.util.Locale;
 
 public class PwdAutofillService extends AutofillService {
     private static final String TAG = "PwdAutofill";
-    static final String ACCOUNT_KIND_GENERIC = "generic";
-    static final String ACCOUNT_KIND_USERNAME = "username";
-    static final String ACCOUNT_KIND_EMAIL = "email";
-    static final String ACCOUNT_KIND_PHONE = "phone";
+    static final String ACCOUNT_KIND_GENERIC = AutofillFieldPolicy.ACCOUNT_KIND_GENERIC;
+    static final String ACCOUNT_KIND_USERNAME = AutofillFieldPolicy.ACCOUNT_KIND_USERNAME;
+    static final String ACCOUNT_KIND_EMAIL = AutofillFieldPolicy.ACCOUNT_KIND_EMAIL;
+    static final String ACCOUNT_KIND_PHONE = AutofillFieldPolicy.ACCOUNT_KIND_PHONE;
     private static final String SOURCE_AUTO = "auto";
     private static final String SOURCE_USERNAME = "username";
     private static final String SOURCE_EMAIL = "email";
@@ -62,7 +62,7 @@ public class PwdAutofillService extends AutofillService {
             Log.d(TAG, "Fields found - Username: " + (fields.usernameId != null)
                 + ", Password: " + (fields.passwordId != null)
                 + ", OTP: " + (fields.otpId != null)
-                + ", TextCandidates: " + fields.textCandidates.size()
+                + ", Candidates: " + fields.candidateCount()
                 + ", UsernameScore: " + fields.usernameScore
                 + ", PasswordScore: " + fields.passwordScore
                 + ", OtpScore: " + fields.otpScore);
@@ -74,8 +74,8 @@ public class PwdAutofillService extends AutofillService {
             }
 
             if (!fields.shouldOfferAutofill()) {
-                Log.d(TAG, "No credential fields detected, skipping");
-                callback.onSuccess(null);
+                Log.d(TAG, "No safely fillable credential fields detected");
+                callback.onSuccess(buildSaveOnlyResponse(fields));
                 return;
             }
 
@@ -139,7 +139,7 @@ public class PwdAutofillService extends AutofillService {
             AssistStructure structure = contexts.get(contexts.size() - 1).getStructure();
             LoginFields fields = inspectStructure(structure);
             fields.finish();
-            if (fields.isOwnPackage(getPackageName()) || fields.passwordIds().isEmpty()) {
+            if (fields.isOwnPackage(getPackageName()) || !fields.hasSavableFields()) {
                 callback.onSuccess();
                 return;
             }
@@ -273,7 +273,7 @@ public class PwdAutofillService extends AutofillService {
         String target = fields.hostnameOrPackage();
         String account = textValueFor(structure, fields.usernameId);
         String password = "";
-        for (AutofillId passwordId : fields.passwordIds()) {
+        for (AutofillId passwordId : fields.savePasswordIds()) {
             password = textValueFor(structure, passwordId);
             if (!password.isEmpty()) break;
         }
@@ -461,12 +461,12 @@ public class PwdAutofillService extends AutofillService {
             fields.targetPackageName = structure.getActivityComponent().getPackageName();
         }
         for (int index = 0; index < structure.getWindowNodeCount(); index += 1) {
-            inspectNode(structure.getWindowNodeAt(index).getRootViewNode(), fields);
+            inspectNode(structure.getWindowNodeAt(index).getRootViewNode(), fields, true);
         }
         return fields;
     }
 
-    private static void inspectNode(AssistStructure.ViewNode node, LoginFields fields) {
+    private static void inspectNode(AssistStructure.ViewNode node, LoginFields fields, boolean ancestorsEligible) {
         if (node == null) return;
 
         // Log node details for debugging
@@ -485,44 +485,40 @@ public class PwdAutofillService extends AutofillService {
             Log.d(TAG, "Found web domain: " + fields.hostname);
         }
 
+        boolean visibleAndEnabled = ancestorsEligible
+            && node.getVisibility() == View.VISIBLE
+            && node.isEnabled();
         String labelText = labelText(node);
-        if (autofillIdCanUseLabel(node)) {
+        if (visibleAndEnabled && autofillIdCanUseLabel(node)) {
             fields.rememberLabel(labelText);
         }
 
         AutofillId autofillId = node.getAutofillId();
-        if (autofillId != null) {
+        if (autofillId != null && visibleAndEnabled) {
             String text = nodeText(node);
             String contextualText = fields.contextualText(text);
             int inputType = node.getInputType();
-            int passwordScore = passwordFieldScore(contextualText, hints, inputType);
-            int otpScore = otpFieldScore(contextualText, hints, inputType);
-            int usernameScore = usernameFieldScore(contextualText, hints, inputType);
             boolean textCandidate = isTextCandidate(node, contextualText);
-            String accountKind = accountFieldKind(contextualText, hints, inputType);
-
-            if (textCandidate && passwordScore >= 60 && passwordScore >= otpScore + 20) {
-                fields.markPassword(autofillId, passwordScore);
-                fields.clearRecentLabel();
-                Log.d(TAG, "Identified password field: " + idEntry + ", score=" + passwordScore + ", inputType=" + inputType);
-            } else if (textCandidate && otpScore >= 60 && otpScore >= passwordScore + 20) {
-                fields.markOtp(autofillId, otpScore);
-                fields.clearRecentLabel();
-                Log.d(TAG, "Identified OTP field: " + idEntry + ", score=" + otpScore);
-            } else {
-                if (textCandidate) {
-                    fields.addTextCandidate(autofillId, accountKind, usernameScore, passwordScore);
-                    fields.clearRecentLabel();
-                }
-                if (usernameScore >= 45 && usernameScore > passwordScore && usernameScore > otpScore) {
-                    fields.setUsernameIdIfBetter(autofillId, usernameScore);
-                    Log.d(TAG, "Identified username field: " + idEntry + ", score=" + usernameScore);
-                }
-            }
+            AutofillFieldPolicy.Decision decision = AutofillFieldPolicy.classify(
+                contextualText,
+                hints,
+                textCandidate,
+                isPasswordInputType(inputType),
+                isEmailInputType(inputType),
+                isPhoneInputType(inputType),
+                true
+            );
+            fields.addCandidate(autofillId, decision);
+            if (textCandidate) fields.clearRecentLabel();
+            Log.d(TAG, "Field role: " + idEntry
+                + ", role=" + decision.role
+                + ", accountScore=" + decision.accountScore
+                + ", passwordScore=" + decision.passwordScore
+                + ", otpScore=" + decision.otpScore);
         }
 
         for (int index = 0; index < node.getChildCount(); index += 1) {
-            inspectNode(node.getChildAt(index), fields);
+            inspectNode(node.getChildAt(index), fields, visibleAndEnabled);
         }
     }
 
@@ -1068,12 +1064,10 @@ public class PwdAutofillService extends AutofillService {
         AutofillId usernameId;
         AutofillId passwordId;
         AutofillId otpId;
-        AutofillId textBeforePasswordId;
-        List<AutofillId> textCandidates = new ArrayList<>();
-        List<String> textCandidateKinds = new ArrayList<>();
-        List<Integer> textCandidateUsernameScores = new ArrayList<>();
-        List<Integer> textCandidatePasswordScores = new ArrayList<>();
-        List<AutofillId> passwordCandidates = new ArrayList<>();
+        AutofillId newPasswordId;
+        AutofillId confirmPasswordId;
+        AutofillId savePasswordId;
+        List<AutofillFieldPolicy.Candidate<AutofillId>> fieldCandidates = new ArrayList<>();
         String usernameKind = ACCOUNT_KIND_GENERIC;
         int usernameScore;
         int passwordScore;
@@ -1083,83 +1077,27 @@ public class PwdAutofillService extends AutofillService {
         String targetPackageName;
 
         void finish() {
-            if (passwordId != null && usernameId == null) {
-                setUsernameId(bestUsernameCandidate(45));
-            }
-            if (usernameId == null && textBeforePasswordId != null) {
-                setUsernameId(textBeforePasswordId);
-            }
-            if (usernameId == null) {
-                setUsernameId(bestUsernameCandidate(35));
-            }
-            if (usernameId == null && textCandidates.size() >= 2) {
-                setUsernameId(firstTextExcept(passwordId, otpId));
-            }
-            if (usernameId == null) {
-                setUsernameId(lastTextExcept(passwordId, otpId));
-            }
-            if (passwordId == null && usernameId != null) {
-                passwordId = bestPasswordCandidateAfter(usernameId, 35);
-            }
-            if (passwordId == null && usernameId != null) {
-                passwordId = nearestAfter(usernameId);
-            }
-            if (passwordId == null && usernameId != null) {
-                passwordId = nearestBefore(usernameId);
-            }
-            if (passwordId == null) {
-                passwordId = lastTextExcept(usernameId, otpId);
-            }
-
-            if (passwordId != null && passwordId.equals(usernameId)) {
-                passwordId = null;
-            }
+            if (fieldCandidates.isEmpty()) return;
+            AutofillFieldPolicy.Resolved<AutofillId> resolved = AutofillFieldPolicy.resolve(fieldCandidates);
+            usernameId = resolved.accountId;
+            passwordId = resolved.currentPasswordId;
+            newPasswordId = resolved.newPasswordId;
+            confirmPasswordId = resolved.confirmPasswordId;
+            otpId = resolved.otpId;
+            savePasswordId = resolved.savePasswordId();
+            usernameKind = resolved.accountKind;
+            usernameScore = resolved.accountScore;
+            passwordScore = resolved.currentPasswordScore;
+            otpScore = resolved.otpScore;
         }
 
-        void markPassword(AutofillId id) {
-            markPassword(id, 100);
+        void addCandidate(AutofillId id, AutofillFieldPolicy.Decision decision) {
+            if (id == null || decision == null) return;
+            fieldCandidates.add(new AutofillFieldPolicy.Candidate<>(id, decision, fieldCandidates.size()));
         }
 
-        void markPassword(AutofillId id, int score) {
-            if (id == null) return;
-            if (passwordId == null || score > passwordScore) {
-                passwordId = id;
-                passwordScore = score;
-            }
-            passwordScore = Math.max(passwordScore, score);
-            addUnique(passwordCandidates, id);
-            if (textBeforePasswordId == null && !textCandidates.isEmpty()) {
-                textBeforePasswordId = textCandidates.get(textCandidates.size() - 1);
-            }
-        }
-
-        void markOtp(AutofillId id, int score) {
-            if (id == null) return;
-            if (otpId == null || score > otpScore) {
-                otpId = id;
-                otpScore = score;
-            }
-        }
-
-        void addTextCandidate(AutofillId id, String kind) {
-            addTextCandidate(id, kind, 0, 0);
-        }
-
-        void addTextCandidate(AutofillId id, String kind, int candidateUsernameScore, int candidatePasswordScore) {
-            if (id == null || id.equals(passwordId) || id.equals(otpId) || textCandidates.contains(id)) return;
-            textCandidates.add(id);
-            textCandidateKinds.add(kind == null ? ACCOUNT_KIND_GENERIC : kind);
-            textCandidateUsernameScores.add(candidateUsernameScore);
-            textCandidatePasswordScores.add(candidatePasswordScore);
-        }
-
-        void setUsernameIdIfBetter(AutofillId id, int score) {
-            if (id == null) return;
-            if (usernameId == null || score > usernameScore) {
-                usernameId = id;
-                usernameKind = kindFor(id);
-                usernameScore = score;
-            }
+        int candidateCount() {
+            return fieldCandidates.size();
         }
 
         void rememberLabel(String label) {
@@ -1176,96 +1114,6 @@ public class PwdAutofillService extends AutofillService {
 
         void clearRecentLabel() {
             recentLabelText = "";
-        }
-
-        void setUsernameId(AutofillId id) {
-            if (id == null) return;
-            usernameId = id;
-            usernameKind = kindFor(id);
-        }
-
-        private AutofillId bestUsernameCandidate(int minimumScore) {
-            AutofillId best = null;
-            int bestScore = minimumScore - 1;
-            for (int index = 0; index < textCandidates.size(); index += 1) {
-                AutofillId candidate = textCandidates.get(index);
-                if (candidate.equals(passwordId) || candidate.equals(otpId)) continue;
-                int score = textCandidateUsernameScores.get(index);
-                if (score > bestScore) {
-                    best = candidate;
-                    bestScore = score;
-                }
-            }
-            return best;
-        }
-
-        private AutofillId bestPasswordCandidateAfter(AutofillId anchor, int minimumScore) {
-            if (anchor == null) return null;
-            AutofillId best = null;
-            int bestScore = minimumScore - 1;
-            boolean seenAnchor = false;
-            for (int index = 0; index < textCandidates.size(); index += 1) {
-                AutofillId candidate = textCandidates.get(index);
-                if (candidate.equals(anchor)) {
-                    seenAnchor = true;
-                    continue;
-                }
-                if (!seenAnchor || candidate.equals(otpId)) continue;
-                int score = textCandidatePasswordScores.get(index);
-                if (score > bestScore) {
-                    best = candidate;
-                    bestScore = score;
-                }
-            }
-            return best;
-        }
-
-        private String kindFor(AutofillId id) {
-            for (int index = 0; index < textCandidates.size(); index += 1) {
-                if (textCandidates.get(index).equals(id)) return textCandidateKinds.get(index);
-            }
-            return ACCOUNT_KIND_GENERIC;
-        }
-
-        private AutofillId nearestAfter(AutofillId anchor) {
-            if (anchor == null) return null;
-            boolean seenAnchor = false;
-            for (AutofillId candidate : textCandidates) {
-                if (candidate.equals(anchor)) {
-                    seenAnchor = true;
-                    continue;
-                }
-                if (!seenAnchor || candidate.equals(otpId)) continue;
-                return candidate;
-            }
-            return null;
-        }
-
-        private AutofillId nearestBefore(AutofillId anchor) {
-            if (anchor == null) return null;
-            AutofillId previous = null;
-            for (AutofillId candidate : textCandidates) {
-                if (candidate.equals(anchor)) return previous;
-                if (!candidate.equals(otpId)) previous = candidate;
-            }
-            return null;
-        }
-
-        private AutofillId firstTextExcept(AutofillId firstExcluded, AutofillId secondExcluded) {
-            for (AutofillId candidate : textCandidates) {
-                if (candidate.equals(firstExcluded) || candidate.equals(secondExcluded)) continue;
-                return candidate;
-            }
-            return null;
-        }
-
-        private AutofillId lastTextExcept(AutofillId firstExcluded, AutofillId secondExcluded) {
-            for (int index = textCandidates.size() - 1; index >= 0; index -= 1) {
-                AutofillId candidate = textCandidates.get(index);
-                if (candidate.equals(firstExcluded) || candidate.equals(secondExcluded)) continue;
-                return candidate;
-            }
-            return null;
         }
 
         AutofillId[] autofillIds() {
@@ -1294,13 +1142,13 @@ public class PwdAutofillService extends AutofillService {
         }
 
         boolean hasSavableFields() {
-            return !passwordIds().isEmpty();
+            return !savePasswordIds().isEmpty();
         }
 
         AutofillId[] saveIds() {
             List<AutofillId> ids = new ArrayList<>();
             if (usernameId != null) ids.add(usernameId);
-            for (AutofillId id : passwordIds()) addUnique(ids, id);
+            for (AutofillId id : savePasswordIds()) addUnique(ids, id);
             return ids.toArray(new AutofillId[0]);
         }
 
@@ -1332,8 +1180,20 @@ public class PwdAutofillService extends AutofillService {
         List<AutofillId> passwordIds() {
             List<AutofillId> ids = new ArrayList<>();
             if (passwordId != null) addUnique(ids, passwordId);
-            for (AutofillId id : passwordCandidates) addUnique(ids, id);
             return ids;
+        }
+
+        List<AutofillId> savePasswordIds() {
+            List<AutofillId> ids = new ArrayList<>();
+            if (newPasswordId != null) addUnique(ids, newPasswordId);
+            if (confirmPasswordId != null) addUnique(ids, confirmPasswordId);
+            if (savePasswordId != null) addUnique(ids, savePasswordId);
+            if (currentPasswordIdForSavingFallback() != null) addUnique(ids, currentPasswordIdForSavingFallback());
+            return ids;
+        }
+
+        private AutofillId currentPasswordIdForSavingFallback() {
+            return newPasswordId == null && confirmPasswordId == null ? passwordId : null;
         }
 
         private static void addUnique(List<AutofillId> ids, AutofillId id) {

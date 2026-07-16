@@ -25,8 +25,13 @@ export interface VaultStorageAdapter {
   getAppInfo: () => Promise<ApiResult<AppInfo>>
   getStorageState: () => Promise<ApiResult<StorageState>>
   readVaultEnvelope: () => Promise<ApiResult<string>>
-  writeVaultEnvelope: (envelopeText: string, protectBackup?: boolean) => Promise<ApiResult<WriteEnvelopeResult>>
+  writeVaultEnvelope: (
+    envelopeText: string,
+    protectBackup?: boolean,
+    expectedRevision?: number
+  ) => Promise<ApiResult<WriteEnvelopeResult>>
   readLegacyLocalStorage: () => Promise<ApiResult<string>>
+  cleanupLegacyStorage?: (expectedDigest: string) => Promise<ApiResult<unknown>>
   cacheUnlockedSession?: (password: string) => Promise<ApiResult<unknown>>
   clearUnlockedSession?: () => Promise<ApiResult<unknown>>
   getPluginListenerState: () => Promise<ApiResult<PluginListenerState>>

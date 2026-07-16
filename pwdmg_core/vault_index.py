@@ -13,6 +13,7 @@ class VaultIndex:
     exact_domain_entries: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     wildcard_entries: List[Dict[str, Any]] = field(default_factory=list)
     paths_by_id: Dict[str, List[str]] = field(default_factory=dict)
+    ambiguous_ids: set[str] = field(default_factory=set)
 
     @classmethod
     def build(cls, entries: Iterable[Dict[str, Any]]) -> "VaultIndex":
@@ -21,6 +22,8 @@ class VaultIndex:
         return index
 
     def get_entry(self, entry_id: str) -> Dict[str, Any] | None:
+        if entry_id in self.ambiguous_ids:
+            return None
         return self.entries_by_id.get(entry_id)
 
     def get_login(self, entry_id: str) -> Dict[str, Any] | None:
@@ -35,23 +38,24 @@ class VaultIndex:
         if not host:
             return []
 
-        candidate_ids: set[str] = set()
+        candidate_entries: set[int] = set()
         for suffix in _domain_suffixes(host):
             for entry in self.exact_domain_entries.get(suffix) or []:
-                entry_id = str(entry.get("id") or "")
-                if entry_id:
-                    candidate_ids.add(entry_id)
+                candidate_entries.add(id(entry))
 
         for entry in self.wildcard_entries:
             domains = entry.get("domains") or []
             if any("*" in normalize_domain(domain) and domain_matches(host, domain) for domain in domains):
-                entry_id = str(entry.get("id") or "")
-                if entry_id:
-                    candidate_ids.add(entry_id)
+                candidate_entries.add(id(entry))
 
-        if not candidate_ids:
+        if not candidate_entries:
             return []
-        return [entry for entry in self.login_entries if str(entry.get("id") or "") in candidate_ids]
+        return [
+            entry
+            for entry in self.login_entries
+            if id(entry) in candidate_entries
+            and str(entry.get("id") or "") not in self.ambiguous_ids
+        ]
 
     def _visit(self, entries: Iterable[Dict[str, Any]], parents: List[str]) -> None:
         for entry in entries or []:
@@ -60,8 +64,11 @@ class VaultIndex:
 
             entry_id = str(entry.get("id") or "")
             if entry_id:
-                self.entries_by_id[entry_id] = entry
-                self.paths_by_id[entry_id] = list(parents)
+                if entry_id in self.entries_by_id:
+                    self.ambiguous_ids.add(entry_id)
+                else:
+                    self.entries_by_id[entry_id] = entry
+                    self.paths_by_id[entry_id] = list(parents)
 
             if entry.get("kind") == "folder":
                 if entry.get("status", "active") != "active":

@@ -10,6 +10,7 @@ export function nowSeconds() {
 export function defaultVaultPayload(entries: VaultEntry[] = []): VaultPayload {
   return {
     version: 1,
+    revision: 1,
     entries,
     settings: {
       oss: {
@@ -34,6 +35,7 @@ export function normalizeVaultPayload(payload: Partial<VaultPayload>): VaultPayl
   const defaults = defaultVaultPayload()
   return {
     version: 1,
+    revision: normalizeRevision(payload.revision),
     entries: normalizeEntries(payload.entries || []),
     settings: {
       oss: {
@@ -45,26 +47,42 @@ export function normalizeVaultPayload(payload: Partial<VaultPayload>): VaultPayl
   }
 }
 
-function normalizeEntries(entries: VaultEntry[]): VaultEntry[] {
-  return entries.map((entry) => ({
-    id: entry.id || makeId(),
-    kind: entry.kind === 'folder' ? 'folder' : 'login',
-    title: entry.title || 'Untitled',
-    status: normalizeEntryStatus(entry.status),
-    statusReason: entry.statusReason || '',
-    statusUpdatedAt: Number(entry.statusUpdatedAt || 0),
-    deletedAt: Number(entry.deletedAt || 0),
-    domains: Array.isArray(entry.domains) ? entry.domains.filter(Boolean) : [],
-    username: entry.username || '',
-    email: entry.email || '',
-    password: entry.password || '',
-    phone: entry.phone || '',
-    loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
-    note: entry.note || '',
-    totpSecret: entry.totpSecret || '',
-    history: Array.isArray(entry.history) ? entry.history : [],
-    children: normalizeEntries(entry.children || [])
-  }))
+function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), parentPath: number[] = []): VaultEntry[] {
+  return entries.map((entry, index) => {
+    const path = [...parentPath, index]
+    const originalId = String(entry.id || `entry-missing-${path.join('-')}`)
+    let id = originalId
+    let duplicateIndex = 2
+    while (seenIds.has(id)) {
+      id = `${originalId}-duplicate-${duplicateIndex}`
+      duplicateIndex += 1
+    }
+    seenIds.add(id)
+    return {
+      id,
+      kind: entry.kind === 'folder' ? 'folder' : 'login',
+      title: entry.title || 'Untitled',
+      status: normalizeEntryStatus(entry.status),
+      statusReason: entry.statusReason || '',
+      statusUpdatedAt: Number(entry.statusUpdatedAt || 0),
+      deletedAt: Number(entry.deletedAt || 0),
+      domains: Array.isArray(entry.domains) ? entry.domains.filter(Boolean) : [],
+      username: entry.username || '',
+      email: entry.email || '',
+      password: entry.password || '',
+      phone: entry.phone || '',
+      loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
+      note: entry.note || '',
+      totpSecret: entry.totpSecret || '',
+      history: Array.isArray(entry.history) ? entry.history : [],
+      children: normalizeEntries(entry.children || [], seenIds, path)
+    }
+  })
+}
+
+function normalizeRevision(value: unknown) {
+  const revision = Math.floor(Number(value || 1))
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : 1
 }
 
 function normalizeEntryStatus(value: unknown): EntryStatus {
