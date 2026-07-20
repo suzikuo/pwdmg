@@ -258,6 +258,13 @@ class UpdaterTest(unittest.TestCase):
         self.assertIn("Copy-Item -LiteralPath $InstallItem.FullName", script)
         self.assertIn("-ErrorAction Stop", script)
         self.assertNotIn("Copy-Item -Path (Join-Path $InstallDir '*')", script)
+        self.assertIn('throw "Update package does not contain $HostExeName"', script)
+        self.assertIn("$ExpectedHostSha256 = (Get-FileHash -LiteralPath $PayloadHostPath -Algorithm SHA256).Hash", script)
+        self.assertIn("$InstalledHostSha256 = (Get-FileHash -LiteralPath $InstalledHostPath -Algorithm SHA256).Hash", script)
+        self.assertIn('throw "$HostExeName verification failed after installation"', script)
+        self.assertLess(script.index("Stop-ImageName $HostExeName"), script.index("$ExpectedHostSha256 ="))
+        self.assertLess(script.index("$ExpectedHostSha256 ="), script.index("$InstallMutationStarted = $true"))
+        self.assertLess(script.index("$InstallMutationStarted = $true"), script.index("$InstalledHostSha256 ="))
         self.assertLess(script.index("$BackupComplete = $true"), script.index("$InstallMutationStarted = $true"))
         catch_block = script[script.index("} catch {") :]
         self.assertIn("if ($InstallMutationStarted)", catch_block)

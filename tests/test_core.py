@@ -67,9 +67,11 @@ class CoreTests(unittest.TestCase):
     def test_domain_matching(self):
         self.assertTrue(domain_matches("www.example.com", "example.com"))
         self.assertTrue(domain_matches("login.example.com", "example.com"))
+        self.assertTrue(domain_matches("us-east-2.signin.aws.amazon.com", "signin.aws.amazon.com"))
         self.assertTrue(domain_matches("us-east-2.signin.aws.amazon.com", "*.signin.aws.amazon.com"))
         self.assertTrue(domain_matches("us-east-1.signin.aws.amazon.com", "us-east-*.signin.aws.amazon.com"))
         self.assertFalse(domain_matches("us-west-1.signin.aws.amazon.com", "us-east-*.signin.aws.amazon.com"))
+        self.assertFalse(domain_matches("signin.aws.amazon.com.evil.test", "signin.aws.amazon.com"))
         self.assertFalse(domain_matches("badexample.com", "example.com"))
 
     def test_totp_known_vector(self):
@@ -136,6 +138,31 @@ class CoreTests(unittest.TestCase):
             matches = service.query_matches("us-east-2.signin.aws.amazon.com")
             self.assertEqual(matches[0]["id"], "entry-aws")
             self.assertTrue(matches[0]["hasTotp"])
+
+    def test_vault_service_query_matches_saved_aws_parent_domain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "entry-aws-parent",
+                            "kind": "login",
+                            "title": "AWS",
+                            "domains": ["signin.aws.amazon.com"],
+                            "username": "alice",
+                            "password": "secret",
+                        }
+                    ]
+                )
+            )
+
+            matches = service.query_matches("us-east-2.signin.aws.amazon.com")
+
+            self.assertEqual([match["id"] for match in matches], ["entry-aws-parent"])
 
     def test_vault_service_query_index_rebuilds_after_save(self):
         with tempfile.TemporaryDirectory() as tmp:

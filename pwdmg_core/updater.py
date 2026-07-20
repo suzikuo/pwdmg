@@ -591,6 +591,11 @@ try {{
         throw "Update package does not contain $ExeName"
     }}
     $PayloadDir = Assert-UnderPath $PayloadDir $WorkDir 'PayloadDir'
+    $PayloadHostPath = Assert-UnderPath (Join-Path $PayloadDir $HostExeName) $PayloadDir 'PayloadHostPath'
+    if (-not (Test-Path -LiteralPath $PayloadHostPath -PathType Leaf)) {{
+        throw "Update package does not contain $HostExeName"
+    }}
+    $ExpectedHostSha256 = (Get-FileHash -LiteralPath $PayloadHostPath -Algorithm SHA256).Hash
 
     $InstallItems = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction Stop)
     if ($InstallItems.Count -eq 0) {{
@@ -611,6 +616,15 @@ try {{
         }}
         Copy-Item -LiteralPath $_.FullName -Destination $InstallDir -Recurse -Force -ErrorAction Stop
     }}
+    $InstalledHostPath = Assert-UnderPath (Join-Path $InstallDir $HostExeName) $InstallDir 'InstalledHostPath'
+    if (-not (Test-Path -LiteralPath $InstalledHostPath -PathType Leaf)) {{
+        throw "Updated installation does not contain $HostExeName"
+    }}
+    $InstalledHostSha256 = (Get-FileHash -LiteralPath $InstalledHostPath -Algorithm SHA256).Hash
+    if ($InstalledHostSha256 -ne $ExpectedHostSha256) {{
+        throw "$HostExeName verification failed after installation"
+    }}
+    Write-UpdateLog "$HostExeName updated and verified: $InstalledHostSha256"
 
     Restore-NativeHostRegistration $ChromeHostKey $ChromeHostValue
     Restore-NativeHostRegistration $EdgeHostKey $EdgeHostValue

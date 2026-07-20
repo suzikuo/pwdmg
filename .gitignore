@@ -1,50 +1,74 @@
-# Python/local runtime
-/.env/
+# Python
+__pycache__/
+*.py[cod]
 /.venv/
+/venv/
 /.pytest_cache/
-/__pycache__/
-**/__pycache__/
-*.pyc
-*.pyo
-*.log
+/.mypy_cache/
+/.ruff_cache/
+/.coverage
+/.coverage.*
+/coverage.xml
+/htmlcov/
 
-# IDE/local machine config
-/.vscode/
-/.idea/
-/android/.idea/
-*.iml
-/local.properties
-/android/local.properties
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
 
-# Build output and generated files
+# Frontend (Node.js, TypeScript, and Vite)
+/front/node_modules/
+/front/dist/
+/front/.vite/
+*.tsbuildinfo
+
+# Desktop packaging and release output
 /build/
 /dist/
 /release/
-/front/node_modules/
-/front/dist/
 /native-host/
+/bak/
+
+# Android and Gradle
 /.gradle/
 /android/.gradle/
 /android/.gradle-download-test/
-/android/build/
-/android/app/build/
-/bak/
+/android/**/build/
+/android/**/.cxx/
+/android/**/.externalNativeBuild/
+/android/captures/
+/android/local.properties
+/local.properties
 
-# Local vault/config data
+# IDE and editor state
+/.idea/
+/android/.idea/
+/.vscode/
+*.iml
+
+# Local vault, configuration, and update data
 /vault.json
 /localStorage_data.json
 /desktop_config.json
 /plugin_config.json
+/backups/
 /updates/
 *.vault.json
 *.backup.json
+*.log
 
-# Signing/secrets
+# Signing keys and certificates
 /.update-signing/
 *.jks
 *.keystore
+*.p12
+*.pfx
 !/android/app/debug.keystore
 
-# OS
+# Operating system metadata
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+TASK_PLAN*

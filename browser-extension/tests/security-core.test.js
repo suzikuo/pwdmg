@@ -85,10 +85,123 @@ function loadBackground(nativeResponder, activeTab = { id: 7, url: 'https://logi
 test('domain authorization accepts only matching saved domains', () => {
   assert.equal(Security.domainMatches('https://login.example.com/path', 'example.com'), true)
   assert.equal(Security.domainMatches('login.example.com', '*.example.com'), true)
+  assert.equal(Security.domainMatches('us-east-2.signin.aws.amazon.com', 'signin.aws.amazon.com'), true)
+  assert.equal(Security.entryMatchesHostname({ domains: ['signin.aws.amazon.com'] }, 'us-east-2.signin.aws.amazon.com'), true)
+  assert.equal(Security.domainMatches('signin.aws.amazon.com.evil.test', 'signin.aws.amazon.com'), false)
   assert.equal(Security.domainMatches('example.com.evil.test', 'example.com'), false)
   assert.equal(Security.domainMatches('evil-example.com', 'example.com'), false)
   assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'accounts.example.com'), true)
   assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'example.com'), false)
+})
+
+test('background falls back to a parent hostname and filters returned entries for the original site', async () => {
+  const calls = []
+  const savedParent = {
+    id: 'aws-parent',
+    title: 'AWS',
+    username: 'alice',
+    email: '',
+    phone: '',
+    loginAccountSource: 'username',
+    domains: ['signin.aws.amazon.com']
+  }
+  const lookalike = {
+    ...savedParent,
+    id: 'lookalike',
+    domains: ['signin.aws.amazon.com.evil.test']
+  }
+  const background = loadBackground((method, params) => {
+    if (method !== 'queryMatches') return { ok: true, data: {} }
+    calls.push(params.hostname)
+    if (params.hostname === 'signin.aws.amazon.com') {
+      return { ok: true, data: [lookalike, savedParent] }
+    }
+    return { ok: true, data: [] }
+  }, { id: 7, url: 'https://us-east-2.signin.aws.amazon.com/console/' })
+  const popupSender = {
+    id: 'abcdefghijklmnopabcdefghijklmnop',
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const response = await background.dispatch({ type: 'MYPWDMG_QUERY_MATCHES' }, popupSender)
+  const cachedResponse = await background.dispatch({ type: 'MYPWDMG_QUERY_MATCHES' }, popupSender)
+
+  assert.equal(response.ok, true)
+  assert.deepEqual(response.data.map((entry) => entry.id), ['aws-parent'])
+  assert.deepEqual(cachedResponse.data.map((entry) => entry.id), ['aws-parent'])
+  assert.deepEqual(calls, ['us-east-2.signin.aws.amazon.com', 'signin.aws.amazon.com'])
+})
+
+test('background returns a parent-query failure instead of reporting an empty match list', async () => {
+  const calls = []
+  const background = loadBackground((method, params) => {
+    if (method !== 'queryMatches') return { ok: true, data: {} }
+    calls.push(params.hostname)
+    if (params.hostname === 'signin.aws.amazon.com') {
+      return { ok: false, code: 'LOCKED', message: 'Vault is locked.' }
+    }
+    return { ok: true, data: [] }
+  }, { id: 7, url: 'https://us-east-2.signin.aws.amazon.com/console/' })
+  const popupSender = {
+    id: 'abcdefghijklmnopabcdefghijklmnop',
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const response = await background.dispatch({ type: 'MYPWDMG_QUERY_MATCHES' }, popupSender)
+
+  assert.equal(response.ok, false)
+  assert.equal(response.code, 'LOCKED')
+  assert.deepEqual(calls, ['us-east-2.signin.aws.amazon.com', 'signin.aws.amazon.com'])
+})
+
+test('parent-domain fallback remains authorized through the fill request', async () => {
+  const calls = []
+  const summary = {
+    id: 'aws-parent',
+    title: 'AWS',
+    username: 'alice',
+    email: '',
+    phone: '',
+    loginAccountSource: 'username',
+    domains: ['signin.aws.amazon.com']
+  }
+  const payload = { ...summary, password: 'secret', totp: '' }
+  const background = loadBackground((method, params) => {
+    calls.push({ method, hostname: params.hostname || '' })
+    if (method === 'queryMatches') {
+      return params.hostname === 'signin.aws.amazon.com'
+        ? { ok: true, data: [summary] }
+        : { ok: true, data: [] }
+    }
+    if (method === 'getFillPayload') return { ok: true, data: payload }
+    return { ok: true, data: {} }
+  }, { id: 7, url: 'https://us-east-2.signin.aws.amazon.com/console/' })
+  const sender = {
+    tab: { id: 7, url: 'https://us-east-2.signin.aws.amazon.com/console/' },
+    frameId: 0,
+    documentId: 'doc-aws',
+    url: 'https://us-east-2.signin.aws.amazon.com/console/'
+  }
+
+  const authorization = await background.dispatch({ type: 'MYPWDMG_AUTHORIZE_FILL', entryId: summary.id }, sender)
+  const filled = await background.dispatch({
+    type: 'MYPWDMG_GET_FILL',
+    entryId: summary.id,
+    authorizationToken: authorization.data.token
+  }, sender)
+
+  assert.equal(authorization.ok, true)
+  assert.equal(filled.ok, true)
+  assert.equal(filled.data.password, 'secret')
+  assert.deepEqual(
+    calls.filter((call) => call.method === 'queryMatches').map((call) => call.hostname),
+    [
+      'us-east-2.signin.aws.amazon.com',
+      'signin.aws.amazon.com',
+      'us-east-2.signin.aws.amazon.com',
+      'signin.aws.amazon.com'
+    ]
+  )
 })
 
 test('fill contexts bind tab, frame, document, and origin', () => {
@@ -175,7 +288,7 @@ test('background revalidates fills and retains failed save tokens', () => {
     background.indexOf('function forgetPromptToken')
   )
   assert.match(authorizedFill, /sameDocumentContext/)
-  assert.match(authorizedFill, /nativeCall\('queryMatches'/)
+  assert.match(authorizedFill, /queryMatchesWithParentFallback\(context\.hostname\)/)
   assert.match(authorizedFill, /matchingEntry/)
   assert.match(authorizedFill, /payloadMatchesEntry/)
 

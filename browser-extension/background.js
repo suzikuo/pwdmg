@@ -364,10 +364,54 @@ function queryCacheKey(hostname = '') {
   return normalizeHost(hostname)
 }
 
+function queryHostnames(hostname = '') {
+  const host = normalizeHost(hostname)
+  if (!host) return []
+  if (!host.includes('.') || /^[\d.]+$/.test(host)) return [host]
+
+  const labels = host.split('.').filter(Boolean)
+  const candidates = []
+  for (let index = 0; index < labels.length - 1; index += 1) {
+    candidates.push(labels.slice(index).join('.'))
+  }
+  return candidates
+}
+
+function filterMatchesForHostname(response, hostname = '') {
+  if (!response?.ok || !Array.isArray(response.data)) return response
+  return {
+    ...response,
+    data: response.data.filter((entry) => Security.entryMatchesHostname(entry, hostname))
+  }
+}
+
+async function queryMatchesWithParentFallback(hostname = '') {
+  const host = normalizeHost(hostname)
+  const candidates = queryHostnames(host)
+  const primaryHostname = host || hostname
+  const primary = filterMatchesForHostname(
+    await nativeCall('queryMatches', { hostname: primaryHostname }),
+    host
+  )
+  if (!primary?.ok || !Array.isArray(primary.data) || primary.data.length || candidates.length < 2) {
+    return primary
+  }
+
+  for (const candidate of candidates.slice(1)) {
+    const fallback = filterMatchesForHostname(
+      await nativeCall('queryMatches', { hostname: candidate }),
+      host
+    )
+    if (!fallback?.ok || !Array.isArray(fallback.data)) return fallback
+    if (fallback.data.length) return fallback
+  }
+  return primary
+}
+
 async function queryMatchesCached(hostname = '') {
   pruneQueryCache()
   const key = queryCacheKey(hostname)
-  if (!key) return nativeCall('queryMatches', { hostname })
+  if (!key) return queryMatchesWithParentFallback(hostname)
 
   const cached = queryCache.get(key)
   if (cached && cached.expiresAt > Date.now()) return cached.response
@@ -377,7 +421,7 @@ async function queryMatchesCached(hostname = '') {
 
   const cacheVersion = queryCacheVersion
   let request
-  request = nativeCall('queryMatches', { hostname: key }).then((response) => {
+  request = queryMatchesWithParentFallback(key).then((response) => {
     if (response?.ok && cacheVersion === queryCacheVersion) {
       queryCache.set(key, {
         response,
@@ -445,7 +489,7 @@ async function getAuthorizedFill(entryId, token, sender) {
     return contextError('FILL_AUTH_CONTEXT_MISMATCH')
   }
 
-  const matches = await nativeCall('queryMatches', { hostname: context.hostname })
+  const matches = await queryMatchesWithParentFallback(context.hostname)
   if (!matches?.ok) return matches
   const matchedEntry = matchingEntry(matches, entryId, context.hostname)
   if (!matchedEntry) {
