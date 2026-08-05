@@ -73,6 +73,27 @@
       </div>
     </div>
     <div class="detail-note" v-if="entry.note">{{ entry.note }}</div>
+    <section v-if="entry.history?.length" class="detail-history">
+      <div class="detail-history-head">
+        <strong>历史</strong>
+        <span>{{ entry.history.length }} 条</span>
+      </div>
+      <div v-for="item in entry.history.slice(0, 6)" :key="item.id" class="detail-history-row">
+        <div>
+          <strong>{{ historyActionLabel(item.action) }}</strong>
+          <span>{{ formatHistoryTime(item.at) }}<template v-if="item.note"> · {{ item.note }}</template></span>
+        </div>
+        <van-button
+          v-if="item.snapshot"
+          class="icon-action"
+          size="mini"
+          icon="replay"
+          plain
+          aria-label="恢复此历史版本"
+          @click="$emit('restore-history', entry.id, item.id)"
+        />
+      </div>
+    </section>
   </div>
 </template>
 
@@ -94,8 +115,22 @@ defineEmits<{
   disable: [entryId: string]
   restore: [entryId: string]
   purge: [entryId: string]
+  'restore-history': [entryId: string, historyId: string]
   copy: [value: string]
   'toggle-password': []
   'refresh-totp': []
 }>()
+
+function historyActionLabel(action: string) {
+  if (action === 'created') return '创建'
+  if (action === 'disabled') return '归档'
+  if (action === 'restored') return '恢复'
+  if (action === 'trashed') return '移入回收站'
+  return '修改'
+}
+
+function formatHistoryTime(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '-'
+  return new Date(value * 1000).toLocaleString()
+}
 </script>

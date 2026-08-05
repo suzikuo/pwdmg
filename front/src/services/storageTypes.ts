@@ -19,6 +19,7 @@ export type StorageState = {
 export type WriteEnvelopeResult = {
   vaultPath: string
   backupPath: string
+  revision?: number
 }
 
 export interface VaultStorageAdapter {

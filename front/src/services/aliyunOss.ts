@@ -5,7 +5,8 @@ export const APIResponseStatus = {
   Fail: 2,
   AuthFail: 3,
   FileNotExist: 4,
-  QuotaExceeded: 5
+  QuotaExceeded: 5,
+  Conflict: 6
 } as const
 
 export const MAX_OSS_OBJECT_BYTES = 16 * 1024 * 1024
@@ -18,6 +19,7 @@ export interface OSSApiResponse<T = string | boolean | Blob> {
   etag?: string
   versionId?: string
   revision?: string
+  nextMarker?: string
 }
 
 export interface OSSFileInfo {
@@ -36,17 +38,23 @@ export interface OssClientSettings {
   region: string
 }
 
+export interface OssWriteOptions {
+  forbidOverwrite?: boolean
+}
+
 export class AliyunOSSAPI {
   bucketName: string
   accessKeyId: string
   accessKeySecret: string
   region: string
+  signal?: AbortSignal
 
-  constructor(bucketName: string, accessKeyId: string, accessKeySecret: string, region: string) {
+  constructor(bucketName: string, accessKeyId: string, accessKeySecret: string, region: string, signal?: AbortSignal) {
     this.bucketName = bucketName.trim()
     this.accessKeyId = accessKeyId.trim()
     this.accessKeySecret = accessKeySecret
     this.region = region.trim()
+    this.signal = signal
   }
 
   verify() {
@@ -88,7 +96,8 @@ export class AliyunOSSAPI {
   async uploadFile(
     fileName: string,
     fileContent: string,
-    mimeType = 'application/json'
+    mimeType = 'application/json',
+    options: OssWriteOptions = {}
   ): Promise<OSSApiResponse> {
     if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
     if (new TextEncoder().encode(fileContent).byteLength > MAX_OSS_OBJECT_BYTES) {
@@ -99,17 +108,22 @@ export class AliyunOSSAPI {
       const objectName = normalizeObjectName(fileName)
       const date = this.getGMTDate()
       const resource = `/${this.bucketName}/${objectName}`
-      const ossHeaders = `x-oss-date:${date}`
+      const ossHeaders = [
+        `x-oss-date:${date}`,
+        ...(options.forbidOverwrite ? ['x-oss-forbid-overwrite:true'] : [])
+      ].join('\n')
       const signature = await this.generateSignature('PUT', '', mimeType, date, ossHeaders, resource)
       const headers = {
         'x-oss-date': date,
         'Content-Type': mimeType,
-        Authorization: `OSS ${this.accessKeyId}:${signature}`
+        Authorization: `OSS ${this.accessKeyId}:${signature}`,
+        ...(options.forbidOverwrite ? { 'x-oss-forbid-overwrite': 'true' } : {})
       }
       const response = await fetch(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'PUT',
         headers,
-        body: fileContent
+        body: fileContent,
+        signal: this.signal
       })
 
       if (response.ok) {
@@ -124,6 +138,9 @@ export class AliyunOSSAPI {
       const errorText = await response.text()
       if (response.status === 403 && errorText.includes('QuotaExceeded')) {
         return { status: APIResponseStatus.QuotaExceeded, content: '存储空间配额已满' }
+      }
+      if (response.status === 409 || response.status === 412 || errorText.includes('FileAlreadyExists')) {
+        return { status: APIResponseStatus.Conflict, content: '远端对象已存在，已拒绝覆盖' }
       }
       return { status: APIResponseStatus.Fail, content: formatOssHttpError('上传', response.status, errorText) }
     } catch (error) {
@@ -146,6 +163,7 @@ export class AliyunOSSAPI {
       const signature = await this.generateSignature('GET', '', '', date, ossHeaders, resource)
       const response = await fetch(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'GET',
+        signal: this.signal,
         headers: {
           'x-oss-date': date,
           Authorization: `OSS ${this.accessKeyId}:${signature}`
@@ -194,6 +212,7 @@ export class AliyunOSSAPI {
       const signature = await this.generateSignature('HEAD', '', '', date, ossHeaders, resource)
       const response = await fetch(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'HEAD',
+        signal: this.signal,
         headers: {
           'x-oss-date': date,
           Authorization: `OSS ${this.accessKeyId}:${signature}`
@@ -231,18 +250,23 @@ export class AliyunOSSAPI {
     }
   }
 
-  async listFiles(prefix = '', maxKeys = 30): Promise<OSSApiResponse<OSSFileInfo[] | string>> {
+  async listFiles(prefix = '', maxKeys = 30, marker = ''): Promise<OSSApiResponse<OSSFileInfo[] | string>> {
     if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
 
     try {
       const normalizedPrefix = normalizeObjectName(prefix).replace(/\/?$/, '')
-      const query = `prefix=${encodeURIComponent(normalizedPrefix)}&max-keys=${Math.max(1, Math.min(100, Math.round(maxKeys)))}`
+      const query = [
+        `prefix=${encodeURIComponent(normalizedPrefix)}`,
+        `max-keys=${Math.max(1, Math.min(100, Math.round(maxKeys)))}`,
+        ...(marker ? [`marker=${encodeURIComponent(marker)}`] : [])
+      ].join('&')
       const date = this.getGMTDate()
       const resource = `/${this.bucketName}/`
       const ossHeaders = `x-oss-date:${date}`
       const signature = await this.generateSignature('GET', '', '', date, ossHeaders, resource)
       const response = await fetch(`${this.getEndpoint()}/?${query}`, {
         method: 'GET',
+        signal: this.signal,
         headers: {
           'x-oss-date': date,
           Authorization: `OSS ${this.accessKeyId}:${signature}`
@@ -261,7 +285,12 @@ export class AliyunOSSAPI {
         size: Number(node.querySelector('Size')?.textContent || 0),
         lastModified: node.querySelector('LastModified')?.textContent || ''
       })).filter((item) => item.name)
-      return { status: APIResponseStatus.Success, content: items }
+      const isTruncated = doc.querySelector('IsTruncated')?.textContent?.trim().toLowerCase() === 'true'
+      const nextMarker = isTruncated ? doc.querySelector('NextMarker')?.textContent?.trim() || '' : ''
+      if (isTruncated && !nextMarker) {
+        return { status: APIResponseStatus.Fail, content: '列表响应缺少分页游标' }
+      }
+      return { status: APIResponseStatus.Success, content: items, nextMarker }
     } catch (error) {
       return { status: APIResponseStatus.Fail, content: formatOssError(error) }
     }
@@ -336,6 +365,7 @@ async function readResponseBytesLimited(response: Response, maxBytes: number) {
 }
 
 function formatOssError(error: unknown) {
+  if (error instanceof DOMException && error.name === 'AbortError') return '云端请求已取消'
   if (error instanceof Error) return error.message
   return String(error || '网络请求失败')
 }

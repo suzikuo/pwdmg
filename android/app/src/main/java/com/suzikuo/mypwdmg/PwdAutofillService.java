@@ -91,14 +91,6 @@ public class PwdAutofillService extends AutofillService {
             JSONArray matches = store.queryMatchesFromPayload(payload, target, includeAll);
             if (matches.length() == 0) {
                 Log.d(TAG, "No matches found for: " + target + ", includeAll=" + includeAll);
-                if (fields.isLikelyBrowser()) {
-                    matches = store.queryMatchesFromPayload(payload, target, true);
-                    if (matches.length() > 0) {
-                        Log.d(TAG, "Using browser picker fallback with " + matches.length() + " entries");
-                        callback.onSuccess(buildPickerResponse(fields, target, true));
-                        return;
-                    }
-                }
                 callback.onSuccess(buildSaveOnlyResponse(fields));
                 return;
             }
@@ -1171,10 +1163,6 @@ public class PwdAutofillService extends AutofillService {
 
         boolean shouldFallbackToAllMatches() {
             return (hostname == null || hostname.trim().isEmpty()) && isLikelyBrowserPackage(targetPackageName);
-        }
-
-        boolean isLikelyBrowser() {
-            return isLikelyBrowserPackage(targetPackageName);
         }
 
         List<AutofillId> passwordIds() {

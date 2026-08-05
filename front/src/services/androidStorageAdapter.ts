@@ -15,7 +15,12 @@ export const androidStorageAdapter: VaultStorageAdapter = {
   getAppInfo: () => call<AppInfo>('getAppInfo'),
   getStorageState: () => call<StorageState>('getStorageState'),
   readVaultEnvelope: () => call<string>('readVaultEnvelope'),
-  writeVaultEnvelope: (envelopeText, protectBackup = false) => call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup),
+  writeVaultEnvelope: (envelopeText, protectBackup = false, expectedRevision) => call<WriteEnvelopeResult>(
+    'writeVaultEnvelope',
+    envelopeText,
+    protectBackup,
+    expectedRevision ?? -1
+  ),
   readLegacyLocalStorage: () => call<string>('readLegacyLocalStorage'),
   cacheUnlockedSession: (password) => call('unlock', password),
   clearUnlockedSession: () => call('lock'),

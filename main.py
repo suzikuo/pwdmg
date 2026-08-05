@@ -36,6 +36,8 @@ WEBVIEW_CACHE_DIR_NAMES = {
     "ShaderCache",
     "component_crx_cache",
 }
+DESKTOP_MIN_WIDTH = 360
+DESKTOP_MIN_HEIGHT = 480
 
 
 def read_passwordless_marker(vault_path: Path) -> bool:
@@ -159,8 +161,8 @@ class DesktopPasswordManagerApi:
     def queryMatches(self, hostname: str) -> dict[str, Any]:
         return self.api.queryMatches(hostname)
 
-    def getFillPayload(self, entryId: str) -> dict[str, Any]:
-        return self.api.getFillPayload(entryId)
+    def getFillPayload(self, entryId: str, hostname: str) -> dict[str, Any]:
+        return self.api.getFillPayload(entryId, hostname)
 
     def listSaveTargets(self) -> dict[str, Any]:
         return self.api.listSaveTargets()
@@ -270,8 +272,14 @@ def normalize_desktop_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(DEFAULT_DESKTOP_CONFIG)
     normalized.update(config)
 
-    width = to_int(normalized.get("width"), DEFAULT_DESKTOP_CONFIG["width"])
-    height = to_int(normalized.get("height"), DEFAULT_DESKTOP_CONFIG["height"])
+    width = max(
+        DESKTOP_MIN_WIDTH,
+        to_int(normalized.get("width"), DEFAULT_DESKTOP_CONFIG["width"]),
+    )
+    height = max(
+        DESKTOP_MIN_HEIGHT,
+        to_int(normalized.get("height"), DEFAULT_DESKTOP_CONFIG["height"]),
+    )
     x_position = to_int(
         normalized.get("x_position"), DEFAULT_DESKTOP_CONFIG["x_position"]
     )
@@ -299,8 +307,14 @@ def read_window_config(window: webview.Window) -> dict[str, int]:
 
 def get_pywebview_startup_config(config: dict[str, Any]) -> dict[str, int]:
     return {
-        "width": to_int(config.get("width"), DEFAULT_DESKTOP_CONFIG["width"]),
-        "height": to_int(config.get("height"), DEFAULT_DESKTOP_CONFIG["height"]),
+        "width": max(
+            DESKTOP_MIN_WIDTH,
+            to_int(config.get("width"), DEFAULT_DESKTOP_CONFIG["width"]),
+        ),
+        "height": max(
+            DESKTOP_MIN_HEIGHT,
+            to_int(config.get("height"), DEFAULT_DESKTOP_CONFIG["height"]),
+        ),
         "x_position": to_int(
             config.get("x_position"), DEFAULT_DESKTOP_CONFIG["x_position"]
         ),
@@ -541,6 +555,7 @@ def main() -> None:
         x=startup_config["x_position"],
         y=startup_config["y_position"],
         resizable=True,
+        min_size=(DESKTOP_MIN_WIDTH, DESKTOP_MIN_HEIGHT),
         background_color="#070b10",
     )
     _desktop_window = window

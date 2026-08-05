@@ -1,5 +1,5 @@
 import { emptyPluginListenerState, fail, ok } from './apiTypes'
-import { idbGet, idbSet, idbSetIfRevision } from './indexedDbStore'
+import { idbGet, idbSet, idbSetIfCurrentRevision, idbSetIfRevision } from './indexedDbStore'
 import { clearLegacyWebData, currentLegacyStorageSnapshot, hasLegacyWebData } from './legacyWeb'
 import type { VaultStorageAdapter } from './storageTypes'
 
@@ -35,9 +35,14 @@ export const webStorageAdapter: VaultStorageAdapter = {
     return JSON.stringify(envelope, null, 2)
   }),
   writeVaultEnvelope: async (envelopeText, protectBackup = false, expectedRevision) => guard(async () => {
+    const envelope = JSON.parse(envelopeText) as Record<string, unknown>
+    const current = await idbGet<Record<string, unknown>>(VAULT_KEY)
+    if (current?.version === 2 && envelope.version === 1) {
+      throw new Error('Refusing to replace a version 2 vault with version 1')
+    }
     const backupPath = protectBackup ? await backupCurrentEnvelope() : ''
-    const envelope = JSON.parse(envelopeText)
-    if (expectedRevision === undefined || protectBackup) await idbSet(VAULT_KEY, envelope)
+    if (expectedRevision === undefined) await idbSet(VAULT_KEY, envelope)
+    else if (protectBackup) await idbSetIfCurrentRevision(VAULT_KEY, envelope, expectedRevision)
     else await idbSetIfRevision(VAULT_KEY, envelope, expectedRevision)
     return { vaultPath: VAULT_PATH_LABEL, backupPath }
   }),

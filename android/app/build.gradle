@@ -70,5 +70,12 @@ android {
 }
 
 dependencies {
+    implementation "androidx.credentials:credentials:1.6.0"
+    implementation("com.authlete:cbor:1.21") {
+        exclude group: "com.google.code.gson", module: "gson"
+        exclude group: "org.bouncycastle"
+    }
+
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
 }

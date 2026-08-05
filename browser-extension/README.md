@@ -20,8 +20,19 @@ The extension only detects and fills web forms. Password data stays in the encry
 Fill payloads require a real click in extension-owned UI and a short-lived authorization bound to the current tab, frame, document, and origin. Run the extension regression tests with:
 
 ```powershell
-node --test .\browser-extension\tests\security-core.test.js
+node --test .\browser-extension\tests\security-core.test.js .\browser-extension\tests\passkey-proxy-probe.test.js
 ```
+
+## Developer-only Passkey Probe
+
+Passkey management is postponed and the shipped popup does not request `webAuthenticationProxy`. The defensive detach implementation and isolated CDP harness remain for future development only:
+
+```powershell
+node .\scripts\probe_web_authentication_proxy.mjs "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+node .\scripts\probe_web_authentication_proxy.mjs "C:\path\to\chrome-for-testing\chrome.exe"
+```
+
+Google Chrome 137 and newer branded builds ignore the command-line `--load-extension` flag. Use Chrome for Testing or Chromium for the disposable automated harness. This is a browser distribution restriction, not a proxy attach/detach failure. See Chrome's [June 2025 extension update](https://developer.chrome.com/blog/extension-news-june-2025#removing-the-load-extension-flag).
 
 ## Troubleshooting
 

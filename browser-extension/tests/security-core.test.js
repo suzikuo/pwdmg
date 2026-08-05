@@ -7,23 +7,61 @@ const test = require('node:test')
 const vm = require('node:vm')
 
 const Security = require('../security-core.js')
+const PasskeyProxyProbe = require('../passkey-proxy-probe.js')
 const extensionRoot = path.resolve(__dirname, '..')
 
 function source(name) {
   return fs.readFileSync(path.join(extensionRoot, name), 'utf8')
 }
 
-function loadBackground(nativeResponder, activeTab = { id: 7, url: 'https://login.example.com/' }) {
+function extensionEvent() {
+  const listeners = []
+  return {
+    addListener(listener) { listeners.push(listener) },
+    async emit(value) {
+      return Promise.all(listeners.map((listener) => listener(value)))
+    },
+    get listenerCount() { return listeners.length }
+  }
+}
+
+function passkeyProxyMock(overrides = {}) {
+  const calls = []
+  const proxy = {
+    onCreateRequest: extensionEvent(),
+    onGetRequest: extensionEvent(),
+    onIsUvpaaRequest: extensionEvent(),
+    onRequestCanceled: extensionEvent(),
+    async attach() { calls.push({ method: 'attach' }) },
+    async detach() { calls.push({ method: 'detach' }) },
+    async completeCreateRequest(details) { calls.push({ method: 'completeCreateRequest', details }) },
+    async completeGetRequest(details) { calls.push({ method: 'completeGetRequest', details }) },
+    async completeIsUvpaaRequest(details) { calls.push({ method: 'completeIsUvpaaRequest', details }) }
+  }
+  Object.assign(proxy, overrides)
+  return { proxy, calls }
+}
+
+function loadBackground(nativeResponder, activeTab = { id: 7, url: 'https://login.example.com/' }, options = {}) {
   let messageListener = null
   const portMessageListeners = []
-  const storage = {}
+  const storage = { ...(options.initialStorage || {}) }
+  const grantedPermissions = new Set(options.grantedPermissions || (options.webAuthenticationProxy ? ['webAuthenticationProxy'] : []))
+  const permissionAdded = extensionEvent()
   let tokenSequence = 0
+  const emitNativeResponse = (request, response) => {
+    for (const listener of portMessageListeners) listener({ ...response, id: request.id })
+  }
   const port = {
     onMessage: { addListener(listener) { portMessageListeners.push(listener) } },
     onDisconnect: { addListener() {} },
     postMessage(request) {
+      if (options.postNativeMessage) {
+        options.postNativeMessage(request, (response) => emitNativeResponse(request, response))
+        return
+      }
       Promise.resolve(nativeResponder(request.method, request.params || {})).then((response) => {
-        for (const listener of portMessageListeners) listener({ ...response, id: request.id })
+        emitNativeResponse(request, response)
       })
     }
   }
@@ -50,6 +88,19 @@ function loadBackground(nativeResponder, activeTab = { id: 7, url: 'https://logi
       onClicked: { addListener() {} }
     },
     commands: { onCommand: { addListener() {} } },
+    permissions: {
+      contains(details, callback) {
+        callback((details.permissions || []).every((permission) => grantedPermissions.has(permission)))
+      },
+      remove(details, callback) {
+        let removed = false
+        for (const permission of details.permissions || []) {
+          removed = grantedPermissions.delete(permission) || removed
+        }
+        callback(removed)
+      },
+      onAdded: permissionAdded
+    },
     storage: {
       local: {
         get(defaults, callback) { callback({ ...defaults, ...storage }) },
@@ -60,25 +111,41 @@ function loadBackground(nativeResponder, activeTab = { id: 7, url: 'https://logi
       }
     }
   }
+  if (options.webAuthenticationProxy) chrome.webAuthenticationProxy = options.webAuthenticationProxy
   const context = vm.createContext({
     URL,
     chrome,
-    clearTimeout,
+    clearTimeout: options.clearTimeout || clearTimeout,
     console,
-    crypto: { randomUUID: () => `test-token-${++tokenSequence}` },
+    crypto: options.crypto || {
+      randomUUID: () => `test-token-${++tokenSequence}`,
+      getRandomValues(values) {
+        values.fill(++tokenSequence)
+        return values
+      }
+    },
     globalThis: null,
-    setTimeout
+    setTimeout: options.setTimeout || setTimeout
   })
   context.globalThis = context
   context.MyPwdMgSecurity = Security
-  const backgroundSource = source('background.js').replace("import './security-core.js'", '')
+  context.MyPwdMgPasskeyProxyProbe = PasskeyProxyProbe
+  const backgroundSource = source('background.js')
+    .replace("import './security-core.js'", '')
+    .replace("import './passkey-proxy-probe.js'", '')
   vm.runInContext(backgroundSource, context, { filename: 'background.js' })
 
   return {
     async dispatch(message, sender) {
       assert.ok(messageListener, 'background message listener was registered')
-      return new Promise((resolve) => messageListener(message, sender, resolve))
-    }
+      const ownSender = { id: chrome.runtime.id, ...(sender || {}) }
+      return new Promise((resolve) => messageListener(message, ownSender, resolve))
+    },
+    getStorage() { return { ...storage } },
+    setStorage(values) { Object.assign(storage, values) },
+    hasPermission(permission) { return grantedPermissions.has(permission) },
+    grantPermission(permission) { grantedPermissions.add(permission) },
+    permissionAdded
   }
 }
 
@@ -92,6 +159,75 @@ test('domain authorization accepts only matching saved domains', () => {
   assert.equal(Security.domainMatches('evil-example.com', 'example.com'), false)
   assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'accounts.example.com'), true)
   assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'example.com'), false)
+})
+
+test('background rejects foreign senders and keeps vault controls extension-page-only', async () => {
+  const calls = []
+  const background = loadBackground((method, params) => {
+    calls.push({ method, params })
+    return { ok: true, data: {} }
+  })
+  const contentSender = {
+    tab: { id: 7, url: 'https://login.example.com/' },
+    frameId: 0,
+    documentId: 'doc-control',
+    url: 'https://login.example.com/'
+  }
+  const foreignSender = {
+    ...contentSender,
+    id: 'foreignextensionforeignextensio'
+  }
+  const popupSender = {
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const foreign = await background.dispatch({ type: 'MYPWDMG_QUERY_MATCHES' }, foreignSender)
+  assert.equal(foreign.code, 'EXTENSION_SENDER_UNAUTHORIZED')
+
+  for (const message of [
+    { type: 'MYPWDMG_UNLOCK', password: 'must-not-cross' },
+    { type: 'MYPWDMG_LOCK' },
+    { type: 'MYPWDMG_LIST_SAVE_TARGETS' },
+    { type: 'MYPWDMG_STATE' },
+    { type: 'MYPWDMG_SET_AUTO_SETTINGS', settings: { autoFillEnabled: false } }
+  ]) {
+    const response = await background.dispatch(message, contentSender)
+    assert.equal(response.code, 'EXTENSION_PAGE_REQUIRED')
+  }
+  assert.equal(calls.length, 0)
+
+  const settings = await background.dispatch({ type: 'MYPWDMG_GET_AUTO_SETTINGS' }, contentSender)
+  assert.equal(settings.ok, true)
+  const state = await background.dispatch({ type: 'MYPWDMG_STATE' }, popupSender)
+  assert.equal(state.ok, true)
+  assert.deepEqual(calls.map((call) => call.method), ['getState'])
+})
+
+test('background cleans up a synchronous native send failure and does not expose its exception', async () => {
+  let attempts = 0
+  const background = loadBackground(
+    () => ({ ok: true, data: {} }),
+    { id: 7, url: 'https://login.example.com/' },
+    {
+      postNativeMessage(request, respond) {
+        attempts += 1
+        if (attempts === 1) throw new Error('sensitive implementation detail')
+        queueMicrotask(() => respond({ ok: true, data: { locked: true } }))
+      }
+    }
+  )
+  const popupSender = {
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const failed = await background.dispatch({ type: 'MYPWDMG_STATE' }, popupSender)
+  assert.equal(failed.code, 'NATIVE_HOST_ERROR')
+  assert.equal(failed.message, 'Native host request failed.')
+  assert.doesNotMatch(failed.message, /sensitive/)
+
+  const retried = await background.dispatch({ type: 'MYPWDMG_STATE' }, popupSender)
+  assert.equal(retried.ok, true)
+  assert.equal(attempts, 2)
 })
 
 test('background falls back to a parent hostname and filters returned entries for the original site', async () => {
@@ -193,6 +329,10 @@ test('parent-domain fallback remains authorized through the fill request', async
   assert.equal(authorization.ok, true)
   assert.equal(filled.ok, true)
   assert.equal(filled.data.password, 'secret')
+  assert.equal(
+    calls.find((call) => call.method === 'getFillPayload')?.hostname,
+    'us-east-2.signin.aws.amazon.com'
+  )
   assert.deepEqual(
     calls.filter((call) => call.method === 'queryMatches').map((call) => call.hostname),
     [
@@ -265,6 +405,7 @@ test('OTP matching requires explicit evidence or a digit-constrained short code'
 test('content UI and fill message retain the trusted-gesture boundary', () => {
   const content = source('content.js')
   const popup = source('popup.js')
+  const background = source('background.js')
   assert.match(content, /attachShadow\(\{ mode: 'closed' \}\)/)
   assert.match(content, /if \(!event\.isTrusted\) return/)
   assert.doesNotMatch(content, /data-entry-id/)
@@ -272,6 +413,8 @@ test('content UI and fill message retain the trusted-gesture boundary', () => {
   assert.match(content, /authorizationToken: authorization\.data\.token/)
   assert.doesNotMatch(content, /lastOtpAutoFillKey/)
   assert.match(popup, /matchListEl\.addEventListener[\s\S]*if \(!event\.isTrusted\) return/)
+  assert.match(background, /crypto\.getRandomValues/)
+  assert.doesNotMatch(background, /Math\.random/)
 })
 
 test('background revalidates fills and retains failed save tokens', () => {
@@ -291,6 +434,7 @@ test('background revalidates fills and retains failed save tokens', () => {
   assert.match(authorizedFill, /queryMatchesWithParentFallback\(context\.hostname\)/)
   assert.match(authorizedFill, /matchingEntry/)
   assert.match(authorizedFill, /payloadMatchesEntry/)
+  assert.match(authorizedFill, /hostname: context\.hostname/)
 
   const saveCapture = background.slice(
     background.indexOf('async function savePreparedCapture'),
@@ -336,6 +480,10 @@ test('background fill grants are site-bound, document-bound, and single-use', as
   }, sender)
   assert.equal(filled.ok, true)
   assert.equal(filled.data.password, 'secret')
+  assert.equal(
+    calls.find((call) => call.method === 'getFillPayload')?.params?.hostname,
+    'login.example.com'
+  )
 
   const replay = await background.dispatch({
     type: 'MYPWDMG_GET_FILL',
@@ -424,9 +572,149 @@ test('failed capture saves remain retryable and prompts never cross origins', as
   assert.equal(saveAttempts, 2)
 })
 
-test('manifest loads shared policy before the content script', () => {
+test('background passkey proxy probe is extension-page-only and explicitly detaches', async () => {
+  const { proxy, calls } = passkeyProxyMock()
+  const background = loadBackground(
+    () => ({ ok: true, data: {} }),
+    { id: 7, url: 'https://login.example.com/' },
+    { webAuthenticationProxy: proxy }
+  )
+  const contentSender = {
+    id: 'abcdefghijklmnopabcdefghijklmnop',
+    tab: { id: 7, url: 'https://login.example.com/' },
+    frameId: 0,
+    documentId: 'doc-passkey',
+    url: 'https://login.example.com/'
+  }
+  const popupSender = {
+    id: 'abcdefghijklmnopabcdefghijklmnop',
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const unauthorized = await background.dispatch({ type: 'MYPWDMG_PROBE_PASSKEY_PROXY' }, contentSender)
+  assert.equal(unauthorized.ok, false)
+  assert.equal(unauthorized.code, 'PASSKEY_PROXY_UNAUTHORIZED')
+  assert.deepEqual(calls.map((call) => call.method), ['detach'])
+
+  const probed = await background.dispatch({ type: 'MYPWDMG_PROBE_PASSKEY_PROXY' }, popupSender)
+  assert.equal(probed.ok, true)
+  assert.equal(probed.data.supported, true)
+  assert.equal(probed.data.attached, true)
+  assert.equal(probed.data.detached, true)
+  assert.equal(probed.data.permissionRemoved, true)
+  assert.deepEqual(calls.map((call) => call.method), ['detach', 'detach', 'attach', 'detach', 'detach'])
+  assert.equal(background.hasPermission('webAuthenticationProxy'), false)
+  assert.equal(background.getStorage().passkeyProxyProbePending, false)
+})
+
+test('background reports an unavailable passkey proxy without attaching', async () => {
+  const background = loadBackground(() => ({ ok: true, data: {} }))
+  const popupSender = {
+    id: 'abcdefghijklmnopabcdefghijklmnop',
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const response = await background.dispatch({ type: 'MYPWDMG_PROBE_PASSKEY_PROXY' }, popupSender)
+
+  assert.equal(response.ok, false)
+  assert.equal(response.code, 'PASSKEY_PROXY_API_UNAVAILABLE')
+  assert.equal(response.data.supported, false)
+  assert.equal(response.data.detached, false)
+  assert.equal(response.data.permissionRemoved, false)
+})
+
+test('background startup proactively detaches a stale proxy attachment', async () => {
+  let attached = true
+  const { proxy, calls } = passkeyProxyMock({
+    async detach() {
+      calls.push({ method: 'detach' })
+      attached = false
+    }
+  })
+  const background = loadBackground(
+    () => ({ ok: true, data: {} }),
+    { id: 7, url: 'https://login.example.com/' },
+    { webAuthenticationProxy: proxy }
+  )
+
+  for (let index = 0; index < 6; index += 1) await Promise.resolve()
+
+  assert.equal(attached, false)
+  assert.deepEqual(calls.map((call) => call.method), ['detach'])
+  assert.equal(background.hasPermission('webAuthenticationProxy'), true)
+})
+
+test('background recovers a granted permission when the popup disappears', async () => {
+  const { proxy, calls } = passkeyProxyMock()
+  const recoveryTimerId = 9001
+  const background = loadBackground(
+    () => ({ ok: true, data: {} }),
+    { id: 7, url: 'https://login.example.com/' },
+    {
+      webAuthenticationProxy: proxy,
+      grantedPermissions: [],
+      setTimeout(callback, duration) {
+        if (duration === 10000) {
+          queueMicrotask(callback)
+          return recoveryTimerId
+        }
+        return setTimeout(callback, duration)
+      },
+      clearTimeout(id) {
+        if (id !== recoveryTimerId) clearTimeout(id)
+      }
+    }
+  )
+  for (let index = 0; index < 6; index += 1) await Promise.resolve()
+  background.setStorage({ passkeyProxyProbePending: true })
+  background.grantPermission('webAuthenticationProxy')
+
+  await background.permissionAdded.emit({ permissions: ['webAuthenticationProxy'] })
+  for (let index = 0; index < 12; index += 1) await Promise.resolve()
+
+  assert.equal(background.hasPermission('webAuthenticationProxy'), false)
+  assert.equal(background.getStorage().passkeyProxyProbePending, false)
+  assert.ok(calls.filter((call) => call.method === 'detach').length >= 2)
+})
+
+test('background does not mask repeated detach failure with another probe error', async () => {
+  let detachAttempts = 0
+  const { proxy } = passkeyProxyMock({
+    async detach() {
+      detachAttempts += 1
+      if (detachAttempts >= 3) throw new Error('detach blocked')
+    }
+  })
+  const background = loadBackground(
+    () => ({ ok: true, data: {} }),
+    { id: 7, url: 'https://login.example.com/' },
+    { webAuthenticationProxy: proxy }
+  )
+  const popupSender = {
+    id: 'abcdefghijklmnopabcdefghijklmnop',
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const response = await background.dispatch({ type: 'MYPWDMG_PROBE_PASSKEY_PROXY' }, popupSender)
+
+  assert.equal(response.ok, false)
+  assert.equal(response.code, 'PASSKEY_PROXY_DETACH_FAILED')
+  assert.equal(response.data.detached, false)
+  assert.equal(response.data.permissionRemoved, true)
+  assert.match(response.message, /重新加载扩展/)
+})
+
+test('manifest loads shared policy and keeps postponed passkey UI disabled', () => {
   const manifest = JSON.parse(source('manifest.json'))
   assert.deepEqual(manifest.content_scripts[0].js, ['security-core.js', 'content.js'])
   assert.equal(manifest.content_scripts[0].css, undefined)
   assert.ok(manifest.web_accessible_resources[0].resources.includes('content.css'))
+  assert.equal(manifest.optional_permissions, undefined)
+
+  const background = source('background.js')
+  assert.ok(background.indexOf("import './passkey-proxy-probe.js'") < background.indexOf('getPasskeyProxyBinding()'))
+
+  const popup = source('popup.js')
+  assert.doesNotMatch(popup, /passkeyProbe|webAuthenticationProxy|MYPWDMG_PROBE_PASSKEY_PROXY/)
+  assert.doesNotMatch(source('popup.html'), /通行密钥|passkeyProbe/)
 })

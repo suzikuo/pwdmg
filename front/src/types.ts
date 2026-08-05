@@ -2,6 +2,8 @@ export type EntryKind = 'login' | 'folder'
 export type LoginAccountSource = 'auto' | 'username' | 'email' | 'phone'
 export type EntryStatus = 'active' | 'disabled' | 'trashed'
 export type EntryHistoryAction = 'created' | 'updated' | 'disabled' | 'restored' | 'trashed'
+export type VaultPayloadVersion = 1 | 2
+export type PasskeyTransport = 'usb' | 'nfc' | 'ble' | 'internal' | 'hybrid' | 'smart-card'
 
 export interface VaultEntryHistory {
   id: string
@@ -13,6 +15,7 @@ export interface VaultEntryHistory {
   phone?: string
   domains?: string[]
   note?: string
+  snapshot?: VaultEntrySnapshot
 }
 
 export interface VaultEntry {
@@ -35,10 +38,41 @@ export interface VaultEntry {
   children?: VaultEntry[]
 }
 
+export type VaultEntrySnapshot = Omit<VaultEntry, 'history' | 'children'>
+
+export interface VaultPasskey {
+  id: string
+  credentialId: string
+  rpId: string
+  rpName?: string
+  userHandle: string
+  userName: string
+  userDisplayName?: string
+  algorithm: number
+  publicKeyCose: string
+  privateKeyPkcs8: string
+  discoverable: boolean
+  backupEligible: boolean
+  backupState: boolean
+  transports: PasskeyTransport[]
+  entryId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface VaultPasskeyTombstone {
+  id: string
+  credentialId: string
+  deletedAt: number
+}
+
 export interface VaultPayload {
-  version: number
+  version: VaultPayloadVersion
+  passkeySchemaVersion?: 1
   revision: number
   entries: VaultEntry[]
+  passkeys: VaultPasskey[]
+  passkeyTombstones: VaultPasskeyTombstone[]
   settings: {
     oss: {
       bucketName: string

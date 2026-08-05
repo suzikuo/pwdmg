@@ -1,3 +1,5 @@
+import { requireCurrentRevision, requireNextRevision } from './revisionGuards'
+
 const DB_NAME = 'mypwdmg-web-vault'
 const DB_VERSION = 1
 const KV_STORE = 'kv'
@@ -25,14 +27,16 @@ export async function idbSet<T>(key: string, value: T): Promise<void> {
 export async function idbSetIfRevision<T>(key: string, value: T, expectedRevision: number): Promise<void> {
   await withStore('readwrite', async (store) => {
     const record = await requestToPromise<KvRecord<unknown> | undefined>(store.get(key))
-    const current = record?.value as { revision?: unknown } | null | undefined
-    const currentRevision = record
-      ? Math.max(1, Math.floor(Number(current?.revision || 1)))
-      : 0
-    if (currentRevision !== expectedRevision) throw new Error('Vault revision conflict; reload before saving')
-    const next = value as { revision?: unknown } | null | undefined
-    const nextRevision = Math.max(1, Math.floor(Number(next?.revision || 1)))
-    if (nextRevision !== currentRevision + 1) throw new Error('Vault revision must advance by exactly one')
+    const currentRevision = requireCurrentRevision(record?.value, Boolean(record), expectedRevision)
+    requireNextRevision(value, currentRevision)
+    store.put({ key, value })
+  })
+}
+
+export async function idbSetIfCurrentRevision<T>(key: string, value: T, expectedRevision: number): Promise<void> {
+  await withStore('readwrite', async (store) => {
+    const record = await requestToPromise<KvRecord<unknown> | undefined>(store.get(key))
+    requireCurrentRevision(record?.value, Boolean(record), expectedRevision)
     store.put({ key, value })
   })
 }

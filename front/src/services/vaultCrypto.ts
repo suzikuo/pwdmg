@@ -2,7 +2,7 @@ import type { VaultPayload } from '../types'
 
 export type VaultEnvelope = {
   format: 'mypwdmg-vault'
-  version: 1
+  version: 1 | 2
   revision?: number
   cipher: 'AES-256-GCM'
   passwordless?: boolean
@@ -21,38 +21,49 @@ export type VaultKey = {
   iterations: number
 }
 
-const AAD = new TextEncoder().encode('mypwdmg-vault-v1')
+const AAD_BY_VERSION = {
+  1: new TextEncoder().encode('mypwdmg-vault-v1'),
+  2: new TextEncoder().encode('mypwdmg-vault-v2')
+} as const
 const DEFAULT_ITERATIONS = 390_000
 const MIN_ITERATIONS = 10_000
 const MAX_ITERATIONS = 2_000_000
 const SALT_BYTES = 16
 const NONCE_BYTES = 12
 const MAX_CIPHERTEXT_BYTES = 16 * 1024 * 1024 + 16
+const MAX_PLAINTEXT_BYTES = MAX_CIPHERTEXT_BYTES - 16
 
 export async function encryptPayload(password: string, payload: VaultPayload) {
   const salt = randomBytes(16)
   const key = await deriveVaultKey(password, salt, DEFAULT_ITERATIONS)
   const vaultKey = { key, salt, iterations: DEFAULT_ITERATIONS }
   const envelope = await encryptPayloadWithKey(vaultKey, payload)
-  envelope.passwordless = (password || '') === ''
+  setEnvelopePasswordless(envelope, (password || '') === '')
   return {
     envelope,
     vaultKey
   }
 }
 
+export function setEnvelopePasswordless(envelope: VaultEnvelope, passwordless: boolean): VaultEnvelope {
+  envelope.passwordless = passwordless === true
+  return envelope
+}
+
 export async function encryptPayloadWithKey(vaultKey: VaultKey, payload: VaultPayload): Promise<VaultEnvelope> {
   const nonce = randomBytes(12)
+  const version = readPayloadVersionForEncryption(payload)
   const raw = new TextEncoder().encode(JSON.stringify(payload))
+  if (raw.byteLength > MAX_PLAINTEXT_BYTES) throw new Error('Vault payload is too large')
   const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: toArrayBuffer(nonce), additionalData: toArrayBuffer(AAD) },
+    { name: 'AES-GCM', iv: toArrayBuffer(nonce), additionalData: toArrayBuffer(AAD_BY_VERSION[version]) },
     vaultKey.key,
     toArrayBuffer(raw)
   )
 
   return {
     format: 'mypwdmg-vault',
-    version: 1,
+    version,
     revision: Math.max(1, Math.floor(Number(payload.revision || 1))),
     cipher: 'AES-256-GCM',
     kdf: {
@@ -89,12 +100,13 @@ export async function decryptPayloadWithKey(vaultKey: VaultKey, envelope: VaultE
     {
       name: 'AES-GCM',
       iv: toArrayBuffer(base64ToBytes(envelope.nonce)),
-      additionalData: toArrayBuffer(AAD)
+      additionalData: toArrayBuffer(AAD_BY_VERSION[envelope.version])
     },
     vaultKey.key,
     toArrayBuffer(base64ToBytes(envelope.ciphertext))
   )
   const payload = JSON.parse(new TextDecoder().decode(decrypted)) as VaultPayload
+  assertEnvelopePayloadVersion(envelope, payload)
   assertEnvelopeRevision(envelope, payload)
   return payload
 }
@@ -106,7 +118,7 @@ export function validateEnvelope(value: unknown): VaultEnvelope {
   if (
     !envelope ||
     envelope.format !== 'mypwdmg-vault' ||
-    envelope.version !== 1 ||
+    (envelope.version !== 1 && envelope.version !== 2) ||
     envelope.cipher !== 'AES-256-GCM' ||
     envelope.kdf?.name !== 'PBKDF2-HMAC-SHA256' ||
     !Number.isSafeInteger(iterations) ||
@@ -209,6 +221,44 @@ function assertEnvelopeRevision(envelope: VaultEnvelope, payload: VaultPayload) 
   if (envelope.revision === undefined) return
   const payloadRevision = Math.max(1, Math.floor(Number(payload?.revision || 1)))
   if (payloadRevision !== envelope.revision) throw new Error('Vault revision metadata does not match its payload')
+}
+
+function assertEnvelopePayloadVersion(envelope: VaultEnvelope, payload: VaultPayload) {
+  if (readDeclaredPayloadVersion(payload) !== envelope.version) {
+    throw new Error('Vault version metadata does not match its payload')
+  }
+  if (envelope.version === 2) requirePasskeyCollections(payload)
+}
+
+function readDeclaredPayloadVersion(payload: Pick<VaultPayload, 'version'>): 1 | 2 {
+  const version: unknown = payload?.version ?? 1
+  if (version !== 1 && version !== 2) throw new Error('Unsupported vault payload version')
+  return version
+}
+
+function readPayloadVersionForEncryption(payload: VaultPayload): 1 | 2 {
+  const version = readDeclaredPayloadVersion(payload)
+  const collections = requirePasskeyCollections(payload, version === 2)
+  if (version === 1 && collections.some((collection) => collection.length > 0)) {
+    throw new Error('Vault payload version 1 cannot contain passkey state')
+  }
+  if (version === 2 && payload.passkeySchemaVersion !== 1) {
+    throw new Error('Vault payload version 2 requires passkeySchemaVersion 1')
+  }
+  return version
+}
+
+function requirePasskeyCollections(payload: VaultPayload, required = true): unknown[][] {
+  const value = payload as unknown as Record<string, unknown>
+  return ['passkeys', 'passkeyTombstones'].map((field) => {
+    if (required && !Object.prototype.hasOwnProperty.call(value, field)) {
+      throw new Error(`Vault payload version 2 requires ${field}`)
+    }
+    const collection = value[field]
+    if (collection === undefined && !required) return []
+    if (!Array.isArray(collection)) throw new Error(`Vault ${field} must be an array`)
+    return collection
+  })
 }
 
 function toArrayBuffer(bytes: Uint8Array) {

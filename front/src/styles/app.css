@@ -15,9 +15,11 @@
   --app-font-md: calc(14px * var(--ui-scale));
   --app-font-lg: calc(16px * var(--ui-scale));
   --app-font-xl: calc(22px * var(--ui-scale));
-  --topbar-height: calc(50px * var(--ui-scale));
-  --top-icon-size: calc(38px * var(--ui-scale));
+  --topbar-height: max(48px, calc(50px * var(--ui-scale)));
+  --top-icon-size: max(40px, calc(38px * var(--ui-scale)));
+  --editor-popup-max-height: min(88vh, 720px);
   --editor-popup-max-height: min(88dvh, 720px);
+  --sheet-viewport-height: 100vh;
   --sheet-viewport-height: 100dvh;
   color: var(--text-main);
   background: var(--app-bg);
@@ -102,6 +104,7 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  min-height: 100dvh;
   color: var(--text-main);
   font-size: var(--app-font-md);
   background:
@@ -111,13 +114,16 @@ body {
 
 .app-shell {
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--app-bg);
 }
 
 .auth-screen {
   min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   align-content: center;
+  align-content: safe center;
   gap: 18px;
   padding: calc(28px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
   max-width: 460px;
@@ -183,6 +189,7 @@ body {
 
 .workspace {
   min-height: 100vh;
+  min-height: 100dvh;
   padding-bottom: 22px;
 }
 
@@ -648,6 +655,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
   align-self: start;
   overflow: auto;
   max-height: calc(100vh - var(--topbar-height) - 42px);
+  max-height: calc(100dvh - var(--topbar-height) - 42px);
 }
 
 .pane-resizer {
@@ -726,6 +734,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
   max-height: 100vh !important;
   max-height: 100dvh !important;
   min-height: 100vh;
+  min-height: 100dvh;
   border-radius: 0;
 }
 
@@ -1144,6 +1153,48 @@ body.is-entry-pointer-drag .entry-drop-zone {
   background: var(--panel-bg-muted);
 }
 
+.detail-history {
+  margin-top: calc(14px * var(--ui-scale));
+  border-top: 1px solid var(--border-soft);
+}
+
+.detail-history-head,
+.detail-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(10px * var(--ui-scale));
+  min-width: 0;
+}
+
+.detail-history-head {
+  padding: calc(12px * var(--ui-scale)) 4px calc(6px * var(--ui-scale));
+}
+
+.detail-history-head span,
+.detail-history-row span {
+  color: var(--text-muted);
+  font-size: var(--app-font-sm);
+}
+
+.detail-history-row {
+  padding: calc(9px * var(--ui-scale)) 4px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.detail-history-row > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detail-history-row > div > strong,
+.detail-history-row > div > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .backup-info-grid span,
 .cloud-backup-item small,
 .archive-entry span,
@@ -1327,11 +1378,14 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .cloud-sync-popup {
   max-height: min(82vh, 720px);
+  max-height: min(82dvh, 720px);
 }
 
 .cloud-sync-shell {
-  min-height: 360px;
+  min-height: min(360px, 82vh);
+  min-height: min(360px, 82dvh);
   max-height: min(82vh, 720px);
+  max-height: min(82dvh, 720px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--panel-bg);
@@ -1720,6 +1774,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .nav-drawer {
   width: min(86vw, 360px);
   height: 100%;
+  max-height: 100vh;
   max-height: 100dvh;
   overflow: hidden;
   max-width: 360px;
@@ -1773,7 +1828,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .drawer-nav button {
-  height: calc(44px * var(--ui-scale));
+  min-height: max(40px, calc(44px * var(--ui-scale)));
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
@@ -1980,6 +2035,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .password-popup {
   width: min(92vw, 380px);
+  max-height: min(82vh, 520px);
   max-height: min(82dvh, 520px);
   overflow: hidden;
   background: var(--panel-bg);
@@ -1987,6 +2043,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .password-popup-inner {
   display: flex;
+  max-height: min(82vh, 520px);
   max-height: min(82dvh, 520px);
   flex-direction: column;
   overflow: hidden;
@@ -2003,6 +2060,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .plugin-detail-popup {
   width: min(92vw, 420px);
   height: 100%;
+  max-height: 100vh;
   max-height: 100dvh;
   overflow: hidden;
   background: var(--panel-bg);
@@ -2023,6 +2081,162 @@ body.is-entry-pointer-drag .entry-drop-zone {
   padding: 12px 12px max(18px, env(safe-area-inset-bottom));
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.password-health-body {
+  gap: 16px;
+}
+
+.password-health-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.password-health-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 14px 6px;
+  text-align: center;
+}
+
+.password-health-summary > div + div {
+  border-left: 1px solid var(--border-soft);
+}
+
+.password-health-summary strong {
+  color: var(--text-main);
+  font-size: var(--app-font-xl);
+  line-height: 1;
+}
+
+.password-health-summary span {
+  color: var(--text-muted);
+  font-size: var(--app-font-sm);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.password-health-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.password-health-section-head strong {
+  color: var(--text-main);
+  font-size: var(--app-font-md);
+}
+
+.password-health-section-head span {
+  color: var(--text-muted);
+  font-size: var(--app-font-sm);
+}
+
+.password-health-list {
+  display: grid;
+  border-top: 1px solid var(--border-soft);
+}
+
+.password-health-entry {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text-main);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.password-health-entry:active,
+.password-health-entry:hover {
+  background: var(--panel-bg-muted);
+}
+
+.password-health-entry-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: #b45309;
+  font-size: calc(18px * var(--ui-scale));
+}
+
+.password-health-entry-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.password-health-entry-copy strong,
+.password-health-entry-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.password-health-entry-copy strong {
+  font-size: var(--app-font-md);
+}
+
+.password-health-entry-copy small {
+  color: var(--text-muted);
+  font-size: var(--app-font-sm);
+}
+
+.password-health-issues {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.password-health-issues em {
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #b91c1c;
+  font-size: var(--app-font-sm);
+  font-style: normal;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, #ef4444, transparent 90%);
+}
+
+.password-health-entry-arrow {
+  color: var(--text-muted);
+}
+
+.password-health-warning {
+  margin: 0;
+  color: #b45309;
+  font-size: var(--app-font-sm);
+  line-height: 1.5;
+}
+
+@media (max-width: 359px) {
+  .password-health-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .password-health-summary > div:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid var(--border-soft);
+  }
+
+  .password-health-summary > div:nth-child(4) {
+    border-top: 1px solid var(--border-soft);
+  }
 }
 
 .drawer-empty {
@@ -2094,6 +2308,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
     grid-column: 2;
     grid-row: 1 / span 2;
     min-height: 0;
+    max-height: calc(100vh - (28px * var(--ui-scale)) - max(18px, env(safe-area-inset-bottom)));
     max-height: calc(100dvh - (28px * var(--ui-scale)) - max(18px, env(safe-area-inset-bottom)));
     align-content: start;
     overflow-y: auto;
@@ -2151,6 +2366,37 @@ body.is-entry-pointer-drag .entry-kind-mark {
   .entry-right .mini-delete-action {
     display: none;
   }
+
+  .entry-context-menu button,
+  .top-menu-popover .van-popover__action {
+    min-height: 40px;
+  }
+
+  .van-button--small,
+  .van-button--mini {
+    min-height: 40px;
+  }
+
+  .van-stepper__minus,
+  .van-stepper__plus {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }
+
+  .detail-row {
+    grid-template-columns: minmax(46px, 64px) minmax(0, 1fr) repeat(2, 40px);
+  }
+
+  .detail-delete-button,
+  .icon-action.van-button--mini,
+  .inline-icon-button,
+  .swipe-icon-action {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+  }
 }
 
 @media (min-width: 820px) {
@@ -2172,6 +2418,7 @@ body.is-entry-pointer-drag .entry-kind-mark {
     display: block;
     width: 10px;
     min-height: calc(100vh - 94px);
+    min-height: calc(100dvh - 94px);
     position: sticky;
     top: 70px;
     cursor: col-resize;
@@ -2185,14 +2432,21 @@ body.is-entry-pointer-drag .entry-kind-mark {
     width: 2px;
     height: 100%;
     min-height: calc(100vh - 94px);
+    min-height: calc(100dvh - 94px);
     margin: 0 auto;
     border-radius: 999px;
     background: var(--border-soft);
   }
 
   .pane-resizer:hover::before,
+  .pane-resizer:focus-visible::before,
   body.is-resizing-pane .pane-resizer::before {
     background: color-mix(in srgb, var(--brand), transparent 25%);
+  }
+
+  .pane-resizer:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand), transparent 35%);
+    outline-offset: -2px;
   }
 
   .entry-meta {
@@ -2217,13 +2471,13 @@ body.is-entry-pointer-drag .entry-kind-mark {
 
 @media (max-width: 420px) {
   .detail-row {
-    grid-template-columns: minmax(42px, 54px) minmax(0, 1fr) repeat(2, 28px);
+    grid-template-columns: minmax(42px, 54px) minmax(0, 1fr) repeat(2, 40px);
     gap: 6px;
   }
 
   .icon-action.van-button--mini {
-    width: 28px;
-    min-width: 28px;
+    width: 40px;
+    min-width: 40px;
   }
 
   .account-source-field {

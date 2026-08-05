@@ -73,8 +73,8 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
-    public String writeVaultEnvelope(String envelopeText, boolean protectBackup) {
-        return result(() -> store.writeVaultEnvelope(envelopeText, protectBackup));
+    public String writeVaultEnvelope(String envelopeText, boolean protectBackup, long expectedRevision) {
+        return result(() -> store.writeVaultEnvelope(envelopeText, protectBackup, expectedRevision));
     }
 
     @JavascriptInterface
@@ -202,6 +202,11 @@ public final class AndroidPasswordBridge {
     @JavascriptInterface
     public String saveVault(String payloadJson) {
         return result(() -> store.saveVault(new JSONObject(payloadJson)));
+    }
+
+    @JavascriptInterface
+    public String deletePasskey(String passkeyId) {
+        return result(() -> store.deletePasskeyForWeb(passkeyId));
     }
 
     @JavascriptInterface
@@ -427,6 +432,8 @@ public final class AndroidPasswordBridge {
             return error("LOCKED", error.getMessage());
         } catch (AndroidVaultStore.BadPasswordException error) {
             return error("BAD_PASSWORD", error.getMessage());
+        } catch (AndroidVaultStore.ConflictException error) {
+            return error("CONFLICT", error.getMessage());
         } catch (Exception error) {
             return error("ERROR", error.getMessage());
         }
@@ -545,4 +552,3 @@ public final class AndroidPasswordBridge {
         }
     }
 }
-

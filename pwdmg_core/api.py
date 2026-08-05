@@ -95,8 +95,10 @@ class PasswordManagerApi:
     def queryMatches(self, hostname: str) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.query_matches(hostname))
 
-    def getFillPayload(self, entryId: str) -> Dict[str, Any]:
-        return self._call_result(lambda: self.service.get_fill_payload(entryId))
+    def getFillPayload(self, entryId: str, hostname: str) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.get_fill_payload_for_host(entryId, hostname)
+        )
 
     def listSaveTargets(self) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.list_save_targets())

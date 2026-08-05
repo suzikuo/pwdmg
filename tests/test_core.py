@@ -1,14 +1,49 @@
+import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
 from pwdmg_core.crypto import VaultCryptoError, decrypt_payload, encrypt_payload
 from pwdmg_core.domain import domain_matches
 from pwdmg_core.totp import generate_totp
-from pwdmg_core.vault import VaultService, default_payload
+from pwdmg_core.vault import VaultLockedError, VaultService, default_payload
 
 
 class CoreTests(unittest.TestCase):
+    def test_vault_service_serializes_shared_session_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VaultService(
+                vault_path=Path(tmp) / "vault.json",
+                legacy_path=Path(tmp) / "missing.json",
+            )
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            second_completed = threading.Event()
+
+            def slow_passwordless_check():
+                first_entered.set()
+                release_first.wait(2)
+                return False
+
+            service._is_passwordless_vault = slow_passwordless_check
+            first = threading.Thread(target=service.state)
+            second = threading.Thread(
+                target=lambda: (service.storage_state(), second_completed.set())
+            )
+            first.start()
+            self.assertTrue(first_entered.wait(1))
+            second.start()
+            self.assertFalse(second_completed.wait(0.05))
+            release_first.set()
+            first.join(1)
+            second.join(1)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertTrue(second_completed.is_set())
+
     def test_encrypt_decrypt_roundtrip(self):
         envelope, _ = encrypt_payload("correct horse battery staple", {"entries": [{"title": "A"}]})
         payload, _ = decrypt_payload("correct horse battery staple", envelope)
@@ -37,6 +72,26 @@ class CoreTests(unittest.TestCase):
             service.save_vault(default_payload([{"id": "entry-1", "kind": "login", "title": "Example"}]))
             self.assertTrue(service.storage_state()["passwordless"])
 
+    def test_unlock_repairs_stale_passwordless_marker_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault_path = Path(tmp) / "vault.json"
+            legacy_path = Path(tmp) / "missing.json"
+            service = VaultService(vault_path=vault_path, legacy_path=legacy_path)
+            service.create_vault("password123", import_legacy=False)
+            service.lock()
+
+            envelope = json.loads(vault_path.read_text(encoding="utf-8"))
+            original_revision = envelope["revision"]
+            envelope["passwordless"] = True
+            vault_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+            service.unlock("password123")
+
+            repaired = json.loads(vault_path.read_text(encoding="utf-8"))
+            self.assertIs(repaired["passwordless"], False)
+            self.assertEqual(repaired["revision"], original_revision + 1)
+            self.assertFalse(service.storage_state()["passwordless"])
+
     def test_passwordless_vault_auto_unlocks_for_native_queries(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault_path = Path(tmp) / "vault.json"
@@ -63,6 +118,30 @@ class CoreTests(unittest.TestCase):
 
             self.assertEqual([match["id"] for match in matches], ["entry-1"])
             self.assertFalse(restored.state()["locked"])
+
+    def test_expired_session_cannot_release_vault_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VaultService(
+                vault_path=Path(tmp) / "vault.json",
+                legacy_path=Path(tmp) / "missing.json",
+                session_seconds=60,
+            )
+            service.create_vault("password123", import_legacy=False)
+            service._expires_at = time.time() - 1
+            with self.assertRaises(VaultLockedError):
+                service.get_vault()
+            self.assertTrue(service.state()["locked"])
+
+    def test_zero_session_timeout_preserves_explicit_indefinite_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VaultService(
+                vault_path=Path(tmp) / "vault.json",
+                legacy_path=Path(tmp) / "missing.json",
+                session_seconds=0,
+            )
+            service.create_vault("password123", import_legacy=False)
+            self.assertFalse(service.state()["locked"])
+            self.assertGreater(service.state()["expiresAt"], int(time.time()))
 
     def test_domain_matching(self):
         self.assertTrue(domain_matches("www.example.com", "example.com"))
@@ -112,6 +191,12 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(fill["password"], "secret")
             self.assertEqual(fill["email"], "alice@example.com")
             self.assertEqual(fill["loginAccountSource"], "email")
+            authorized_fill = service.get_fill_payload_for_host("entry-1", "app.example.com")
+            self.assertEqual(authorized_fill["password"], "secret")
+            with self.assertRaises(ValueError):
+                service.get_fill_payload_for_host("entry-1", "attacker.example.net")
+            with self.assertRaises(ValueError):
+                service.get_fill_payload_for_host("entry-1", "")
 
     def test_vault_service_query_matches_wildcard_domain(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,18 +3,21 @@ import { androidStorageAdapter } from './androidStorageAdapter'
 import { fail, ok, type CreateVaultResult, type PasswordManagerApiAdapter, type StartupData } from './apiTypes'
 import { callDesktopApi, desktopStorageAdapter } from './desktopStorageAdapter'
 import { migrateLegacyStorageText } from './legacyWeb'
+import { removePasskeyWithTombstone } from './passkeyManagement'
+import { SessionGeneration } from './sessionGeneration'
 import type { VaultStorageAdapter } from './storageTypes'
 import { cloneVaultPayload, defaultVaultPayload, normalizeVaultPayload, nowSeconds } from './vaultDefaults'
-import { decryptPayload, decryptPayloadWithKey, encryptPayload, encryptPayloadWithKey, validateEnvelope, type VaultKey } from './vaultCrypto'
+import { decryptPayload, decryptPayloadWithKey, encryptPayload, encryptPayloadWithKey, setEnvelopePasswordless, validateEnvelope, type VaultKey } from './vaultCrypto'
 import { webStorageAdapter } from './webStorageAdapter'
 
-const UNLOCKED_EXPIRES_AT = Number.MAX_SAFE_INTEGER
+const SESSION_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_VAULT_ENVELOPE_TEXT_LENGTH = 24 * 1024 * 1024
 
 let payload: VaultPayload | null = null
 let vaultKey: VaultKey | null = null
 let passwordless = false
 let expiresAt = 0
+const sessionGeneration = new SessionGeneration()
 
 export const api: PasswordManagerApiAdapter = {
   getAppInfo: () => selectedStorage().getAppInfo(),
@@ -25,6 +28,7 @@ export const api: PasswordManagerApiAdapter = {
   lock: () => nativeVaultCall('lock', () => guard(lock)),
   getVault: () => nativeVaultCall('getVault', () => guard(getVault)),
   saveVault: (nextPayload) => nativeVaultCall('saveVault', () => guard(() => saveVault(nextPayload)), nextPayload),
+  deletePasskey: (passkeyId) => nativeVaultCall('deletePasskey', () => guard(() => deletePasskey(passkeyId)), passkeyId),
   changePassword: (newPassword) => nativeVaultCall('changePassword', () => guard(() => changePassword(newPassword)), newPassword),
   exportVaultBackup: () => nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
   exportVaultBackupForPayload: (nextPayload) => nativeVaultCall('exportVaultBackupForPayload', () => guard(() => exportVaultBackupForPayload(nextPayload)), nextPayload),
@@ -83,8 +87,10 @@ async function getState(): Promise<AppState> {
 }
 
 async function createVault(password: string, importLegacy: boolean): Promise<CreateVaultResult> {
+  const generation = sessionGeneration.capture()
   const storage = selectedStorage()
   const storageState = unwrap(await storage.getStorageState())
+  sessionGeneration.requireCurrent(generation)
   if (storageState.hasVault) throw new Error('Vault already exists; unlock it instead')
 
   let nextPayload = defaultVaultPayload()
@@ -92,6 +98,7 @@ async function createVault(password: string, importLegacy: boolean): Promise<Cre
   let legacyDigest = ''
   if (importLegacy && storageState.legacyAvailable) {
     const legacyText = unwrap(await storage.readLegacyLocalStorage())
+    sessionGeneration.requireCurrent(generation)
     const migratedResult = migrateLegacyStorageText(legacyText)
     if (migratedResult.failed > 0) {
       throw new Error(`旧数据中有 ${migratedResult.failed} 条损坏记录，保险库尚未创建；请先保留并修复旧数据`)
@@ -99,13 +106,17 @@ async function createVault(password: string, importLegacy: boolean): Promise<Cre
     nextPayload = migratedResult.payload
     migrated = migratedResult.migrated
     legacyDigest = await sha256Text(legacyText)
+    sessionGeneration.requireCurrent(generation)
   }
 
   const normalized = normalizeVaultPayload(nextPayload)
   const encrypted = await encryptPayload(password || '', normalized)
+  sessionGeneration.requireCurrent(generation)
   unwrap(await storage.writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false, 0))
+  sessionGeneration.requireCurrent(generation)
   const persistedEnvelope = parseEnvelopeText(unwrap(await storage.readVaultEnvelope()))
   const verified = normalizeVaultPayload(await decryptPayloadWithKey(encrypted.vaultKey, persistedEnvelope))
+  sessionGeneration.requireCurrent(generation)
   if (JSON.stringify(verified) !== JSON.stringify(normalized)) {
     throw new Error('Encrypted vault verification failed; legacy data was not removed')
   }
@@ -113,35 +124,53 @@ async function createVault(password: string, importLegacy: boolean): Promise<Cre
   if (legacyDigest) {
     const cleanup = storage.cleanupLegacyStorage
     const cleanupResult = cleanup ? await cleanup(legacyDigest) : fail('UNSUPPORTED', 'Legacy cleanup is unavailable')
+    sessionGeneration.requireCurrent(generation)
     legacyCleanupPending = !cleanupResult.ok
   }
+  await cacheNativeSessionForGeneration(password || '', generation)
   payload = normalized
   vaultKey = encrypted.vaultKey
   passwordless = (password || '') === ''
   refreshSession()
-  await cacheNativeSession(password || '')
   return { vault: cloneVaultPayload(normalized), migrated, legacyCleanupPending }
 }
 
 async function unlock(password: string): Promise<VaultPayload> {
+  const generation = sessionGeneration.capture()
   const envelope = parseEnvelopeText(unwrap(await selectedStorage().readVaultEnvelope()))
+  sessionGeneration.requireCurrent(generation)
   const decrypted = await decryptPayload(password || '', envelope)
-  payload = normalizeVaultPayload(decrypted.payload)
-  vaultKey = decrypted.vaultKey
-  passwordless = (password || '') === ''
-  if (passwordless && envelope.passwordless !== true) {
-    const expectedRevision = payload.revision
-    payload = normalizeVaultPayload({ ...payload, revision: expectedRevision + 1 })
-    const upgradedEnvelope = await encryptPayloadWithKey(vaultKey, payload)
-    upgradedEnvelope.passwordless = true
+  sessionGeneration.requireCurrent(generation)
+  const rawPayload = decrypted.payload as Partial<VaultPayload>
+  const unlockedPasswordless = (password || '') === ''
+  let unlockedPayload = normalizeVaultPayload(rawPayload)
+  const needsSchemaRewrite = rawPayload.version !== unlockedPayload.version ||
+    rawPayload.passkeySchemaVersion !== unlockedPayload.passkeySchemaVersion ||
+    JSON.stringify(rawPayload.passkeys ?? []) !== JSON.stringify(unlockedPayload.passkeys) ||
+    JSON.stringify(rawPayload.passkeyTombstones ?? []) !== JSON.stringify(unlockedPayload.passkeyTombstones)
+  if (needsSchemaRewrite || envelope.passwordless !== unlockedPasswordless) {
+    const expectedRevision = unlockedPayload.revision
+    unlockedPayload = normalizeVaultPayload({
+      ...unlockedPayload,
+      revision: expectedRevision + 1,
+      updatedAt: nowSeconds()
+    })
+    const upgradedEnvelope = await encryptPayloadWithKey(decrypted.vaultKey, unlockedPayload)
+    sessionGeneration.requireCurrent(generation)
+    setEnvelopePasswordless(upgradedEnvelope, unlockedPasswordless)
     unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(upgradedEnvelope, null, 2), false, expectedRevision))
+    sessionGeneration.requireCurrent(generation)
   }
+  await cacheNativeSessionForGeneration(password || '', generation)
+  payload = unlockedPayload
+  vaultKey = decrypted.vaultKey
+  passwordless = unlockedPasswordless
   refreshSession()
-  await cacheNativeSession(password || '')
-  return cloneVaultPayload(payload)
+  return cloneVaultPayload(unlockedPayload)
 }
 
 async function lock(): Promise<AppState> {
+  sessionGeneration.invalidate()
   payload = null
   vaultKey = null
   passwordless = false
@@ -155,38 +184,60 @@ async function getVault(): Promise<VaultPayload> {
 }
 
 async function saveVault(nextPayload: VaultPayload): Promise<VaultPayload> {
+  const generation = sessionGeneration.capture()
   const current = await requirePayload()
-  if (!vaultKey) throw new Error('Vault is locked')
+  sessionGeneration.requireCurrent(generation)
+  const currentKey = vaultKey
+  const currentPasswordless = passwordless
+  if (!currentKey) throw new Error('Vault is locked')
   const expectedRevision = Math.max(1, Math.floor(Number(nextPayload.revision || 1)))
   if (expectedRevision !== current.revision) {
     throw new ApiResultError('CONFLICT', 'Vault changed in another window; reload before saving')
   }
 
-  payload = normalizeVaultPayload({ ...nextPayload, revision: expectedRevision + 1, updatedAt: nowSeconds() })
-  const envelope = await encryptPayloadWithKey(vaultKey, payload)
-  envelope.passwordless = passwordless
+  const normalized = normalizeVaultPayload({ ...nextPayload, revision: expectedRevision + 1, updatedAt: nowSeconds() })
+  assertNoKnownVaultDowngrade(current, normalized)
+  const envelope = await encryptPayloadWithKey(currentKey, normalized)
+  sessionGeneration.requireCurrent(generation)
+  setEnvelopePasswordless(envelope, currentPasswordless)
   unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(envelope, null, 2), false, expectedRevision))
+  sessionGeneration.requireCurrent(generation)
+  payload = normalized
   refreshSession()
   return cloneVaultPayload(payload)
 }
 
+async function deletePasskey(passkeyId: string): Promise<VaultPayload> {
+  const current = cloneVaultPayload(await requirePayload())
+  if (!removePasskeyWithTombstone(current, passkeyId, nowSeconds())) {
+    throw new Error('通行密钥不存在')
+  }
+  return saveVault(current)
+}
+
 async function changePassword(newPassword: string): Promise<AppState> {
+  const generation = sessionGeneration.capture()
   const currentPayload = cloneVaultPayload(await requirePayload())
+  sessionGeneration.requireCurrent(generation)
   const expectedRevision = currentPayload.revision
   const current = normalizeVaultPayload({ ...currentPayload, revision: expectedRevision + 1, updatedAt: nowSeconds() })
   const encrypted = await encryptPayload(newPassword || '', current)
+  sessionGeneration.requireCurrent(generation)
   unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false, expectedRevision))
+  sessionGeneration.requireCurrent(generation)
+  await cacheNativeSessionForGeneration(newPassword || '', generation)
   payload = current
   vaultKey = encrypted.vaultKey
   passwordless = (newPassword || '') === ''
   refreshSession()
-  await cacheNativeSession(newPassword || '')
   return getState()
 }
 
 async function exportVaultBackup(): Promise<VaultBackupExport> {
+  const generation = sessionGeneration.capture()
   await requirePayload()
   const content = unwrap(await selectedStorage().readVaultEnvelope())
+  sessionGeneration.requireCurrent(generation)
   return {
     content,
     vaultPath: unwrap(await selectedStorage().getStorageState()).vaultPath,
@@ -195,11 +246,17 @@ async function exportVaultBackup(): Promise<VaultBackupExport> {
 }
 
 async function exportVaultBackupForPayload(nextPayload: VaultPayload): Promise<VaultBackupExport> {
-  await requirePayload()
-  if (!vaultKey) throw new Error('Vault is locked')
+  const generation = sessionGeneration.capture()
+  const current = await requirePayload()
+  sessionGeneration.requireCurrent(generation)
+  const currentKey = vaultKey
+  const currentPasswordless = passwordless
+  if (!currentKey) throw new Error('Vault is locked')
   const normalized = normalizeVaultPayload({ ...nextPayload, updatedAt: nowSeconds() })
-  const envelope = await encryptPayloadWithKey(vaultKey, normalized)
-  envelope.passwordless = passwordless
+  assertNoKnownVaultDowngrade(current, normalized)
+  const envelope = await encryptPayloadWithKey(currentKey, normalized)
+  sessionGeneration.requireCurrent(generation)
+  setEnvelopePasswordless(envelope, currentPasswordless)
   return {
     content: JSON.stringify(envelope, null, 2),
     vaultPath: unwrap(await selectedStorage().getStorageState()).vaultPath,
@@ -208,26 +265,39 @@ async function exportVaultBackupForPayload(nextPayload: VaultPayload): Promise<V
 }
 
 async function previewVaultBackup(envelopeText: string): Promise<VaultPayload> {
+  const generation = sessionGeneration.capture()
   await requirePayload()
-  if (!vaultKey) throw new Error('Vault is locked')
+  sessionGeneration.requireCurrent(generation)
+  const currentKey = vaultKey
+  if (!currentKey) throw new Error('Vault is locked')
   const envelope = parseEnvelopeText(envelopeText)
-  const decrypted = await decryptPayloadWithKey(vaultKey, envelope)
+  const decrypted = await decryptPayloadWithKey(currentKey, envelope)
+  sessionGeneration.requireCurrent(generation)
   refreshSession()
   return cloneVaultPayload(normalizeVaultPayload(decrypted))
 }
 
 async function previewVaultBackupWithPassword(envelopeText: string, password: string): Promise<VaultPayload> {
+  const generation = sessionGeneration.capture()
   await requirePayload()
+  sessionGeneration.requireCurrent(generation)
   const envelope = parseEnvelopeText(envelopeText)
   const decrypted = await decryptPayload(password || '', envelope)
+  sessionGeneration.requireCurrent(generation)
   refreshSession()
   return cloneVaultPayload(normalizeVaultPayload(decrypted.payload))
 }
 
 async function importVaultBackup(envelopeText: string): Promise<VaultBackupImport> {
-  await requirePayload()
-  parseEnvelopeText(envelopeText)
-  const writeResult = unwrap(await selectedStorage().writeVaultEnvelope(envelopeText, true))
+  const generation = sessionGeneration.capture()
+  const current = await requirePayload()
+  sessionGeneration.requireCurrent(generation)
+  const incoming = parseEnvelopeText(envelopeText)
+  if (current.version === 2 && incoming.version < 2) {
+    throw new Error('Refusing to replace a version 2 vault with version 1')
+  }
+  const writeResult = unwrap(await selectedStorage().writeVaultEnvelope(envelopeText, true, current.revision))
+  sessionGeneration.requireCurrent(generation)
   await lock()
   return {
     state: await getState(),
@@ -237,15 +307,28 @@ async function importVaultBackup(envelopeText: string): Promise<VaultBackupImpor
 }
 
 async function requirePayload(): Promise<VaultPayload> {
+  const generation = sessionGeneration.capture()
   if (!isUnlocked() || !payload || !vaultKey) {
     await lock()
     throw new Error('Vault is locked')
   }
 
+  const currentPayload = payload
+  const currentKey = vaultKey
   const envelope = parseEnvelopeText(unwrap(await selectedStorage().readVaultEnvelope()))
-  payload = normalizeVaultPayload(await decryptPayloadWithKey(vaultKey, envelope))
+  sessionGeneration.requireCurrent(generation)
+  const reloaded = normalizeVaultPayload(await decryptPayloadWithKey(currentKey, envelope))
+  sessionGeneration.requireCurrent(generation)
+  assertNoKnownVaultDowngrade(currentPayload, reloaded)
+  payload = reloaded
   refreshSession()
   return payload
+}
+
+function assertNoKnownVaultDowngrade(current: VaultPayload, next: VaultPayload) {
+  if (current.version === 2 && next.version < 2) {
+    throw new Error('Refusing to downgrade a version 2 vault')
+  }
 }
 
 function selectedStorage(): VaultStorageAdapter {
@@ -283,16 +366,25 @@ function storageMode() {
 }
 
 function isUnlocked() {
-  return Boolean(payload && vaultKey && expiresAt > 0)
+  return Boolean(payload && vaultKey && expiresAt > Date.now())
 }
 
 function refreshSession() {
-  expiresAt = UNLOCKED_EXPIRES_AT
+  expiresAt = Date.now() + SESSION_TIMEOUT_MS
 }
 
 async function cacheNativeSession(password: string) {
   const cache = selectedStorage().cacheUnlockedSession
   if (cache) await cache(password)
+}
+
+async function cacheNativeSessionForGeneration(password: string, generation: number) {
+  sessionGeneration.requireCurrent(generation)
+  await cacheNativeSession(password)
+  if (!sessionGeneration.isCurrent(generation)) {
+    await clearNativeSession()
+    sessionGeneration.requireCurrent(generation)
+  }
 }
 
 async function clearNativeSession() {

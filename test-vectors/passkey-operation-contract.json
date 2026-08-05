@@ -1,0 +1,315 @@
+{
+  "valid": [
+    {
+      "name": "create_es256_exact_origin",
+      "kind": "create",
+      "origin": "https://login.example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "rp": {
+          "id": "login.example.com",
+          "name": "Example"
+        },
+        "user": {
+          "id": "dXNlci0x",
+          "name": "alice@example.com",
+          "displayName": "Alice"
+        },
+        "pubKeyCredParams": [
+          {
+            "type": "public-key",
+            "alg": -257
+          },
+          {
+            "type": "public-key",
+            "alg": -7
+          }
+        ],
+        "timeout": 200000,
+        "excludeCredentials": [
+          {
+            "type": "public-key",
+            "id": "AQIDBA"
+          },
+          {
+            "type": "public-key",
+            "id": "BQYHCA"
+          }
+        ],
+        "authenticatorSelection": {
+          "residentKey": "preferred",
+          "userVerification": "discouraged"
+        }
+      },
+      "expect": {
+        "origin": "https://login.example.com",
+        "rpId": "login.example.com",
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "timeoutMs": 120000,
+        "credentialIds": [
+          "AQIDBA",
+          "BQYHCA"
+        ],
+        "rpName": "Example",
+        "userName": "alice@example.com",
+        "discoverable": true,
+        "requiresUserVerification": true
+      }
+    },
+    {
+      "name": "get_es256_exact_origin",
+      "kind": "get",
+      "origin": "https://example.com:8443",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "EBESExQVFhcYGRobHB0eHw",
+        "rpId": "example.com",
+        "timeout": 1,
+        "allowCredentials": [
+          {
+            "type": "public-key",
+            "id": "AQIDBA"
+          },
+          {
+            "type": "public-key",
+            "id": "BQYHCA"
+          }
+        ],
+        "userVerification": "preferred"
+      },
+      "expect": {
+        "origin": "https://example.com:8443",
+        "rpId": "example.com",
+        "challenge": "EBESExQVFhcYGRobHB0eHw",
+        "timeoutMs": 15000,
+        "credentialIds": [
+          "AQIDBA",
+          "BQYHCA"
+        ],
+        "requiresUserVerification": true
+      }
+    },
+    {
+      "name": "get_defaults_rp_id_to_origin_host",
+      "kind": "get",
+      "origin": "https://login.example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "expect": {
+        "origin": "https://login.example.com",
+        "rpId": "login.example.com",
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "timeoutMs": 60000,
+        "credentialIds": [],
+        "requiresUserVerification": true
+      }
+    },
+    {
+      "name": "get_accepts_platform_authorized_rp_suffix",
+      "kind": "get",
+      "origin": "https://login.example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "rpId": "example.com"
+      },
+      "expect": {
+        "origin": "https://login.example.com",
+        "rpId": "example.com",
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "timeoutMs": 60000,
+        "credentialIds": [],
+        "requiresUserVerification": true
+      }
+    },
+    {
+      "name": "get_accepts_android_app_origin_with_explicit_rp",
+      "kind": "get",
+      "origin": "android:apk-key-hash:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "rpId": "example.com"
+      },
+      "expect": {
+        "origin": "android:apk-key-hash:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "rpId": "example.com",
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "timeoutMs": 60000,
+        "credentialIds": [],
+        "requiresUserVerification": true
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "invalid_request_json",
+      "kind": "get",
+      "origin": "https://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "requestJson": "[",
+      "errorCode": "INVALID_REQUEST_JSON"
+    },
+    {
+      "name": "origin_path_is_rejected",
+      "kind": "get",
+      "origin": "https://example.com/path",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "errorCode": "INVALID_ORIGIN"
+    },
+    {
+      "name": "remote_http_is_rejected",
+      "kind": "get",
+      "origin": "http://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "errorCode": "INVALID_ORIGIN"
+    },
+    {
+      "name": "client_data_hash_must_be_sha256_length",
+      "kind": "get",
+      "origin": "https://example.com",
+      "clientDataHash": "AQIDBA",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw"
+      },
+      "errorCode": "INVALID_CLIENT_DATA_HASH"
+    },
+    {
+      "name": "challenge_must_be_canonical_base64url",
+      "kind": "get",
+      "origin": "https://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AB"
+      },
+      "errorCode": "INVALID_CHALLENGE"
+    },
+    {
+      "name": "create_requires_es256",
+      "kind": "create",
+      "origin": "https://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "rp": {
+          "id": "example.com",
+          "name": "Example"
+        },
+        "user": {
+          "id": "dXNlci0x",
+          "name": "alice@example.com",
+          "displayName": "Alice"
+        },
+        "pubKeyCredParams": [
+          {
+            "type": "public-key",
+            "alg": -257
+          }
+        ]
+      },
+      "errorCode": "UNSUPPORTED_ALGORITHM"
+    },
+    {
+      "name": "credential_descriptors_must_not_repeat",
+      "kind": "get",
+      "origin": "https://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "allowCredentials": [
+          {
+            "type": "public-key",
+            "id": "AQIDBA"
+          },
+          {
+            "type": "public-key",
+            "id": "AQIDBA"
+          }
+        ]
+      },
+      "errorCode": "DUPLICATE_CREDENTIAL_ID"
+    },
+    {
+      "name": "credential_descriptors_must_be_public_key",
+      "kind": "get",
+      "origin": "https://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "allowCredentials": [
+          {
+            "type": "password",
+            "id": "AQIDBA"
+          }
+        ]
+      },
+      "errorCode": "INVALID_CREDENTIAL_DESCRIPTOR"
+    },
+    {
+      "name": "non_discoverable_create_is_rejected",
+      "kind": "create",
+      "origin": "https://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "rp": {
+          "id": "example.com",
+          "name": "Example"
+        },
+        "user": {
+          "id": "dXNlci0x",
+          "name": "alice@example.com",
+          "displayName": "Alice"
+        },
+        "pubKeyCredParams": [
+          {
+            "type": "public-key",
+            "alg": -7
+          }
+        ],
+        "authenticatorSelection": {
+          "residentKey": "discouraged"
+        }
+      },
+      "errorCode": "UNSUPPORTED_RESIDENT_KEY"
+    },
+    {
+      "name": "cross_platform_only_create_is_rejected",
+      "kind": "create",
+      "origin": "https://example.com",
+      "clientDataHash": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "request": {
+        "challenge": "AAECAwQFBgcICQoLDA0ODw",
+        "rp": {
+          "id": "example.com",
+          "name": "Example"
+        },
+        "user": {
+          "id": "dXNlci0x",
+          "name": "alice@example.com",
+          "displayName": "Alice"
+        },
+        "pubKeyCredParams": [
+          {
+            "type": "public-key",
+            "alg": -7
+          }
+        ],
+        "authenticatorSelection": {
+          "authenticatorAttachment": "cross-platform",
+          "residentKey": "preferred"
+        }
+      },
+      "errorCode": "UNSUPPORTED_AUTHENTICATOR_ATTACHMENT"
+    }
+  ]
+}

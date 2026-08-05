@@ -33,6 +33,7 @@ export interface PasswordManagerApiAdapter {
   lock: () => Promise<ApiResult<AppState>>
   getVault: () => Promise<ApiResult<VaultPayload>>
   saveVault: (payload: VaultPayload) => Promise<ApiResult<VaultPayload>>
+  deletePasskey: (passkeyId: string) => Promise<ApiResult<VaultPayload>>
   changePassword: (newPassword: string) => Promise<ApiResult<AppState>>
   exportVaultBackup: () => Promise<ApiResult<VaultBackupExport>>
   exportVaultBackupForPayload: (payload: VaultPayload) => Promise<ApiResult<VaultBackupExport>>

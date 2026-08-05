@@ -1,6 +1,8 @@
 import './security-core.js'
+import './passkey-proxy-probe.js'
 
 const Security = globalThis.MyPwdMgSecurity
+const PasskeyProxyProbe = globalThis.MyPwdMgPasskeyProxyProbe
 const HOST_NAME = 'com.suzikuo.mypwdmg'
 const REQUEST_TIMEOUT_MS = 15000
 const SAVE_CAPTURE_TTL_MS = 5 * 60 * 1000
@@ -14,6 +16,16 @@ const AUTO_SAVE_ENABLED_KEY = 'autoSaveEnabled'
 const IGNORED_SITES_KEY = 'ignoredSites'
 const MANUAL_PANEL_SHORTCUT_KEY = 'manualPanelShortcut'
 const DEFAULT_MANUAL_PANEL_SHORTCUT = 'Alt+T'
+const PASSKEY_PROXY_PERMISSION = 'webAuthenticationProxy'
+const PASSKEY_PROXY_RECOVERY_KEY = 'passkeyProxyProbePending'
+const PASSKEY_PROXY_RECOVERY_DELAY_MS = 10000
+const EXTENSION_PAGE_ONLY_MESSAGES = new Set([
+  'MYPWDMG_UNLOCK',
+  'MYPWDMG_LOCK',
+  'MYPWDMG_LIST_SAVE_TARGETS',
+  'MYPWDMG_STATE',
+  'MYPWDMG_SET_AUTO_SETTINGS'
+])
 
 let port = null
 let nextId = 1
@@ -25,6 +37,10 @@ const fillAuthorizations = new Map()
 const queryCache = new Map()
 const inflightQueryMatches = new Map()
 let queryCacheVersion = 0
+let passkeyProxyBinding = null
+let passkeyProxyOperationActive = false
+let passkeyProxyRecoveryTimer = null
+let passkeyProxyStartupRecovery = Promise.resolve()
 
 function ensurePort() {
   if (port) return port
@@ -55,17 +71,21 @@ function ensurePort() {
 
 function nativeCall(method, params = {}) {
   return new Promise((resolve) => {
+    const id = nextId++
+    let timer = null
     try {
-      const id = nextId++
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         pending.delete(id)
         resolve({ ok: false, code: 'NATIVE_HOST_TIMEOUT', message: 'Native host request timed out.' })
       }, REQUEST_TIMEOUT_MS)
 
       pending.set(id, { resolve, timer })
       ensurePort().postMessage({ id, method, params })
-    } catch (error) {
-      resolve({ ok: false, code: 'NATIVE_HOST_ERROR', message: String(error?.message || error) })
+    } catch {
+      if (timer !== null) clearTimeout(timer)
+      pending.delete(id)
+      port = null
+      resolve({ ok: false, code: 'NATIVE_HOST_ERROR', message: 'Native host request failed.' })
     }
   })
 }
@@ -268,7 +288,10 @@ async function sendMessageToTab(tabId, message) {
 }
 
 function newToken() {
-  return crypto.randomUUID?.() || `capture-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  if (typeof crypto.getRandomValues !== 'function') throw new Error('Secure random generation is unavailable.')
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return `capture-${Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')}`
 }
 
 function publicPromptPlacement(placement) {
@@ -305,6 +328,7 @@ function normalizeHost(value = '') {
 }
 
 function senderWebContext(sender) {
+  if (!sender || sender.id !== chrome.runtime.id) return null
   return Security.webContext({
     tabId: sender?.tab?.id,
     frameId: sender?.frameId ?? 0,
@@ -340,6 +364,210 @@ function contextKey(context) {
 
 function contextError(code = 'INVALID_PAGE_CONTEXT') {
   return { ok: false, code, message: 'The request is not authorized for this page.' }
+}
+
+function passkeyProxyMessage(code = '') {
+  const messages = {
+    API_UNAVAILABLE: '当前浏览器不支持通行密钥代理接口。',
+    ATTACH_REJECTED: '浏览器拒绝了通行密钥代理检测。',
+    ATTACH_TIMEOUT: '检测超时，已尝试恢复系统认证器。',
+    DETACH_FAILED: '无法确认系统认证器已恢复，请重新加载扩展。',
+    PROBE_IN_PROGRESS: '通行密钥兼容性检测正在进行。',
+    UNEXPECTED_CREATE: '检测期间收到注册请求，已中止并恢复系统认证器。',
+    UNEXPECTED_GET: '检测期间收到登录请求，已中止并恢复系统认证器。',
+    UNEXPECTED_IS_UVPAA: '检测期间收到认证器查询，已中止并恢复系统认证器。',
+    UNEXPECTED_CANCEL: '检测已取消，并已尝试恢复系统认证器。',
+    PERMISSION_REMOVE_FAILED: '系统认证器已断开，但代理权限未能撤销，请重新加载扩展。'
+  }
+  return messages[code] || '通行密钥代理检测失败。'
+}
+
+function getPasskeyProxyBinding() {
+  let proxyApi = null
+  try {
+    proxyApi = chrome.webAuthenticationProxy || null
+  } catch {
+    return null
+  }
+  if (!proxyApi || typeof PasskeyProxyProbe?.createPasskeyProxyProbeController !== 'function') return null
+  if (passkeyProxyBinding?.api === proxyApi) return passkeyProxyBinding
+
+  passkeyProxyBinding = {
+    api: proxyApi,
+    controller: PasskeyProxyProbe.createPasskeyProxyProbeController({
+      webAuthenticationProxy: proxyApi,
+      authorizeProbe: (context) => isExtensionPageSender(context?.sender)
+    })
+  }
+  return passkeyProxyBinding
+}
+
+function publicPasskeyProxyResult(result, safety = {}) {
+  const detached = safety.detached === true
+  const permissionRemoved = safety.permissionRemoved === true
+  if (result?.ok) {
+    return {
+      ok: true,
+      data: {
+        supported: true,
+        attached: true,
+        detached,
+        permissionRemoved,
+        probeCode: result?.code || ''
+      }
+    }
+  }
+  const recoveredDetach = result?.code === PasskeyProxyProbe?.ProbeCode?.DETACH_FAILED && detached
+  return {
+    ok: false,
+    code: `PASSKEY_PROXY_${result?.code || 'FAILED'}`,
+    message: recoveredDetach
+      ? '代理断开曾失败，已重试恢复系统认证器。'
+      : passkeyProxyMessage(result?.code),
+    data: {
+      supported: false,
+      attached: !detached,
+      detached,
+      permissionRemoved,
+      probeCode: result?.interruptedCode || result?.code || ''
+    }
+  }
+}
+
+function passkeyProxyPermissionContains() {
+  return new Promise((resolve) => {
+    if (!chrome.permissions?.contains) {
+      resolve({ ok: false, granted: true })
+      return
+    }
+    chrome.permissions.contains({ permissions: [PASSKEY_PROXY_PERMISSION] }, (granted) => {
+      const error = chrome.runtime.lastError
+      resolve(error
+        ? { ok: false, granted: true, message: String(error.message || error) }
+        : { ok: true, granted: Boolean(granted) })
+    })
+  })
+}
+
+function removePasskeyProxyPermission() {
+  return new Promise((resolve) => {
+    if (!chrome.permissions?.remove) {
+      resolve({ ok: false, removed: false })
+      return
+    }
+    chrome.permissions.remove({ permissions: [PASSKEY_PROXY_PERMISSION] }, async (removed) => {
+      const error = chrome.runtime.lastError
+      if (error) {
+        resolve({ ok: false, removed: false, message: String(error.message || error) })
+        return
+      }
+      const contains = await passkeyProxyPermissionContains()
+      resolve({
+        ok: contains.ok && !contains.granted,
+        removed: Boolean(removed),
+        message: contains.message || ''
+      })
+    })
+  })
+}
+
+async function passkeyProxyRecoveryPending() {
+  const stored = await storageGet({ [PASSKEY_PROXY_RECOVERY_KEY]: false })
+  return stored[PASSKEY_PROXY_RECOVERY_KEY] === true
+}
+
+async function clearPasskeyProxyRecovery() {
+  await storageSet({ [PASSKEY_PROXY_RECOVERY_KEY]: false })
+}
+
+async function recoverPasskeyProxyAtStartup() {
+  const binding = getPasskeyProxyBinding()
+  const detach = binding
+    ? await binding.controller.ensureDetached()
+    : { ok: false, code: PasskeyProxyProbe?.ProbeCode?.API_UNAVAILABLE || 'API_UNAVAILABLE' }
+  if (!await passkeyProxyRecoveryPending()) return { detach, permission: null }
+
+  const permission = await removePasskeyProxyPermission()
+  if (detach.ok && permission.ok) await clearPasskeyProxyRecovery()
+  return { detach, permission }
+}
+
+async function recoverPendingPasskeyProxy() {
+  passkeyProxyRecoveryTimer = null
+  if (passkeyProxyOperationActive) {
+    schedulePasskeyProxyRecovery()
+    return
+  }
+  if (!await passkeyProxyRecoveryPending()) return
+
+  const binding = getPasskeyProxyBinding()
+  const detach = binding
+    ? await binding.controller.ensureDetached()
+    : { ok: false }
+  const permission = await removePasskeyProxyPermission()
+  if (detach.ok && permission.ok) await clearPasskeyProxyRecovery()
+}
+
+function schedulePasskeyProxyRecovery() {
+  if (passkeyProxyRecoveryTimer !== null) clearTimeout(passkeyProxyRecoveryTimer)
+  passkeyProxyRecoveryTimer = setTimeout(() => {
+    recoverPendingPasskeyProxy().catch(() => {})
+  }, PASSKEY_PROXY_RECOVERY_DELAY_MS)
+}
+
+async function probePasskeyProxy(sender) {
+  if (!isExtensionPageSender(sender)) return contextError('PASSKEY_PROXY_UNAUTHORIZED')
+  passkeyProxyOperationActive = true
+  try {
+    await storageSet({ [PASSKEY_PROXY_RECOVERY_KEY]: true })
+    await passkeyProxyStartupRecovery
+    const binding = getPasskeyProxyBinding()
+    if (!binding) return publicPasskeyProxyResult({ ok: false, code: 'API_UNAVAILABLE' })
+
+    let result = await binding.controller.runProbe({ sender })
+    const cleanup = await binding.controller.ensureDetached()
+    if (!cleanup.ok) result = cleanup
+    const permission = await removePasskeyProxyPermission()
+    if (!permission.ok) {
+      result = {
+        ok: false,
+        code: 'PERMISSION_REMOVE_FAILED',
+        interruptedCode: result?.code || ''
+      }
+    }
+    if (cleanup.ok && permission.ok) await clearPasskeyProxyRecovery()
+    return publicPasskeyProxyResult(result, {
+      detached: cleanup.ok,
+      permissionRemoved: permission.ok
+    })
+  } finally {
+    passkeyProxyOperationActive = false
+  }
+}
+
+async function detachPasskeyProxy(sender) {
+  if (!isExtensionPageSender(sender)) return contextError('PASSKEY_PROXY_UNAUTHORIZED')
+  await passkeyProxyStartupRecovery
+  const binding = getPasskeyProxyBinding()
+  if (!binding) return publicPasskeyProxyResult({ ok: false, code: 'API_UNAVAILABLE' })
+
+  const detach = await binding.controller.ensureDetached()
+  let result = detach
+  const permission = await removePasskeyProxyPermission()
+  if (!permission.ok) {
+    result = {
+      ok: false,
+      code: 'PERMISSION_REMOVE_FAILED',
+      interruptedCode: detach?.code || ''
+    }
+  }
+  if (detach.ok && permission.ok) await clearPasskeyProxyRecovery()
+  return detach.ok && permission.ok
+    ? { ok: true, data: { detached: true, permissionRemoved: true } }
+    : publicPasskeyProxyResult(result, {
+        detached: detach.ok,
+        permissionRemoved: permission.ok
+      })
 }
 
 async function sendMessageToContext(context, message) {
@@ -496,7 +724,10 @@ async function getAuthorizedFill(entryId, token, sender) {
     return contextError('ENTRY_NOT_AUTHORIZED_FOR_SITE')
   }
 
-  const response = await nativeCall('getFillPayload', { entryId: String(entryId) })
+  const response = await nativeCall('getFillPayload', {
+    entryId: String(entryId),
+    hostname: context.hostname
+  })
   if (!response?.ok) return response
   if (!payloadMatchesEntry(response.data, matchedEntry)) {
     return contextError('ENTRY_ID_MISMATCH')
@@ -719,7 +950,11 @@ async function showPanelInActiveTab(source = 'command') {
 
 chrome.runtime.onInstalled.addListener(setupContextMenus)
 chrome.runtime.onStartup?.addListener(setupContextMenus)
+chrome.permissions?.onAdded?.addListener((permissions) => {
+  if (permissions?.permissions?.includes(PASSKEY_PROXY_PERMISSION)) schedulePasskeyProxyRecovery()
+})
 setupContextMenus()
+passkeyProxyStartupRecovery = recoverPasskeyProxyAtStartup().catch(() => ({ detach: { ok: false }, permission: null }))
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === CONTEXT_MENU_SHOW_PANEL_ID) {
@@ -734,6 +969,22 @@ chrome.commands.onCommand.addListener((command) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ;(async () => {
+    if (!sender || sender.id !== chrome.runtime.id) {
+      sendResponse(contextError('EXTENSION_SENDER_UNAUTHORIZED'))
+      return
+    }
+    if (EXTENSION_PAGE_ONLY_MESSAGES.has(message?.type) && !isExtensionPageSender(sender)) {
+      sendResponse(contextError('EXTENSION_PAGE_REQUIRED'))
+      return
+    }
+    if (message?.type === 'MYPWDMG_PROBE_PASSKEY_PROXY') {
+      sendResponse(await probePasskeyProxy(sender))
+      return
+    }
+    if (message?.type === 'MYPWDMG_DETACH_PASSKEY_PROXY') {
+      sendResponse(await detachPasskeyProxy(sender))
+      return
+    }
     if (message?.type === 'MYPWDMG_QUERY_MATCHES') {
       const context = await queryContextForSender(sender)
       sendResponse(context ? await queryMatchesCached(context.hostname) : contextError())

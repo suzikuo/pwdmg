@@ -43,3 +43,43 @@ test('downloads successfully without an exposed ETag and returns a content revis
   assert.equal(response.etag, '')
   assert.equal(response.revision, createHash('sha256').update(content).digest('hex'))
 })
+
+test('immutable uploads use the OSS forbid-overwrite contract and surface collisions', async () => {
+  let requestHeaders = new Headers()
+  globalThis.fetch = async (_url, init) => {
+    requestHeaders = new Headers(init?.headers)
+    return new Response('<Error><Code>FileAlreadyExists</Code></Error>', { status: 409 })
+  }
+
+  const response = await createClient().uploadFile(
+    'vault.sync-v3/generation.json',
+    '{}',
+    'application/json',
+    { forbidOverwrite: true }
+  )
+
+  assert.equal(requestHeaders.get('x-oss-forbid-overwrite'), 'true')
+  assert.equal(response.status, APIResponseStatus.Conflict)
+})
+
+test('binds requests to the active vault-session abort signal', async () => {
+  const controller = new AbortController()
+  let requestSignal
+  globalThis.fetch = async (_url, init) => {
+    requestSignal = init?.signal
+    return new Response('', { status: 200 })
+  }
+
+  const client = new AliyunOSSAPI(
+    'test-bucket',
+    'access-key',
+    'access-secret',
+    'oss-cn-hangzhou',
+    controller.signal
+  )
+  await client.uploadFile('vault.json', '{}')
+
+  assert.equal(requestSignal, controller.signal)
+  controller.abort()
+  assert.equal(requestSignal.aborted, true)
+})

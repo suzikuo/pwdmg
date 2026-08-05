@@ -1,4 +1,6 @@
 import type { EntryStatus, LoginAccountSource, VaultEntry, VaultPayload } from '../types'
+import { normalizePasskeyState } from './passkeySchema.ts'
+import { secureRandomId } from './secureRandom.ts'
 
 const LOGIN_ACCOUNT_SOURCES = new Set<LoginAccountSource>(['auto', 'username', 'email', 'phone'])
 const ENTRY_STATUSES = new Set<EntryStatus>(['active', 'disabled', 'trashed'])
@@ -12,6 +14,8 @@ export function defaultVaultPayload(entries: VaultEntry[] = []): VaultPayload {
     version: 1,
     revision: 1,
     entries,
+    passkeys: [],
+    passkeyTombstones: [],
     settings: {
       oss: {
         bucketName: '',
@@ -33,10 +37,14 @@ export function cloneVaultPayload(payload: VaultPayload): VaultPayload {
 
 export function normalizeVaultPayload(payload: Partial<VaultPayload>): VaultPayload {
   const defaults = defaultVaultPayload()
+  const passkeyState = normalizePasskeyState(payload as unknown as Record<string, unknown>)
   return {
-    version: 1,
+    version: passkeyState.version,
+    ...(passkeyState.passkeySchemaVersion ? { passkeySchemaVersion: passkeyState.passkeySchemaVersion } : {}),
     revision: normalizeRevision(payload.revision),
     entries: normalizeEntries(payload.entries || []),
+    passkeys: passkeyState.passkeys,
+    passkeyTombstones: passkeyState.passkeyTombstones,
     settings: {
       oss: {
         ...defaults.settings.oss,
@@ -98,5 +106,5 @@ function normalizeLoginAccountSource(value: unknown): LoginAccountSource {
 }
 
 function makeId() {
-  return crypto.randomUUID?.() || `entry-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return secureRandomId()
 }

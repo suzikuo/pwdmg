@@ -4,8 +4,10 @@ import copy
 import hashlib
 import json
 import shutil
+import threading
 import time
 import uuid
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -25,12 +27,13 @@ from .domain import domain_matches, find_entry, normalize_domain
 from .file_lock import FileLockTimeoutError, exclusive_file_lock
 from .legacy import legacy_file_digest, migrate_legacy_file
 from .paths import LEGACY_LOCAL_STORAGE_FILE, LOCAL_BACKUP_DIR, VAULT_FILE, ensure_app_dir
+from .passkey_schema import normalize_passkey_state
 from .totp import generate_totp
 from .vault_index import VaultIndex
 
 
-SESSION_SECONDS = 0
-UNLOCKED_EXPIRES_AT = 253402300799
+SESSION_SECONDS = 15 * 60
+INDEFINITE_SESSION_EXPIRES_AT = 253402300799
 MAX_LOCAL_IMPORT_BACKUPS = 5
 LOCAL_IMPORT_BACKUP_PREFIX = "vault-before-cloud-download-"
 LOCAL_IMPORT_BACKUP_SUFFIX = ".json"
@@ -51,11 +54,22 @@ class VaultConflictError(Exception):
     pass
 
 
+def _serialized_session_call(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._session_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 def default_payload(entries: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     return {
         "version": 1,
         "revision": 1,
         "entries": entries or [],
+        "passkeys": [],
+        "passkeyTombstones": [],
         "settings": {
             "oss": {
                 "bucketName": "",
@@ -79,6 +93,7 @@ class VaultService:
         legacy_path: Path | None = None,
         session_seconds: int = SESSION_SECONDS,
     ) -> None:
+        self._session_lock = threading.RLock()
         ensure_app_dir()
         self.vault_path = vault_path or VAULT_FILE
         self.vault_lock_path = self.vault_path.with_name(f"{self.vault_path.name}.lock")
@@ -92,6 +107,7 @@ class VaultService:
         self._expires_at = 0.0
         self._vault_file_signature = (0, 0, 0)
 
+    @_serialized_session_call
     def state(self) -> Dict[str, Any]:
         return {
             "hasVault": self.vault_path.exists(),
@@ -102,6 +118,7 @@ class VaultService:
             "passwordless": self._is_passwordless_vault(),
         }
 
+    @_serialized_session_call
     def storage_state(self) -> Dict[str, Any]:
         return {
             "hasVault": self.vault_path.exists(),
@@ -110,11 +127,13 @@ class VaultService:
             "passwordless": self._is_passwordless_vault(),
         }
 
+    @_serialized_session_call
     def read_vault_envelope(self) -> str:
         if not self.vault_path.exists():
             raise FileNotFoundError("Vault does not exist")
         return self._read_envelope_text()
 
+    @_serialized_session_call
     def write_vault_envelope(
         self,
         envelope_text: str,
@@ -128,6 +147,8 @@ class VaultService:
         with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
             current_envelope = self._read_envelope() if self.vault_path.exists() else None
             current_revision = envelope_revision(current_envelope) if current_envelope else 0
+            if current_envelope and current_envelope["version"] == 2 and envelope["version"] < 2:
+                raise VaultConflictError("Refusing to replace a version 2 vault with version 1")
             if expected_revision is not None and validate_revision(expected_revision) != current_revision:
                 raise VaultConflictError(
                     f"Vault revision conflict: expected {expected_revision}, current {current_revision}"
@@ -151,11 +172,13 @@ class VaultService:
             "revision": incoming_revision,
         }
 
+    @_serialized_session_call
     def read_legacy_local_storage(self) -> str:
         if not self.legacy_path.exists():
             return "{}"
         return self.legacy_path.read_text(encoding="utf-8")
 
+    @_serialized_session_call
     def cleanup_legacy_local_storage(
         self,
         expected_digest: str,
@@ -204,6 +227,7 @@ class VaultService:
             raise ValueError(f"A valid {label} digest is required")
         return normalized
 
+    @_serialized_session_call
     def create_vault(self, password: str, *, import_legacy: bool = True) -> Dict[str, Any]:
         entries: List[Dict[str, Any]] = []
         migration = {
@@ -227,18 +251,24 @@ class VaultService:
             "migration": migration,
         }
 
+    @_serialized_session_call
     def unlock(self, password: str) -> Dict[str, Any]:
         with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
             envelope = self._read_envelope()
             payload, key = decrypt_payload(password, envelope)
             normalized = self._normalize_payload(payload)
             original_revision = validate_revision(payload.get("revision", 0))
+            passwordless = password == ""
             needs_rewrite = (
                 original_revision == 0
+                or payload.get("version", 1) != normalized["version"]
+                or payload.get("passkeySchemaVersion") != normalized.get("passkeySchemaVersion")
+                or payload.get("passkeys", []) != normalized["passkeys"]
+                or payload.get("passkeyTombstones", []) != normalized["passkeyTombstones"]
                 or self._entry_id_sequence(payload.get("entries") or [])
                 != self._entry_id_sequence(normalized["entries"])
                 or envelope.get("revision") != normalized["revision"]
-                or (password == "" and envelope.get("passwordless") is not True)
+                or envelope.get("passwordless") is not passwordless
             )
             if needs_rewrite:
                 normalized["revision"] = 1 if original_revision == 0 else original_revision + 1
@@ -246,15 +276,16 @@ class VaultService:
                     raise VaultConflictError("Vault revision limit has been reached")
                 normalized["updatedAt"] = int(time.time())
                 repaired_envelope = encrypt_payload_with_key(key, normalized)
-                repaired_envelope["passwordless"] = password == ""
+                repaired_envelope["passwordless"] = passwordless
                 self._write_envelope_unlocked(repaired_envelope)
             self._set_payload(normalized)
             self._key = key
-            self._passwordless = password == ""
+            self._passwordless = passwordless
             self._vault_file_signature = self._current_vault_file_signature()
         self._refresh_session()
         return copy.deepcopy(self._payload)
 
+    @_serialized_session_call
     def lock(self) -> None:
         self._payload = None
         self._key = None
@@ -263,9 +294,11 @@ class VaultService:
         self._expires_at = 0.0
         self._vault_file_signature = (0, 0, 0)
 
+    @_serialized_session_call
     def get_vault(self) -> Dict[str, Any]:
         return copy.deepcopy(self._require_payload())
 
+    @_serialized_session_call
     def save_vault(
         self,
         payload: Dict[str, Any],
@@ -286,10 +319,13 @@ class VaultService:
                     f"Payload revision {payload_revision} does not match expected revision {expected_revision}"
                 )
         normalized = self._normalize_payload(payload)
+        if current.get("version", 1) == 2 and normalized["version"] < 2:
+            raise VaultConflictError("Refusing to downgrade a version 2 vault")
         saved = self._persist_payload_cas(normalized, validate_revision(expected_revision))
         self._refresh_session()
         return copy.deepcopy(saved)
 
+    @_serialized_session_call
     def change_password(self, new_password: str) -> Dict[str, Any]:
         payload = copy.deepcopy(self._require_payload())
         expected_revision = validate_revision(payload["revision"])
@@ -315,6 +351,7 @@ class VaultService:
         self._refresh_session()
         return self.state()
 
+    @_serialized_session_call
     def export_backup(self) -> Dict[str, Any]:
         self._require_payload()
         if not self.vault_path.exists():
@@ -326,6 +363,7 @@ class VaultService:
             "updatedAt": int(self.vault_path.stat().st_mtime),
         }
 
+    @_serialized_session_call
     def import_backup(self, envelope_text: str) -> Dict[str, Any]:
         payload = self._require_payload()
         result = self.write_vault_envelope(
@@ -339,6 +377,7 @@ class VaultService:
             "vaultPath": result["vaultPath"],
         }
 
+    @_serialized_session_call
     def query_matches(self, hostname: str) -> List[Dict[str, Any]]:
         host = normalize_domain(hostname)
         matches: List[Dict[str, Any]] = []
@@ -347,8 +386,22 @@ class VaultService:
         self._refresh_session()
         return matches
 
+    @_serialized_session_call
     def get_fill_payload(self, entry_id: str) -> Dict[str, Any]:
         entry = self._get_login(entry_id)
+        return self._fill_payload(entry)
+
+    @_serialized_session_call
+    def get_fill_payload_for_host(self, entry_id: str, hostname: str) -> Dict[str, Any]:
+        host = normalize_domain(hostname)
+        if not host:
+            raise ValueError("Fill hostname is required")
+        entry = self._get_login(entry_id)
+        if not any(domain_matches(host, domain) for domain in entry.get("domains") or []):
+            raise ValueError("Entry is not authorized for this site")
+        return self._fill_payload(entry)
+
+    def _fill_payload(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         result = {
             "id": entry.get("id"),
             "title": entry.get("title"),
@@ -367,11 +420,13 @@ class VaultService:
         self._refresh_session()
         return result
 
+    @_serialized_session_call
     def list_save_targets(self) -> Dict[str, Any]:
         payload = self._require_payload()
         self._refresh_session()
         return {"folders": self._folder_summaries(payload.get("entries") or [])}
 
+    @_serialized_session_call
     def preview_captured_login(self, capture: Dict[str, Any]) -> Dict[str, Any]:
         payload = self._require_payload()
         normalized = self._normalize_capture(capture)
@@ -393,6 +448,7 @@ class VaultService:
             "shouldPrompt": not bool(candidate and candidate["passwordSame"]),
         }
 
+    @_serialized_session_call
     def save_captured_login(
         self,
         capture: Dict[str, Any],
@@ -435,6 +491,7 @@ class VaultService:
             "entry": self._entry_summary(saved),
         }
 
+    @_serialized_session_call
     def generate_totp(self, entry_id: str) -> str:
         entry = self._get_login(entry_id)
         self._refresh_session()
@@ -479,6 +536,8 @@ class VaultService:
             if current_revision >= MAX_REVISION:
                 raise VaultConflictError("Vault revision limit has been reached")
             normalized = self._normalize_payload(payload)
+            if persisted.get("version", 1) == 2 and normalized["version"] < 2:
+                raise VaultConflictError("Refusing to downgrade a version 2 vault")
             normalized["revision"] = current_revision + 1
             normalized["updatedAt"] = int(time.time())
             envelope = encrypt_payload_with_key(self._key, normalized)
@@ -559,8 +618,9 @@ class VaultService:
         return self._payload
 
     def _set_payload(self, payload: Dict[str, Any]) -> None:
+        index = VaultIndex.build(payload.get("entries") or [])
         self._payload = payload
-        self._index = VaultIndex.build(payload.get("entries") or [])
+        self._index = index
 
     def _require_index(self) -> VaultIndex:
         payload = self._require_payload()
@@ -578,7 +638,10 @@ class VaultService:
         if not self._key:
             return
         payload = decrypt_payload_with_key(self._key, self._read_envelope())
-        self._set_payload(self._normalize_payload(payload))
+        normalized = self._normalize_payload(payload)
+        if self._payload and self._payload.get("version", 1) == 2 and normalized["version"] < 2:
+            raise VaultConflictError("Vault file was replaced by an older format")
+        self._set_payload(normalized)
         self._vault_file_signature = current_signature
 
     def _current_vault_file_signature(self) -> tuple[int, int, int]:
@@ -599,7 +662,7 @@ class VaultService:
 
     def _refresh_session(self) -> None:
         if self.session_seconds <= 0:
-            self._expires_at = float(UNLOCKED_EXPIRES_AT)
+            self._expires_at = float(INDEFINITE_SESSION_EXPIRES_AT)
         else:
             self._expires_at = time.time() + self.session_seconds
 
@@ -613,10 +676,18 @@ class VaultService:
         if not isinstance(settings, dict):
             raise ValueError("Vault settings must be an object")
         revision = validate_revision(payload["revision"]) if "revision" in payload else 1
+        passkey_state = normalize_passkey_state(payload)
         normalized = {
-            "version": 1,
+            "version": passkey_state["version"],
+            **(
+                {"passkeySchemaVersion": passkey_state["passkeySchemaVersion"]}
+                if "passkeySchemaVersion" in passkey_state
+                else {}
+            ),
             "revision": max(1, revision),
             "entries": self._normalize_entries(entries, set(), ()),
+            "passkeys": passkey_state["passkeys"],
+            "passkeyTombstones": passkey_state["passkeyTombstones"],
             "settings": copy.deepcopy(settings),
             "updatedAt": int(payload.get("updatedAt") or time.time()),
         }

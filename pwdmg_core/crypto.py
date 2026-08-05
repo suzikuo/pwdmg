@@ -12,7 +12,10 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-AAD = b"mypwdmg-vault-v1"
+AAD_BY_VERSION = {
+    1: b"mypwdmg-vault-v1",
+    2: b"mypwdmg-vault-v2",
+}
 DEFAULT_ITERATIONS = 390_000
 MIN_KDF_ITERATIONS = 10_000
 MAX_KDF_ITERATIONS = 2_000_000
@@ -82,12 +85,13 @@ def validate_revision(value: Any) -> int:
     return _bounded_int(value, "revision", 0, MAX_REVISION)
 
 
-def _parse_envelope(envelope: Dict[str, Any]) -> Tuple[int, bytes, bytes, bytes]:
+def _parse_envelope(envelope: Dict[str, Any]) -> Tuple[int, int, bytes, bytes, bytes]:
     if not isinstance(envelope, dict):
         raise VaultCryptoError("Vault file is malformed")
     if envelope.get("format") != "mypwdmg-vault":
         raise VaultCryptoError("Unsupported vault format")
-    if type(envelope.get("version")) is not int or envelope.get("version") != 1:
+    version = envelope.get("version")
+    if type(version) is not int or version not in AAD_BY_VERSION:
         raise VaultCryptoError("Unsupported vault version")
     if envelope.get("cipher") != "AES-256-GCM":
         raise VaultCryptoError("Unsupported vault cipher")
@@ -123,7 +127,7 @@ def _parse_envelope(envelope: Dict[str, Any]) -> Tuple[int, bytes, bytes, bytes]
         _bounded_int(envelope["revision"], "revision", 1, MAX_REVISION)
     if "passwordless" in envelope and not isinstance(envelope["passwordless"], bool):
         raise VaultCryptoError("Vault passwordless marker is invalid")
-    return iterations, salt, nonce, ciphertext
+    return version, iterations, salt, nonce, ciphertext
 
 
 def validate_envelope(envelope: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,14 +185,15 @@ def encrypt_payload_with_key(vault_key: VaultKey, payload: Dict[str, Any]) -> Di
         MIN_KDF_ITERATIONS,
         MAX_KDF_ITERATIONS,
     )
+    version = _payload_version_for_encryption(payload)
     nonce = os.urandom(12)
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(raw) > MAX_PLAINTEXT_BYTES:
         raise VaultCryptoError("Vault payload is too large")
-    ciphertext = AESGCM(vault_key.key).encrypt(nonce, raw, AAD)
+    ciphertext = AESGCM(vault_key.key).encrypt(nonce, raw, AAD_BY_VERSION[version])
     envelope = {
         "format": "mypwdmg-vault",
-        "version": 1,
+        "version": version,
         "cipher": "AES-256-GCM",
         "kdf": {
             "name": "PBKDF2-HMAC-SHA256",
@@ -207,11 +212,11 @@ def encrypt_payload_with_key(vault_key: VaultKey, payload: Dict[str, Any]) -> Di
 
 
 def decrypt_payload(password: str, envelope: Dict[str, Any]) -> Tuple[Dict[str, Any], VaultKey]:
-    iterations, salt, nonce, ciphertext = _parse_envelope(envelope)
+    version, iterations, salt, nonce, ciphertext = _parse_envelope(envelope)
 
     key = derive_key(password, salt, iterations)
     try:
-        raw = AESGCM(key).decrypt(nonce, ciphertext, AAD)
+        raw = AESGCM(key).decrypt(nonce, ciphertext, AAD_BY_VERSION[version])
     except InvalidTag as exc:
         raise VaultCryptoError("Wrong password or corrupted vault") from exc
 
@@ -221,13 +226,14 @@ def decrypt_payload(password: str, envelope: Dict[str, Any]) -> Tuple[Dict[str, 
         raise VaultCryptoError("Vault payload is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise VaultCryptoError("Vault payload must be an object")
+    _assert_payload_version(payload, version)
     if "revision" in envelope and validate_revision(payload.get("revision", 0)) != envelope_revision(envelope):
         raise VaultCryptoError("Vault revision metadata does not match its payload")
     return payload, VaultKey(key=key, salt=salt, iterations=iterations)
 
 
 def decrypt_payload_with_key(vault_key: VaultKey, envelope: Dict[str, Any]) -> Dict[str, Any]:
-    iterations, salt, nonce, ciphertext = _parse_envelope(envelope)
+    version, iterations, salt, nonce, ciphertext = _parse_envelope(envelope)
 
     if not isinstance(vault_key.key, bytes) or len(vault_key.key) != 32:
         raise VaultCryptoError("Vault encryption key has an invalid length")
@@ -241,7 +247,7 @@ def decrypt_payload_with_key(vault_key: VaultKey, envelope: Dict[str, Any]) -> D
         raise VaultCryptoError("Vault password changed; unlock again")
 
     try:
-        raw = AESGCM(vault_key.key).decrypt(nonce, ciphertext, AAD)
+        raw = AESGCM(vault_key.key).decrypt(nonce, ciphertext, AAD_BY_VERSION[version])
     except InvalidTag as exc:
         raise VaultCryptoError("Wrong password or corrupted vault") from exc
 
@@ -251,6 +257,40 @@ def decrypt_payload_with_key(vault_key: VaultKey, envelope: Dict[str, Any]) -> D
         raise VaultCryptoError("Vault payload is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise VaultCryptoError("Vault payload must be an object")
+    _assert_payload_version(payload, version)
     if "revision" in envelope and validate_revision(payload.get("revision", 0)) != envelope_revision(envelope):
         raise VaultCryptoError("Vault revision metadata does not match its payload")
     return payload
+
+
+def _declared_payload_version(payload: Dict[str, Any]) -> int:
+    version = payload.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version not in AAD_BY_VERSION:
+        raise VaultCryptoError("Unsupported vault payload version")
+    return version
+
+
+def _payload_version_for_encryption(payload: Dict[str, Any]) -> int:
+    version = _declared_payload_version(payload)
+    collections = []
+    for field in ("passkeys", "passkeyTombstones"):
+        if version == 2 and field not in payload:
+            raise VaultCryptoError(f"Vault payload version 2 requires {field}")
+        value = payload.get(field, [])
+        if not isinstance(value, list):
+            raise VaultCryptoError(f"Vault {field} must be an array")
+        collections.append(value)
+    if version == 1 and any(collections):
+        raise VaultCryptoError("Vault payload version 1 cannot contain passkey state")
+    if version == 2 and payload.get("passkeySchemaVersion") != 1:
+        raise VaultCryptoError("Vault payload version 2 requires passkeySchemaVersion 1")
+    return version
+
+
+def _assert_payload_version(payload: Dict[str, Any], envelope_version: int) -> None:
+    if _declared_payload_version(payload) != envelope_version:
+        raise VaultCryptoError("Vault version metadata does not match its payload")
+    if envelope_version == 2:
+        for field in ("passkeys", "passkeyTombstones"):
+            if field not in payload or not isinstance(payload[field], list):
+                raise VaultCryptoError(f"Vault payload version 2 requires {field}")

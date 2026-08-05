@@ -1,5 +1,6 @@
 import type { VaultEntry, VaultPayload } from '../types'
 import { defaultVaultPayload } from './vaultDefaults'
+import { secureRandomId } from './secureRandom'
 
 const STORAGE_KEY = 'cardData'
 const OSS_BUCKET_NAME = 'OSS_BUCKET_NAME'
@@ -194,5 +195,5 @@ function base64ToBytes(value: string) {
 }
 
 function makeId() {
-  return crypto.randomUUID?.() || `entry-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return secureRandomId()
 }

@@ -159,6 +159,33 @@ public class MainActivity extends Activity {
         );
     }
 
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (isChangingConfigurations()) return;
+        new AndroidVaultStore(this).lock();
+        if (webView != null) {
+            webView.evaluateJavascript(
+                "(function(){return !!(window.__mypwdmgHandleNativeLock && window.__mypwdmgHandleNativeLock());})()",
+                null
+            );
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (webView != null) {
+            webView.removeJavascriptInterface("androidPasswordApi");
+            webView.stopLoading();
+            webView.setWebChromeClient(null);
+            webView.setWebViewClient(null);
+            webView.destroy();
+            webView = null;
+        }
+        autofillStructure = null;
+        super.onDestroy();
+    }
+
     private void handleBackFallback() {
         long now = System.currentTimeMillis();
         if (now - lastBackPressedAt < 1600) {
