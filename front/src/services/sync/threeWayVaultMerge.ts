@@ -1,4 +1,5 @@
 import type { VaultEntry, VaultEntryHistory, VaultEntrySnapshot, VaultPayload } from '../../types'
+import { limitEntryHistory } from '../entryHistory.ts'
 import { canonicalJson } from './canonicalJson.ts'
 import { mergePasskeyState, type PasskeyMergeConflict } from './passkeyRemoteGate.ts'
 
@@ -246,7 +247,7 @@ function mergeHistory(left: VaultEntry['history'], right: VaultEntry['history'])
       values.set(item.id, clone(item))
     }
   }
-  return [...values.values()].sort((a, b) => b.at - a.at || a.id.localeCompare(b.id)).slice(0, 20)
+  return limitEntryHistory([...values.values()].sort((a, b) => b.at - a.at || a.id.localeCompare(b.id)))
 }
 
 function appendSyncConflictHistory(

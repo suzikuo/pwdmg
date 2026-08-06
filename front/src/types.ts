@@ -2,8 +2,15 @@ export type EntryKind = 'login' | 'folder'
 export type LoginAccountSource = 'auto' | 'username' | 'email' | 'phone'
 export type EntryStatus = 'active' | 'disabled' | 'trashed'
 export type EntryHistoryAction = 'created' | 'updated' | 'disabled' | 'restored' | 'trashed'
+export type EntryHistoryField = 'title' | 'domains' | 'username' | 'email' | 'password' | 'phone' | 'loginAccountSource' | 'note' | 'totpSecret' | 'status'
 export type VaultPayloadVersion = 1 | 2
 export type PasskeyTransport = 'usb' | 'nfc' | 'ble' | 'internal' | 'hybrid' | 'smart-card'
+
+export interface VaultEntryHistoryChange {
+  field: EntryHistoryField
+  before: string
+  after: string
+}
 
 export interface VaultEntryHistory {
   id: string
@@ -15,6 +22,7 @@ export interface VaultEntryHistory {
   phone?: string
   domains?: string[]
   note?: string
+  changes?: VaultEntryHistoryChange[]
   snapshot?: VaultEntrySnapshot
 }
 

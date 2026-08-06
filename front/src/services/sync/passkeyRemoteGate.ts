@@ -112,19 +112,31 @@ export function mergePasskeyState(
     }
   }
 
+  const version: VaultPayloadVersion = (
+    ancestor.version === 2 ||
+    local.version === 2 ||
+    remote.version === 2 ||
+    passkeys.length > 0 ||
+    passkeyTombstones.length > 0
+  ) ? 2 : 1
+  const mergedPayload = {
+    ...local,
+    version,
+    passkeySchemaVersion: version === 2 ? 1 as const : undefined,
+    passkeys,
+    passkeyTombstones
+  }
+  const mergedFingerprint = passkeyStateFingerprint(mergedPayload)
+
   return {
-    status: conflicts.length ? 'conflict' : passkeyStateFingerprint(local) === passkeyStateFingerprint({
-      ...local,
-      version: 2,
-      passkeys,
-      passkeyTombstones
-    }) ? 'local' : passkeyStateFingerprint(remote) === passkeyStateFingerprint({
-      ...remote,
-      version: 2,
-      passkeys,
-      passkeyTombstones
-    }) ? 'remote' : 'same',
-    version: 2,
+    status: conflicts.length
+      ? 'conflict'
+      : passkeyStateFingerprint(local) === mergedFingerprint
+        ? 'local'
+        : passkeyStateFingerprint(remote) === mergedFingerprint
+          ? 'remote'
+          : 'same',
+    version,
     passkeys: structuredCloneValue(passkeys),
     passkeyTombstones: structuredCloneValue(passkeyTombstones),
     conflicts

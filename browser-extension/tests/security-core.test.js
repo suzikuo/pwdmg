@@ -344,6 +344,60 @@ test('parent-domain fallback remains authorized through the fill request', async
   )
 })
 
+test('fill retries the legacy Native Host signature after parameter rejection', async () => {
+  const calls = []
+  const summary = {
+    id: 'entry-legacy-host',
+    title: 'Example',
+    username: 'alice',
+    email: '',
+    phone: '',
+    loginAccountSource: 'username',
+    domains: ['example.com']
+  }
+  const payload = { ...summary, password: 'secret', totp: '' }
+  const background = loadBackground((method, params) => {
+    calls.push({ method, params })
+    if (method === 'queryMatches') return { ok: true, data: [summary] }
+    if (method === 'getFillPayload') {
+      if (Object.prototype.hasOwnProperty.call(params, 'hostname')) {
+        return { ok: false, code: 'INVALID_INPUT', message: 'Invalid native host request parameters.' }
+      }
+      return { ok: true, data: payload }
+    }
+    return { ok: true, data: {} }
+  })
+  const sender = {
+    tab: { id: 7, url: 'https://login.example.com/' },
+    frameId: 0,
+    documentId: 'doc-legacy-host',
+    url: 'https://login.example.com/form'
+  }
+
+  const authorization = await background.dispatch({
+    type: 'MYPWDMG_AUTHORIZE_FILL',
+    entryId: summary.id
+  }, sender)
+  const filled = await background.dispatch({
+    type: 'MYPWDMG_GET_FILL',
+    entryId: summary.id,
+    authorizationToken: authorization.data.token
+  }, sender)
+
+  assert.equal(authorization.ok, true)
+  assert.equal(filled.ok, true)
+  assert.equal(filled.data.password, 'secret')
+  assert.deepEqual(
+    calls.filter((call) => call.method === 'getFillPayload').map((call) => (
+      `${call.params.entryId}|${call.params.hostname || ''}`
+    )),
+    [
+      `${summary.id}|login.example.com`,
+      `${summary.id}|`
+    ]
+  )
+})
+
 test('fill contexts bind tab, frame, document, and origin', () => {
   const base = Security.webContext({
     tabId: 7,

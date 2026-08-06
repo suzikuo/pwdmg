@@ -1,4 +1,5 @@
 import type { EntryStatus, LoginAccountSource, VaultEntry, VaultPayload } from '../types'
+import { limitEntryHistory } from './entryHistory.ts'
 import { normalizePasskeyState } from './passkeySchema.ts'
 import { secureRandomId } from './secureRandom.ts'
 
@@ -82,7 +83,7 @@ function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), pa
       loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
       note: entry.note || '',
       totpSecret: entry.totpSecret || '',
-      history: Array.isArray(entry.history) ? entry.history : [],
+      history: Array.isArray(entry.history) ? limitEntryHistory(entry.history) : [],
       children: normalizeEntries(entry.children || [], seenIds, path)
     }
   })

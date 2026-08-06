@@ -724,10 +724,17 @@ async function getAuthorizedFill(entryId, token, sender) {
     return contextError('ENTRY_NOT_AUTHORIZED_FOR_SITE')
   }
 
-  const response = await nativeCall('getFillPayload', {
+  let response = await nativeCall('getFillPayload', {
     entryId: String(entryId),
     hostname: context.hostname
   })
+  // Older installed Hosts only accept entryId. The extension has already
+  // authorized and revalidated the entry for this page before this fallback.
+  if (response?.code === 'INVALID_INPUT') {
+    response = await nativeCall('getFillPayload', {
+      entryId: String(entryId)
+    })
+  }
   if (!response?.ok) return response
   if (!payloadMatchesEntry(response.data, matchedEntry)) {
     return contextError('ENTRY_ID_MISMATCH')

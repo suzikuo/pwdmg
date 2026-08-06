@@ -155,6 +155,18 @@ test('resolved passkey state is applied atomically without sharing arrays', () =
   assert.notEqual(local.passkeys, remote.passkeys)
 })
 
+test('merging legacy vaults without passkey state does not promote the schema', () => {
+  const merged = mergePasskeyState(
+    defaultVaultPayload(),
+    defaultVaultPayload(),
+    defaultVaultPayload()
+  )
+
+  assert.equal(merged.version, 1)
+  assert.deepEqual(merged.passkeys, [])
+  assert.deepEqual(merged.passkeyTombstones, [])
+})
+
 function structuredCloneValue(value) {
   return JSON.parse(JSON.stringify(value))
 }

@@ -158,7 +158,7 @@ function makeCloudSyncDiffItem(
     entryKind: entry?.kind === 'folder' ? 'folder' : 'login',
     title: entry?.title || '未命名',
     path: meta?.path || '未命名',
-    checked: true,
+    checked: changeType !== 'deleted',
     details: changes,
     sourceParentId: sourceMeta?.parentId || '',
     sourceIndex: sourceMeta?.index || 0

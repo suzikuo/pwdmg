@@ -73,7 +73,6 @@ export type CloudSyncPreview = {
   remoteHeadIds: string[]
   legacyObjectNames: string[]
   remoteEnvelopeText: string
-  uploadAfterDownload: boolean
   remoteNeedsSessionKeyRewrite?: boolean
 }
 
