@@ -3,8 +3,8 @@
     <section class="vault-pane">
       <div class="summary-strip">
         <div>
-          <span>登录</span>
-          <strong>{{ stats.logins }}</strong>
+          <span>条目</span>
+          <strong>{{ stats.items }}</strong>
         </div>
         <div>
           <span>分组</span>
@@ -28,6 +28,7 @@
         :depth="0"
         @view="emit('view', $event)"
         @edit="emit('edit', $event)"
+        @duplicate="emit('duplicate', $event)"
         @delete="emit('delete', $event)"
         @create="emit('create', $event)"
         @move-entry="emit('move-entry', $event)"
@@ -58,6 +59,7 @@
         :totp-remaining="totpRemaining"
         :totp-progress="totpProgress"
         @edit="emit('edit', $event)"
+        @duplicate="emit('duplicate', $event)"
         @delete="emit('delete', $event)"
         @disable="emit('disable', $event)"
         @restore="emit('restore', $event)"
@@ -68,7 +70,7 @@
         @toggle-password="emit('toggle-password')"
         @refresh-totp="emit('refresh-totp')"
       />
-      <van-empty v-else image="search" description="选择一个登录条目查看详情" />
+      <van-empty v-else image="search" description="选择一个条目查看详情" />
     </aside>
   </div>
 </template>
@@ -79,6 +81,7 @@ import EntryDetailPane from './EntryDetailPane.vue'
 import type { VaultEntry } from '../../types'
 
 type WorkspaceStats = {
+  items: number
   logins: number
   folders: number
   totp: number
@@ -105,6 +108,7 @@ defineProps<{
 const emit = defineEmits<{
   view: [entry: VaultEntry]
   edit: [entry: VaultEntry]
+  duplicate: [entryId: string]
   delete: [entryId: string]
   create: [parentId: string]
   'move-entry': [payload: { entryId: string; targetParentId: string; targetIndex: number }]

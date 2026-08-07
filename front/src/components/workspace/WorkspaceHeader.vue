@@ -5,8 +5,8 @@
     </button>
     <div class="top-spacer"></div>
     <div class="top-actions">
-      <button class="top-icon" type="button" :aria-label="searchOpen || keyword ? '关闭搜索' : '搜索'" @click="emit('toggle-search')">
-        <van-icon :name="searchOpen || keyword ? 'cross' : 'search'" />
+      <button class="top-icon" type="button" :aria-label="searchActive ? '关闭搜索' : '搜索'" @click="emit('toggle-search')">
+        <van-icon :name="searchActive ? 'cross' : 'search'" />
       </button>
       <van-popover
         :show="createMenuOpen"
@@ -43,14 +43,24 @@
     </div>
   </header>
 
-  <div v-if="searchOpen || keyword" class="search-strip">
+  <div v-if="searchActive" class="search-strip">
     <van-search
       ref="searchInput"
       :model-value="keyword"
       shape="round"
-      placeholder="搜索标题、账号、域名"
+      placeholder="搜索标题、账号、域名、自定义字段"
       @update:model-value="emit('update:keyword', String($event))"
     />
+    <div class="search-filter-segments" role="group" aria-label="条目筛选">
+      <button
+        v-for="option in filterOptions"
+        :key="option.value"
+        type="button"
+        :class="{ active: entryFilter === option.value }"
+        :aria-pressed="entryFilter === option.value"
+        @click="emit('update:entry-filter', option.value)"
+      >{{ option.label }}</button>
+    </div>
   </div>
   <div v-if="dragMode" class="drag-mode-strip">
     <van-icon name="sort" />
@@ -60,7 +70,8 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import type { EntryFilterMode } from '../../services/entryWorkspace.ts'
 import type { EntryKind } from '../../types'
 
 type WorkspaceAction = {
@@ -74,6 +85,7 @@ type WorkspaceAction = {
 const props = defineProps<{
   searchOpen: boolean
   keyword: string
+  entryFilter: EntryFilterMode
   dragMode: boolean
   createMenuOpen: boolean
   moreMenuOpen: boolean
@@ -82,6 +94,14 @@ const props = defineProps<{
 }>()
 
 const searchInput = ref<{ $el?: HTMLElement } | null>(null)
+const searchActive = computed(() => props.searchOpen || Boolean(props.keyword) || props.entryFilter !== 'all')
+const filterOptions: Array<{ label: string; value: EntryFilterMode }> = [
+  { label: '全部', value: 'all' },
+  { label: '登录', value: 'login' },
+  { label: '其他', value: 'other' },
+  { label: 'TOTP', value: 'totp' },
+  { label: '分组', value: 'folder' }
+]
 
 watch(() => props.searchOpen, async (open) => {
   if (!open) return
@@ -94,6 +114,7 @@ const emit = defineEmits<{
   'open-drawer': []
   'toggle-search': []
   'update:keyword': [value: string]
+  'update:entry-filter': [value: EntryFilterMode]
   'update:create-menu-open': [value: boolean]
   'update:more-menu-open': [value: boolean]
   'select-create': [action: WorkspaceAction]

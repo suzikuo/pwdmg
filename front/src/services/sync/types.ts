@@ -40,6 +40,7 @@ export type CloudSyncChangeField =
   | 'loginAccountSource'
   | 'note'
   | 'totpSecret'
+  | 'customFields'
 
 export type CloudSyncEntryChangeField = Exclude<CloudSyncChangeField, 'position'>
 
@@ -90,7 +91,8 @@ export const CLOUD_SYNC_CHANGE_LABELS: Record<CloudSyncChangeField, string> = {
   phone: '手机',
   loginAccountSource: '自动填充账号',
   note: '备注',
-  totpSecret: 'TOTP'
+  totpSecret: 'TOTP',
+  customFields: '自定义字段'
 }
 
 export const CLOUD_SYNC_ENTRY_CHANGE_FIELDS: CloudSyncEntryChangeField[] = [
@@ -106,7 +108,8 @@ export const CLOUD_SYNC_ENTRY_CHANGE_FIELDS: CloudSyncEntryChangeField[] = [
   'phone',
   'loginAccountSource',
   'note',
-  'totpSecret'
+  'totpSecret',
+  'customFields'
 ]
 
 export const CLOUD_SYNC_MANUAL_REVIEW_FIELDS: ReadonlySet<CloudSyncChangeField> = new Set([
@@ -118,5 +121,6 @@ export const CLOUD_SYNC_MANUAL_REVIEW_FIELDS: ReadonlySet<CloudSyncChangeField> 
   'password',
   'phone',
   'loginAccountSource',
-  'totpSecret'
+  'totpSecret',
+  'customFields'
 ])

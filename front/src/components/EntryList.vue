@@ -16,7 +16,7 @@
         class="entry-block"
         :class="{
           'is-folder': entry.kind === 'folder',
-          'is-login': entry.kind === 'login',
+          'is-login': entry.kind !== 'folder',
           'is-selected': entry.id === selectedId,
           'is-draggable': draggableEnabled,
           'is-dragging': draggingId === entry.id
@@ -43,7 +43,7 @@
               :draggable="false"
             >
               <span v-if="entry.kind === 'folder'" class="folder-glyph" aria-hidden="true"></span>
-              <van-icon v-else name="contact-o" />
+              <van-icon v-else :name="entryKindIcon(entry.kind)" />
             </span>
           </template>
           <template #title>
@@ -52,6 +52,7 @@
               <van-tag v-if="entry.status === 'disabled'" plain type="warning">归档</van-tag>
               <van-tag v-if="entry.status === 'trashed'" plain type="danger">回收站</van-tag>
               <van-tag v-if="entry.kind === 'login' && entry.totpSecret" plain type="success">TOTP</van-tag>
+              <van-tag v-if="entry.kind !== 'login' && entry.kind !== 'folder'" plain>{{ entryKindLabel(entry.kind) }}</van-tag>
               <van-tag v-if="entry.kind === 'folder'" plain>{{ entry.children?.length || 0 }} 项</van-tag>
             </div>
           </template>
@@ -61,6 +62,11 @@
               <span>{{ entry.domains?.[0] || '未设置域名' }}</span>
             </div>
           </template>
+          <template v-else-if="entry.kind !== 'folder'" #label>
+            <div class="entry-meta">
+              <span>{{ entry.note || customFieldSummary(entry) || entryKindLabel(entry.kind) }}</span>
+            </div>
+          </template>
           <template #right-icon>
             <div class="entry-right">
               <van-icon :name="entry.kind === 'folder' ? (isOpen(entry.id) ? 'arrow-up' : 'arrow-down') : 'arrow'" />
@@ -68,8 +74,11 @@
           </template>
         </van-cell>
         <template #right>
-          <div v-if="entry.kind === 'login'" class="swipe-actions">
-            <button class="swipe-icon-action is-danger" type="button" aria-label="删除" @click="$emit('delete', entry.id)">
+          <div class="swipe-actions">
+            <button class="swipe-icon-action" type="button" aria-label="创建副本" @click="$emit('duplicate', entry.id)">
+              <van-icon name="description-o" />
+            </button>
+            <button v-if="entry.kind !== 'folder'" class="swipe-icon-action is-danger" type="button" aria-label="删除" @click="$emit('delete', entry.id)">
               <van-icon name="delete-o" />
             </button>
           </div>
@@ -86,6 +95,7 @@
           :depth="depth + 1"
           @view="$emit('view', $event)"
           @edit="$emit('edit', $event)"
+          @duplicate="$emit('duplicate', $event)"
           @delete="$emit('delete', $event)"
           @create="$emit('create', $event)"
           @move-entry="$emit('move-entry', $event)"
@@ -108,6 +118,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
+import { entryKindIcon, entryKindLabel } from '../services/entryKinds.ts'
 import type { VaultEntry } from '../types'
 
 defineOptions({ name: 'EntryList' })
@@ -133,6 +144,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   view: [entry: VaultEntry]
   edit: [entry: VaultEntry]
+  duplicate: [entryId: string]
   delete: [entryId: string]
   create: [parentId: string]
   'move-entry': [payload: { entryId: string; targetParentId: string; targetIndex: number }]
@@ -182,6 +194,10 @@ function handlePrimary(entry: VaultEntry) {
 function handleContextMenu(event: MouseEvent, entry: VaultEntry) {
   if (pointerDrag?.active) return
   emit('context-menu', { entry, x: event.clientX, y: event.clientY })
+}
+
+function customFieldSummary(entry: VaultEntry) {
+  return (entry.customFields || []).find((field) => !field.protected && field.value)?.value || ''
 }
 
 function preparePointerDrag(event: PointerEvent, entryId: string) {

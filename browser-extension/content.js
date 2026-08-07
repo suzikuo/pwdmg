@@ -14,6 +14,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   const ACTION_CONTROL_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]'
   const SUBMIT_ACTION_RE = /(login|log in|sign in|signin|sign up|signup|register|create account|submit|continue|登录|登陆|注册|提交|继续|创建)/i
   const SHOW_PANEL_SHORTCUT = 'Alt+T'
+  const PANEL_WIDTH = 300
 
   const USER_RE = /(user|login|email|mail|account|phone|mobile|tel|\u7528\u6237\u540d|\u8d26\u53f7|\u8d26\u6237|\u90ae\u7bb1|\u624b\u673a)/i
   const EMAIL_RE = /(email|e-mail|mail|\u90ae\u7bb1)/i
@@ -35,6 +36,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let lastInputCapture = null
   let savePromptTimer = 0
   let pendingSave = null
+  let savePromptExpanded = false
   let extensionContextInvalidated = false
   let suppressCaptureUntil = 0
   let panelManualMode = false
@@ -476,6 +478,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     rootView = null
     entryButtonIds = new WeakMap()
     panelManualMode = false
+    savePromptExpanded = false
   }
 
   function applyAutoSettings(settings = {}) {
@@ -519,7 +522,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
       return
     }
 
-    const panelWidth = Math.min(286, window.innerWidth - 24)
+    const panelWidth = Math.min(PANEL_WIDTH, window.innerWidth - 24)
     const top = Math.min(Math.max(12, rect.bottom + 8), Math.max(12, window.innerHeight - 280))
     const anchorRight = window.innerWidth - Math.min(window.innerWidth - 12, rect.right) - 4
     const maxRight = Math.max(12, window.innerWidth - panelWidth - 12)
@@ -539,7 +542,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   function promptPlacementForAnchor(anchor) {
     const rect = usableAnchorRect(anchor)
     if (!rect) return null
-    const panelWidth = Math.min(286, window.innerWidth - 24)
+    const panelWidth = Math.min(PANEL_WIDTH, window.innerWidth - 24)
     const top = Math.min(Math.max(12, rect.bottom + 8), Math.max(12, window.innerHeight - 280))
     const anchorRight = window.innerWidth - Math.min(window.innerWidth - 12, rect.right) - 4
     const maxRight = Math.max(12, window.innerWidth - panelWidth - 12)
@@ -562,7 +565,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function setPanelPosition(top, right) {
     const panel = ensureRoot().querySelector('.mypwdmg-panel')
-    const panelWidth = panel?.getBoundingClientRect().width || 286
+    const panelWidth = panel?.getBoundingClientRect().width || PANEL_WIDTH
     const panelHeight = panel?.getBoundingClientRect().height || 220
     const nextTop = Math.max(8, Math.min(top, window.innerHeight - Math.min(panelHeight, window.innerHeight - 16) - 8))
     const nextRight = Math.max(8, Math.min(right, window.innerWidth - Math.min(panelWidth, window.innerWidth - 16) - 8))
@@ -692,15 +695,31 @@ if (!window.__mypwdmgContentScriptLoaded) {
     return '自动'
   }
 
-  function renderSavePrompt(preview) {
-    pendingSave = preview
+  function positionSavePromptRoot() {
+    ensureRoot()
     panelPinned = false
+    rootHost.style.setProperty('--mypwdmg-top', '12px')
+    rootHost.style.setProperty('--mypwdmg-right', '12px')
+  }
+
+  function renderSavePrompt(preview, expanded = false) {
+    pendingSave = preview
+    savePromptExpanded = Boolean(expanded)
+    positionSavePromptRoot()
     const root = ensureRoot()
-    if (!applyPromptPlacement(preview.placement)) {
-      positionRoot(preview.anchor || null)
-    }
     const folders = Array.isArray(preview.folders) ? preview.folders : []
     const update = preview.updateCandidate
+    if (!savePromptExpanded) {
+      const actionLabel = update ? '发现密码变更，点击更新' : '发现新登录，点击保存'
+      root.innerHTML = `
+      <button class="mypwdmg-save-trigger${update ? ' is-update' : ''}" type="button" title="${actionLabel}" aria-label="${actionLabel}" aria-expanded="false">
+        <span aria-hidden="true">PM</span>
+      </button>
+    `
+      addTrustedClick(root.querySelector('.mypwdmg-save-trigger'), () => renderSavePrompt(pendingSave, true))
+      return
+    }
+
     const titleValue = update?.title || preview.title || preview.hostname || 'Untitled'
     const accountValue = preview.accountLabel || update?.username || update?.email || update?.phone || ''
     const accountKind = ['email', 'phone', 'username'].includes(preview.accountKind) ? preview.accountKind : 'username'
@@ -712,7 +731,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
           <span>${escapeHtml(update ? '更新登录项' : '保存新登录')}</span>
           <small>${escapeHtml(preview.hostname || '当前网站')}</small>
         </div>
-        <button class="mypwdmg-close" type="button" title="关闭" aria-label="关闭">×</button>
+        <button class="mypwdmg-close" type="button" title="收起" aria-label="收起">−</button>
       </div>
       <div class="mypwdmg-save-body">
         <div class="mypwdmg-save-editor">
@@ -753,11 +772,16 @@ if (!window.__mypwdmgContentScriptLoaded) {
     </div>
   `
 
-    addTrustedClick(root.querySelector('.mypwdmg-close'), dismissSavePrompt)
+    addTrustedClick(root.querySelector('.mypwdmg-close'), collapseSavePrompt)
     addTrustedClick(root.querySelector('[data-action="dismiss"]'), dismissSavePrompt)
     addTrustedClick(root.querySelector('[data-action="ignore-site"]'), ignoreCurrentSaveSite)
     addTrustedClick(root.querySelector('[data-action="save"]'), savePendingCapture)
     root.querySelector('.mypwdmg-title')?.addEventListener('pointerdown', startPanelDrag)
+  }
+
+  function collapseSavePrompt() {
+    if (!pendingSave?.token) return
+    renderSavePrompt(pendingSave, false)
   }
 
   function dismissSavePrompt() {
@@ -766,6 +790,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
       sendMessage({ type: 'MYPWDMG_DISMISS_CAPTURE', token: pendingSave.token }).catch(() => { })
     }
     pendingSave = null
+    savePromptExpanded = false
     removeRoot()
   }
 
@@ -788,13 +813,14 @@ if (!window.__mypwdmgContentScriptLoaded) {
         ...pendingSave,
         anchor,
         notice: response?.message || '忽略站点失败。'
-      })
+      }, true)
       return
     }
 
     ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
     completedSaveTokens.add(token)
     pendingSave = null
+    savePromptExpanded = false
     renderPanel([], `已忽略 ${hostname}，之后不会自动保存该站点。`, anchor)
     window.setTimeout(removeRoot, 1800)
   }
@@ -829,12 +855,13 @@ if (!window.__mypwdmgContentScriptLoaded) {
       renderSavePrompt({
         ...pendingSave,
         notice: response?.message || '保存失败，请重试。'
-      })
+      }, true)
       return
     }
     renderPanel([], response.data?.action === 'updated' ? '已更新。' : '已保存。', pendingSave.anchor || document.activeElement)
     completedSaveTokens.add(token)
     pendingSave = null
+    savePromptExpanded = false
     window.setTimeout(removeRoot, 1600)
   }
 
@@ -1235,7 +1262,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (event.key !== 'Escape') return
     if (!isRootOpen()) return
     if (pendingSave?.token) {
-      dismissSavePrompt()
+      if (savePromptExpanded) collapseSavePrompt()
       return
     }
     removeRoot()

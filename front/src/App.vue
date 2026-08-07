@@ -23,6 +23,7 @@
       <WorkspaceHeader
         :search-open="searchOpen"
         :keyword="keyword"
+        :entry-filter="entryFilter"
         :drag-mode="dragMode"
         :create-menu-open="createMenuOpen"
         :more-menu-open="moreMenuOpen"
@@ -31,6 +32,7 @@
         @open-drawer="openDrawer"
         @toggle-search="toggleSearch"
         @update:keyword="keyword = $event"
+        @update:entry-filter="entryFilter = $event"
         @update:create-menu-open="createMenuOpen = $event"
         @update:more-menu-open="moreMenuOpen = $event"
         @select-create="handleTopCreateAction"
@@ -45,8 +47,8 @@
         :entries="filteredEntries"
         :selected-entry="selectedEntry"
         :stats="stats"
-        :auto-expand="Boolean(keyword.trim())"
-        :draggable-enabled="dragMode && !keyword.trim()"
+        :auto-expand="Boolean(keyword.trim()) || entryFilter !== 'all'"
+        :draggable-enabled="dragMode && !keyword.trim() && entryFilter === 'all'"
         :grid-style="desktopGridStyle"
         :pane-width="paneWidth"
         :pane-width-min="PANE_WIDTH_MIN"
@@ -58,6 +60,7 @@
         :totp-progress="totpProgress"
         @view="openView"
         @edit="openEdit"
+        @duplicate="duplicateEntry"
         @delete="deleteEntry"
         @create="openCreateSheet"
         @move-entry="moveEntry"
@@ -86,6 +89,7 @@
           :totp-remaining="totpRemaining"
           :totp-progress="totpProgress"
           @edit="openEdit"
+          @duplicate="duplicateEntry"
           @delete="deleteEntry"
           @disable="disableEntry"
           @restore="restoreEntry"
@@ -141,6 +145,26 @@
       @submit="saveEntry"
       @focus-field="scrollFocusedEditorFieldIntoView"
       @refresh-totp="refreshTotp()"
+      @open-generator="openCredentialGenerator(true)"
+      @update-custom-fields="form.customFields = $event"
+    />
+
+    <CredentialGenerator
+      :open="generatorOpen"
+      :allow-apply="generatorApplyToPassword"
+      :reset-key="generatorResetKey"
+      @update:open="generatorOpen = $event"
+      @copy="copyGeneratedCredential"
+      @apply="applyGeneratedCredential"
+    />
+
+    <ImportWizard
+      :open="importOpen"
+      :entries="vault?.entries || []"
+      :busy="busy"
+      :reset-key="importResetKey"
+      @update:open="importOpen = $event"
+      @import="importVaultRecords"
     />
 
     <SettingsDrawer
@@ -155,6 +179,10 @@
       :font-size-percent="fontSizePercent"
       :ui-scale-min="UI_SCALE_MIN_PERCENT"
       :ui-scale-max="UI_SCALE_MAX_PERCENT"
+      :session-timeout-minutes="sessionTimeoutMinutes"
+      :session-timeout-min="SESSION_TIMEOUT_MIN_MINUTES"
+      :session-timeout-max="SESSION_TIMEOUT_MAX_MINUTES"
+      :session-timeout-default="SESSION_TIMEOUT_DEFAULT_MINUTES"
       :password-health-label="passwordHealthSettingsLabel"
       :password-health-score="passwordHealthScoreLabel"
       :show-android-autofill-settings="showAndroidAutofillSettings"
@@ -207,6 +235,7 @@
       @commit-ui-scale="commitUiScale"
       @update-font-size="setFontSizeDraft"
       @commit-font-size="commitFontSize"
+      @update-session-timeout="updateSessionTimeout"
       @open-password-sheet="openPasswordSheet"
       @open-password-health="openPasswordHealth"
       @open-android-settings="openAndroidAutofillSettings"
@@ -367,6 +396,8 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { showConfirmDialog, showFailToast, showSuccessToast, showToast } from 'vant'
 import AuthScreen from './components/auth/AuthScreen.vue'
 import EntryEditor from './components/editor/EntryEditor.vue'
+import CredentialGenerator from './components/tools/CredentialGenerator.vue'
+import ImportWizard from './components/tools/ImportWizard.vue'
 import CloudPasswordPrompt from './components/sync/CloudPasswordPrompt.vue'
 import CloudSyncReview from './components/sync/CloudSyncReview.vue'
 import EntryDetailPane from './components/workspace/EntryDetailPane.vue'
@@ -402,7 +433,6 @@ import {
 } from './services/sync/appendOnlyRemoteVault'
 import { canonicalJson } from './services/sync/canonicalJson'
 import {
-  applyCloudSyncDiffItem,
   autoCloudSyncManualReviewLabels,
   buildCloudSyncDiff,
   cloudSyncChangeLabel,
@@ -419,13 +449,14 @@ import {
 } from './services/sync/legacyDiff'
 import { validateLegacyRemoteObjectRevision } from './services/sync/legacyRemoteValidation'
 import {
+  buildCloudSyncTargetPayload,
   createCloudSyncPlan,
-  hasLocalCloudChanges
+  hasLocalCloudChanges,
+  isCloudSyncDownloadTargetApplied
 } from './services/sync/cloudSyncPlan'
 import { readSyncCheckpoint, writeSyncCheckpoint } from './services/sync/syncCheckpointStore'
 import { mergeVaultPayloads, type VaultMergeConflict } from './services/sync/threeWayVaultMerge'
 import {
-  applyResolvedPasskeyState,
   canonicalVaultReadCandidates,
   passkeyStateFingerprint,
   versionedVaultObjectName
@@ -436,6 +467,10 @@ import {
   type PasswordHealthIssue
 } from './services/passwordHealth'
 import { clearSensitiveClipboard, copySensitiveText } from './services/clipboardSecurity'
+import { insertDuplicateEntry } from './services/entryDuplication.ts'
+import { filterVaultEntries } from './services/entryWorkspace.ts'
+import { ENTRY_KIND_OPTIONS, entryKindLabel, starterCustomFields } from './services/entryKinds.ts'
+import type { ImportedVaultRecord } from './services/vaultImport.ts'
 import { AutoSyncPasswordGate } from './services/autoSyncPasswordGate'
 import {
   buildEntryHistoryChanges,
@@ -447,6 +482,13 @@ import {
 } from './services/entryHistory'
 import { generateTotp, readTotpPeriod } from './services/totp'
 import { secureRandomId } from './services/secureRandom'
+import {
+  SESSION_TIMEOUT_DEFAULT_MINUTES,
+  SESSION_TIMEOUT_MAX_MINUTES,
+  SESSION_TIMEOUT_MIN_MINUTES,
+  loadSessionTimeoutMinutes,
+  sessionTimeoutMilliseconds
+} from './services/sessionTimeout.ts'
 import {
   UI_SCALE_MAX_PERCENT,
   UI_SCALE_MIN_PERCENT,
@@ -506,6 +548,7 @@ const PANE_WIDTH_KEYBOARD_STEP = 20
 const UI_SCALE_KEY = 'mypwdmg.uiScalePercent.v3'
 const LEGACY_UI_SCALE_KEY = 'mypwdmg.uiScaleLevel.v2'
 const FONT_SIZE_KEY = 'mypwdmg.fontSizePercent'
+const SESSION_TIMEOUT_KEY = 'mypwdmg.sessionTimeoutMinutes'
 const UPDATE_MANIFEST_URL_KEY = 'mypwdmg.updateManifestUrl'
 const CLOUD_SYNC_LOGS_KEY = 'mypwdmg.cloudSyncLogs.v1'
 const CLOUD_SYNC_LOG_LIMIT_KEY = 'mypwdmg.cloudSyncLogLimit'
@@ -536,7 +579,6 @@ const EXTERNAL_VAULT_REFRESH_DELAY_MS = 180
 const EXTERNAL_VAULT_REFRESH_MIN_INTERVAL_MS = 900
 const AUTO_CLOUD_SYNC_UPLOAD_DELAY_MS = 700
 const AUTO_CLOUD_SYNC_DOWNLOAD_DELAY_MS = 1200
-const SESSION_TIMEOUT_MS = 15 * 60 * 1000
 const TEXT_EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .van-field__control'
 
 const state = reactive<AppState>({
@@ -573,6 +615,7 @@ const createParentId = ref('')
 const searchOpen = ref(false)
 const uiScalePercent = ref(loadUiScale())
 const fontSizePercent = ref(loadFontSize())
+const sessionTimeoutMinutes = ref(loadSessionTimeoutMinutes(localStorage.getItem(SESSION_TIMEOUT_KEY)))
 const contextEntryId = ref('')
 const entryContextMenuX = ref(0)
 const entryContextMenuY = ref(0)
@@ -597,6 +640,11 @@ const {
   logLimit: cloudSyncLogLimit
 } = cloudSyncRuntime
 const showPassword = ref(false)
+const generatorOpen = ref(false)
+const generatorApplyToPassword = ref(false)
+const generatorResetKey = ref(0)
+const importOpen = ref(false)
+const importResetKey = ref(0)
 const totpRemaining = ref(TOTP_PERIOD_SECONDS)
 const totpPeriodSeconds = ref(TOTP_PERIOD_SECONDS)
 const totpRequestId = ref(0)
@@ -627,16 +675,19 @@ const {
   passwordHealthOpen
 } = useSettingsPanel()
 let cloudPasswordPromptResolve: ((value: string | null) => void) | null = null
-const createActions = [
-  { name: '登录', subname: '账号、密码、TOTP', kind: 'login' as EntryKind },
-  { name: '分组', subname: '整理一组条目', kind: 'folder' as EntryKind }
-]
-const createMenuActions = [
-  { text: '登录', icon: 'records-o', kind: 'login' as EntryKind },
-  { text: '分组', icon: 'cluster-o', kind: 'folder' as EntryKind }
-]
+const createActions = ENTRY_KIND_OPTIONS.map((option) => ({
+  name: option.label,
+  subname: option.description,
+  kind: option.kind
+}))
+const createMenuActions = ENTRY_KIND_OPTIONS.map((option) => ({
+  text: option.label,
+  icon: option.icon,
+  kind: option.kind
+}))
 const {
   keyword,
+  entryFilter,
   editorOpen,
   detailOpen,
   createSheetOpen,
@@ -651,7 +702,7 @@ const {
 } = useEntryWorkspace(
   () => vault.value?.entries || [],
   activeTree,
-  filterEntries
+  filterVaultEntries
 )
 const entryContextActions = computed(() => {
   const entry = findEntry(vault.value?.entries || [], contextEntryId.value)
@@ -667,14 +718,17 @@ const entryContextActions = computed(() => {
     actions.push(
       { name: '新建登录', key: 'create-login' },
       { name: '新建分组', key: 'create-folder' },
+      { name: '创建副本', key: 'duplicate' },
       { name: '编辑分组', key: 'edit' },
       { name: '归档分组', key: 'archive', color: '#ee0a24' },
       { name: '移入回收站', key: 'trash', color: '#ee0a24' }
     )
   } else {
+    const label = entryKindLabel(entry.kind)
     actions.push(
-      { name: '编辑登录', key: 'edit' },
-      { name: '归档登录', key: 'archive', color: '#ee0a24' },
+      { name: '创建副本', key: 'duplicate' },
+      { name: `编辑${label}`, key: 'edit' },
+      { name: `归档${label}`, key: 'archive', color: '#ee0a24' },
       { name: '移入回收站', key: 'trash', color: '#ee0a24' }
     )
   }
@@ -685,6 +739,8 @@ const entryContextMenuStyle = computed<CssVars>(() => ({
   top: `${entryContextMenuY.value}px`
 }))
 const moreActions = computed(() => [
+  { text: '凭据生成器', icon: 'replay', key: 'generator' },
+  { text: '导入数据', icon: 'upgrade', key: 'import' },
   {
     text: dragMode.value ? '退出拖拽模式' : '拖拽模式',
     icon: 'sort',
@@ -705,7 +761,7 @@ const loginAccountSourceOptions: Array<{ label: string; value: LoginAccountSourc
 const unlocked = computed(() => Boolean(vault.value) && !state.locked)
 const vaultSession = useVaultSession(() => {
   if (unlocked.value) lockVault()
-}, SESSION_TIMEOUT_MS)
+}, () => sessionTimeoutMilliseconds(sessionTimeoutMinutes.value))
 const passwordMask = computed(() => selectedEntry.value?.password ? '••••••••••••' : '未设置')
 const totpProgress = computed(() => Math.round((totpRemaining.value / totpPeriodSeconds.value) * 100))
 const passwordHealthReport = computed(() => analyzePasswordHealth(vault.value?.entries || []))
@@ -776,6 +832,7 @@ const stats = computed(() => {
   const flat = flattenEntries(vault.value?.entries || [])
   const active = flat.filter(isActiveEntry)
   return {
+    items: active.filter((entry) => entry.kind !== 'folder').length,
     logins: active.filter((entry) => entry.kind === 'login').length,
     folders: active.filter((entry) => entry.kind === 'folder').length,
     totp: active.filter((entry) => entry.kind === 'login' && entry.totpSecret).length,
@@ -855,6 +912,7 @@ onMounted(() => {
   drawerMediaQuery.addEventListener('change', syncDrawerMode)
   window.addEventListener('resize', clampPaneToViewport)
   window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('pointerdown', handleSessionActivity, true)
   window.addEventListener('pointerdown', closeTopMenusOnOutside, true)
   window.addEventListener('scroll', closeEntryContextMenu, true)
   window.addEventListener('resize', closeEntryContextMenu)
@@ -881,8 +939,8 @@ watch(drawerOpen, (open) => {
 watch(entryContextMenuOpen, (open) => {
   if (!open) contextEntryId.value = ''
 })
-watch(keyword, (value) => {
-  if (value.trim()) dragMode.value = false
+watch(() => [keyword.value, entryFilter.value], ([value, filter]) => {
+  if (String(value).trim() || filter !== 'all') dragMode.value = false
 })
 watch(() => [selectedEntry.value?.id, selectedEntry.value?.totpSecret], syncSelectedTotpTimer)
 watch(unlocked, scheduleSessionLock, { immediate: true })
@@ -892,6 +950,7 @@ onUnmounted(() => {
   drawerMediaQuery?.removeEventListener('change', syncDrawerMode)
   window.removeEventListener('resize', clampPaneToViewport)
   window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('pointerdown', handleSessionActivity, true)
   window.removeEventListener('pointerdown', closeTopMenusOnOutside, true)
   window.removeEventListener('scroll', closeEntryContextMenu, true)
   window.removeEventListener('resize', closeEntryContextMenu)
@@ -926,11 +985,17 @@ function handleNativeBack() {
 }
 
 function handleGlobalKeydown(event: KeyboardEvent) {
+  handleSessionActivity(event)
   if (event.key !== 'Escape' || event.defaultPrevented) return
   if (document.querySelector('.van-dialog')) return
   if (!closeTopLayer()) return
   event.preventDefault()
   event.stopPropagation()
+}
+
+function handleSessionActivity(event: Event) {
+  if (!event.isTrusted || !unlocked.value) return
+  scheduleSessionLock()
 }
 
 function closeTopLayer() {
@@ -985,9 +1050,10 @@ function closeTopLayer() {
     moreMenuOpen.value = false
     return true
   }
-  if (searchOpen.value || keyword.value) {
+  if (searchOpen.value || keyword.value || entryFilter.value !== 'all') {
     searchOpen.value = false
     keyword.value = ''
+    entryFilter.value = 'all'
     return true
   }
   if (dragMode.value) {
@@ -1273,6 +1339,11 @@ function applyLockedUiState() {
   totpRequestId.value += 1
   totpCode.value = ''
   showPassword.value = false
+  generatorOpen.value = false
+  generatorApplyToPassword.value = false
+  generatorResetKey.value += 1
+  importOpen.value = false
+  importResetKey.value += 1
   Object.assign(form, emptyEntry('login'))
   domainText.value = ''
   editingId.value = ''
@@ -1280,6 +1351,7 @@ function applyLockedUiState() {
   createParentId.value = ''
   contextEntryId.value = ''
   keyword.value = ''
+  entryFilter.value = 'all'
   password.value = ''
   newPassword.value = ''
   confirmPassword.value = ''
@@ -1336,6 +1408,7 @@ function emptyEntry(kind: EntryKind): VaultEntry {
     loginAccountSource: 'auto',
     note: '',
     totpSecret: '',
+    customFields: starterCustomFields(kind, makeId),
     history: [],
     children: []
   }
@@ -1413,6 +1486,7 @@ function handleEntryContextAction(action: { key?: string }) {
   if (!entry || !action.key) return
   if (action.key === 'create-login') return openCreate('login', entry.id)
   if (action.key === 'create-folder') return openCreate('folder', entry.id)
+  if (action.key === 'duplicate') return duplicateEntry(entry.id)
   if (action.key === 'edit') return openEdit(entry)
   if (action.key === 'archive') return archiveEntry(entry.id)
   if (action.key === 'trash') return trashEntry(entry.id)
@@ -1426,7 +1500,7 @@ function closeEntryContextMenu() {
 
 function clampEntryContextMenuPosition(x: number, y: number) {
   const menuWidth = 156
-  const menuHeight = 188
+  const menuHeight = 236
   const margin = 8
   return {
     x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
@@ -1436,6 +1510,14 @@ function clampEntryContextMenuPosition(x: number, y: number) {
 
 function handleMoreAction(action: { key?: string }) {
   moreMenuOpen.value = false
+  if (action.key === 'generator') {
+    openCredentialGenerator(false)
+    return
+  }
+  if (action.key === 'import') {
+    importOpen.value = true
+    return
+  }
   if (action.key === 'drag') {
     toggleDragMode()
     return
@@ -1468,9 +1550,26 @@ async function safeExit() {
   }
 }
 
+function openCredentialGenerator(applyToPassword: boolean) {
+  generatorApplyToPassword.value = applyToPassword
+  generatorOpen.value = true
+}
+
+function copyGeneratedCredential(value: string) {
+  copyText(value)
+}
+
+function applyGeneratedCredential(value: string) {
+  if (!generatorApplyToPassword.value) return copyGeneratedCredential(value)
+  form.password = value
+  generatorOpen.value = false
+  showSuccessToast('已用于当前条目')
+}
+
 function openView(entry: VaultEntry) {
-  if (entry.kind !== 'login') return
+  if (entry.kind === 'folder') return
   if (androidAutofillLaunch.value?.active) {
+    if (entry.kind !== 'login') return
     completeAndroidAutofill(entry)
     return
   }
@@ -1530,6 +1629,79 @@ async function saveEntry() {
     showSuccessToast('已保存')
   } catch {
     showFailToast('保存失败，请重试')
+  } finally {
+    finishBusyOperation(operationId)
+  }
+}
+
+async function importVaultRecords(records: ImportedVaultRecord[]) {
+  if (!vault.value || busy.value || records.length === 0) return
+  const operationId = beginBusyOperation()
+  try {
+    const payload = cloneVault()
+    const importedEntries = records.map((record) => {
+      const entry: VaultEntry = {
+        ...emptyEntry(record.kind),
+        title: record.title,
+        domains: record.kind === 'login' ? record.domains : [],
+        username: record.username,
+        email: record.email,
+        password: record.password,
+        phone: record.phone,
+        note: record.note,
+        totpSecret: record.kind === 'login' ? record.totpSecret : '',
+        customFields: [
+          ...record.customFields.map((field) => ({ ...field, id: makeId() })),
+          ...(record.folderPath ? [{ id: makeId(), label: '原分组', value: record.folderPath, type: 'text' as const, protected: false }] : [])
+        ]
+      }
+      appendEntryHistory(entry, 'created', '外部导入')
+      return entry
+    })
+    const stamp = new Date().toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    const folder: VaultEntry = {
+      ...emptyEntry('folder'),
+      title: `导入 ${stamp}`,
+      children: importedEntries
+    }
+    appendEntryHistory(folder, 'created', '外部导入')
+    payload.entries.unshift(folder)
+
+    const result = await saveVaultForCurrentSession(payload)
+    if (!result.ok || !result.data) return handleVaultWriteError(result, '导入失败')
+    if (!publishVaultPayload(result.data)) return
+    importOpen.value = false
+    importResetKey.value += 1
+    scheduleAutoCloudUpload()
+    showSuccessToast(`已导入 ${importedEntries.length} 项`)
+  } catch (error) {
+    showFailToast(error instanceof Error ? error.message : '导入失败，请重试')
+  } finally {
+    finishBusyOperation(operationId)
+  }
+}
+
+async function duplicateEntry(entryId: string) {
+  if (!vault.value || busy.value) return
+  const source = findEntry(vault.value.entries, entryId)
+  if (!source || source.status === 'trashed') return showFailToast('该条目无法创建副本')
+
+  const operationId = beginBusyOperation()
+  try {
+    const payload = cloneVault()
+    const duplicate = insertDuplicateEntry(payload.entries, entryId, makeId)
+    if (!duplicate) return showFailToast('原条目已变化，请重试')
+
+    const result = await saveVaultForCurrentSession(payload)
+    if (!result.ok || !result.data) return handleVaultWriteError(result, '创建副本失败')
+    if (!publishVaultPayload(result.data)) return
+
+    const savedDuplicate = findEntry(vault.value.entries, duplicate.id)
+    if (savedDuplicate && savedDuplicate.kind !== 'folder') showEntryDetail(savedDuplicate)
+    scheduleAutoCloudUpload()
+    showSuccessToast(`已创建「${duplicate.title}」`)
+  } catch (error) {
+    showFailToast(error instanceof Error ? error.message : '创建副本失败，请重试')
   } finally {
     finishBusyOperation(operationId)
   }
@@ -1615,23 +1787,24 @@ async function archiveEntry(entryId: string) {
   if (!target) return showToast('条目不存在')
   const title = target.title || '未命名'
   const childCount = target.kind === 'folder' ? flattenEntries(target.children || []).filter((entry) => entry.status !== 'disabled').length : 0
+  const itemLabel = entryKindLabel(target.kind)
   const message = target.kind === 'folder'
     ? childCount > 0
       ? `分组「${title}」和其中 ${childCount} 项内容会从正常列表中隐藏，之后可以在归档里恢复。`
       : `分组「${title}」会从正常列表中隐藏，之后可以在归档里恢复。`
-    : `「${title}」会从正常列表和自动填充中隐藏，之后可以在归档里恢复。`
+    : `「${title}」会从正常列表${target.kind === 'login' ? '和自动填充' : ''}中隐藏，之后可以在归档里恢复。`
   try {
     await showConfirmDialog({
-      title: target.kind === 'folder' ? '归档分组' : '归档登录',
+      title: `归档${itemLabel}`,
       message,
-      confirmButtonText: target.kind === 'folder' ? '归档分组' : '归档登录',
+      confirmButtonText: `归档${itemLabel}`,
       confirmButtonColor: '#ee0a24'
     })
   } catch {
     return
   }
   const payload = cloneVault()
-  const reason = target.kind === 'folder' ? '分组已归档' : '登录已归档，暂不在正常列表使用'
+  const reason = `${itemLabel}已归档，暂不在正常列表使用`
   if (!updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'disabled', reason))) return
   const result = await saveVaultForCurrentSession(payload)
   if (!result.ok || !result.data) return handleVaultWriteError(result, '归档失败')
@@ -1642,7 +1815,7 @@ async function archiveEntry(entryId: string) {
   }
   drawerSection.value = 'system'
   systemGroupKey.value = 'archived'
-  showSuccessToast(target.kind === 'folder' ? '分组已归档' : '登录已归档')
+  showSuccessToast(`${itemLabel}已归档`)
 }
 
 async function trashEntry(entryId: string) {
@@ -1655,7 +1828,7 @@ async function trashEntry(entryId: string) {
     ? childCount > 0
       ? `分组「${title}」下的 ${childCount} 项内容也会一起移入回收站，之后可以恢复。`
       : `将空分组「${title}」移入回收站？`
-    : `将登录「${title}」移入回收站？之后可以恢复。`
+    : `将${entryKindLabel(target.kind)}「${title}」移入回收站？之后可以恢复。`
   try {
     await showConfirmDialog({
       title: '移入回收站',
@@ -1693,7 +1866,7 @@ async function restoreEntry(entryId: string) {
   const payload = cloneVault()
   const updater = target.kind === 'folder'
     ? (entry: VaultEntry) => markEntryStatus(entry, 'active', '恢复为正常条目')
-    : (entry: VaultEntry) => markEntrySelfStatus(entry, 'active', '恢复为正常账号')
+    : (entry: VaultEntry) => markEntrySelfStatus(entry, 'active', '恢复为正常条目')
   if (!updateEntryAndAncestorsById(payload.entries, entryId, updater, (entry) => markEntrySelfStatus(entry, 'active', '恢复上级分组'))) {
     return showToast('条目不存在')
   }
@@ -1702,7 +1875,7 @@ async function restoreEntry(entryId: string) {
   if (!publishVaultPayload(result.data)) return
   scheduleAutoCloudUpload()
   selectedEntry.value = findEntry(vault.value.entries, entryId)
-  if (selectedEntry.value && selectedEntry.value.kind === 'login') showEntryDetail(selectedEntry.value)
+  if (selectedEntry.value && selectedEntry.value.kind !== 'folder') showEntryDetail(selectedEntry.value)
   showSuccessToast('已恢复')
 }
 
@@ -2699,7 +2872,7 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
   if (!vault.value || cloudBusy.value) return
   if (hasPendingCloudSyncReview()) {
     if (!options.automatic) {
-      cloudSyncReviewOpen.value = true
+      showCloudSyncReview()
       backupStatus.value = '有未处理同步差异，请先确认'
       showToast('有未处理同步差异，请先确认')
     }
@@ -2994,7 +3167,7 @@ async function routePreparedCloudSyncPreview(
     }
 
     markCloudOperation(operation, 'waiting-review', autoDecision.message)
-    cloudSyncReviewOpen.value = true
+    showCloudSyncReview()
     backupStatus.value = autoDecision.message
     appendCloudSyncLog({
       direction: preview.direction,
@@ -3010,7 +3183,7 @@ async function routePreparedCloudSyncPreview(
 
   const message = `发现 ${items.length} 项差异`
   markCloudOperation(operation, 'waiting-review', message)
-  cloudSyncReviewOpen.value = true
+  showCloudSyncReview()
   backupStatus.value = message
   appendCloudSyncLog({
     direction: preview.direction,
@@ -3051,7 +3224,14 @@ type CloudSyncApplyOptions = {
   successMessage?: string
 }
 
-async function validateCloudSyncPreview(preview: CloudSyncPreview): Promise<{ ok: boolean; message: string }> {
+type CloudSyncPreviewValidation =
+  | { ok: true; message: ''; currentLocal: VaultPayload; localAlreadyApplied: boolean }
+  | { ok: false; message: string }
+
+async function validateCloudSyncPreview(
+  preview: CloudSyncPreview,
+  targetPayload: VaultPayload
+): Promise<CloudSyncPreviewValidation> {
   if (!isCloudSyncPreviewCurrent(preview)) {
     return { ok: false, message: '保险库会话或云配置已变化，请重新检测同步差异' }
   }
@@ -3062,9 +3242,26 @@ async function validateCloudSyncPreview(preview: CloudSyncPreview): Promise<{ ok
   if (!currentLocal.ok || !currentLocal.data) {
     return { ok: false, message: currentLocal.message || '无法重新读取本地保险库' }
   }
-  if (await cloudSyncPayloadFingerprint(currentLocal.data) !== preview.localFingerprint) {
-    return { ok: false, message: '本地保险库在确认期间已变化，请重新检测同步差异' }
+  const currentLocalFingerprint = await cloudSyncPayloadFingerprint(currentLocal.data)
+  let localAlreadyApplied = false
+  if (currentLocalFingerprint !== preview.localFingerprint) {
+    localAlreadyApplied = await isCloudSyncDownloadTargetApplied({
+      direction: preview.direction,
+      currentPayload: currentLocal.data,
+      targetPayload,
+      fingerprint: cloudSyncPayloadFingerprint
+    })
+    if (!localAlreadyApplied) {
+      return { ok: false, message: '本地保险库在确认期间已变化，请重新检测同步差异' }
+    }
   }
+
+  const success = (): CloudSyncPreviewValidation => ({
+    ok: true,
+    message: '',
+    currentLocal: currentLocal.data as VaultPayload,
+    localAlreadyApplied
+  })
 
   if (preview.managedRemote) {
     const currentRemote = await loadAppendOnlyVault(
@@ -3091,7 +3288,7 @@ async function validateCloudSyncPreview(preview: CloudSyncPreview): Promise<{ ok
     } else if (currentRemote.status !== 'not-found') {
       return { ok: false, message: '远端保险库在确认期间已创建，请重新检测同步差异' }
     }
-    return { ok: true, message: '' }
+    return success()
   }
 
   const sourceValidation = await validateLegacyRemoteObjectRevision(
@@ -3104,7 +3301,7 @@ async function validateCloudSyncPreview(preview: CloudSyncPreview): Promise<{ ok
     return { ok: false, message: '保险库会话或云配置已变化，请重新检测同步差异' }
   }
   if (!sourceValidation.ok || preview.direction !== 'upload' || !preview.uploadTargetWasMissing) {
-    return sourceValidation
+    return sourceValidation.ok ? success() : { ok: false, message: sourceValidation.message }
   }
   const targetValidation = await validateLegacyRemoteObjectRevision(
     createRemoteVaultStore(),
@@ -3115,7 +3312,7 @@ async function validateCloudSyncPreview(preview: CloudSyncPreview): Promise<{ ok
   if (!isCloudSyncPreviewCurrent(preview)) {
     return { ok: false, message: '保险库会话或云配置已变化，请重新检测同步差异' }
   }
-  return targetValidation
+  return targetValidation.ok ? success() : { ok: false, message: targetValidation.message }
 }
 
 function isCloudSyncPreviewCurrent(preview: CloudSyncPreview) {
@@ -3130,6 +3327,7 @@ type CloudSyncApplyContext = {
   options: CloudSyncApplyOptions
   remoteClient: RemoteVaultStore
   nextPayload: VaultPayload
+  localAlreadyApplied: VaultPayload | null
   previewStats: ReturnType<typeof cloudSyncSelectionStats>
   selectedStats: ReturnType<typeof cloudSyncSelectionStats>
 }
@@ -3137,8 +3335,9 @@ type CloudSyncApplyContext = {
 async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: CloudSyncDiffItem[], options: CloudSyncApplyOptions = {}) {
   backupStatus.value = preview.direction === 'download' ? '正在应用下载差异' : '正在应用上传差异'
   try {
+    const nextPayload = buildCloudSyncTargetPayload(preview, selectedItems, normalizeSettings(settings))
     markCloudOperation(options.operation || null, 'validating', '正在确认本地与远端版本')
-    const validation = await validateCloudSyncPreview(preview)
+    const validation = await validateCloudSyncPreview(preview, nextPayload)
     if (!validation.ok) {
       finishCloudOperation(options.operation || null, 'error', validation.message)
       backupStatus.value = validation.message
@@ -3156,13 +3355,7 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
       return false
     }
     if (!isCloudSyncPreviewCurrent(preview)) return false
-
-    const nextPayload = clonePayload(preview.basePayload)
-    applyResolvedPasskeyState(nextPayload, preview.resolvedPasskeyState)
-    nextPayload.settings = normalizeSettings(settings)
-    for (const item of selectedItems) {
-      applyCloudSyncDiffItem(nextPayload.entries, preview.sourcePayload.entries, item)
-    }
+    if (preview.direction === 'download') nextPayload.revision = validation.currentLocal.revision
 
     const context: CloudSyncApplyContext = {
       preview,
@@ -3170,6 +3363,7 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
       options,
       remoteClient: createRemoteVaultStore(),
       nextPayload,
+      localAlreadyApplied: validation.localAlreadyApplied ? validation.currentLocal : null,
       previewStats: cloudSyncSelectionStats(preview.items),
       selectedStats: cloudSyncSelectionStats(selectedItems)
     }
@@ -3200,18 +3394,21 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
 }
 
 async function applyCloudDownload(context: CloudSyncApplyContext) {
-  const { preview, selectedItems, options, nextPayload, previewStats, selectedStats } = context
-  markCloudOperation(options.operation || null, 'applying-local', '正在写入本地保险库')
-  const result = await saveVaultForCurrentSession(nextPayload)
-  if (!result.ok || !result.data) {
-    const message = result.code === 'CONFLICT'
-      ? '本地保险库在应用同步期间已变化，请重新检测差异'
-      : result.message || '应用下载差异失败'
-    if (result.code === 'CONFLICT') await handleVaultWriteError(result, message)
-    return failCloudSyncApply(context, message, { showToast: result.code !== 'CONFLICT' })
+  const { preview, selectedItems, options, nextPayload, localAlreadyApplied, previewStats, selectedStats } = context
+  let appliedVault = localAlreadyApplied
+  if (!appliedVault) {
+    markCloudOperation(options.operation || null, 'applying-local', '正在写入本地保险库')
+    const result = await saveVaultForCurrentSession(nextPayload)
+    if (!result.ok || !result.data) {
+      const message = result.code === 'CONFLICT'
+        ? '本地保险库在应用同步期间已变化，请重新检测差异'
+        : result.message || '应用下载差异失败'
+      if (result.code === 'CONFLICT') await handleVaultWriteError(result, message)
+      return failCloudSyncApply(context, message, { showToast: result.code !== 'CONFLICT' })
+    }
+    appliedVault = result.data
   }
 
-  const appliedVault = result.data
   if (!publishVaultPayload(appliedVault)) return false
   if (!isCloudSyncPreviewCurrent(preview) || vault.value !== appliedVault) return false
 
@@ -3352,6 +3549,12 @@ function finishCloudSyncApplyPreview(preview: CloudSyncPreview, options: CloudSy
 function closeCloudSyncReview() {
   cloudSyncReviewOpen.value = false
   cloudSyncPreview.value = null
+}
+
+function showCloudSyncReview() {
+  drawerOpen.value = false
+  drawerDetailOpen.value = false
+  cloudSyncReviewOpen.value = true
 }
 
 function hideCloudSyncReview() {
@@ -4114,13 +4317,26 @@ function normalizeForm(): VaultEntry {
   entry.email = entry.email?.trim() || ''
   entry.phone = entry.phone?.trim() || ''
   entry.loginAccountSource = normalizeLoginAccountSource(entry.loginAccountSource)
-  entry.domains = domainText.value
-    .split(/[\n,，\s]+/)
-    .map((item) => item.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, ''))
-    .filter(Boolean)
+  entry.customFields = (entry.customFields || [])
+    .map((field) => ({
+      ...field,
+      label: String(field.label || '').trim(),
+      value: String(field.value || ''),
+      protected: field.type === 'secret' || field.protected === true
+    }))
+    .filter((field) => field.label || field.value)
+  entry.domains = entry.kind === 'login'
+    ? domainText.value
+      .split(/[\n,，\s]+/)
+      .map((item) => item.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, ''))
+      .filter(Boolean)
+    : []
   if (entry.kind === 'folder') {
     entry.domains = []
+    entry.customFields = []
     entry.children = entry.children || []
+  } else {
+    entry.children = []
   }
   return entry
 }
@@ -4348,22 +4564,6 @@ function isDescendant(entry: VaultEntry, targetEntryId: string): boolean {
   return false
 }
 
-function filterEntries(entries: VaultEntry[], term: string): VaultEntry[] {
-  if (!term) return entries
-  return entries
-    .map((entry) => {
-      if (!isVisibleInMainList(entry)) return null
-      const text = [entry.title, entry.username, entry.email, entry.phone, ...(entry.domains || [])].join(' ').toLowerCase()
-      if (entry.kind === 'folder') {
-        const children = filterEntries(entry.children || [], term)
-        if (text.includes(term) || children.length) return { ...entry, children }
-        return null
-      }
-      return text.includes(term) ? entry : null
-    })
-    .filter(Boolean) as VaultEntry[]
-}
-
 function flattenEntries(entries: VaultEntry[]): VaultEntry[] {
   return entries.flatMap((entry) => [entry, ...flattenEntries(entry.children || [])])
 }
@@ -4435,6 +4635,13 @@ function commitFontSize(value: number | number[]) {
   applyFontSize(true)
 }
 
+function updateSessionTimeout(value: number | string) {
+  const next = loadSessionTimeoutMinutes(value)
+  sessionTimeoutMinutes.value = next
+  localStorage.setItem(SESSION_TIMEOUT_KEY, String(next))
+  scheduleSessionLock()
+}
+
 function applyLayoutScale(save = true) {
   if (save) localStorage.setItem(UI_SCALE_KEY, String(uiScalePercent.value))
   document.documentElement.style.setProperty('--ui-scale', String(uiScalePercent.value / 100))
@@ -4470,8 +4677,9 @@ function px(value: number) {
 function toggleSearch() {
   createMenuOpen.value = false
   moreMenuOpen.value = false
-  if (searchOpen.value || keyword.value) {
+  if (searchOpen.value || keyword.value || entryFilter.value !== 'all') {
     keyword.value = ''
+    entryFilter.value = 'all'
     searchOpen.value = false
     return
   }

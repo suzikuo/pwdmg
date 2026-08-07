@@ -1,4 +1,3 @@
-import { hasCloudSyncPositionChanged } from '../cloudSyncPosition.ts'
 import type { EntryStatus, LoginAccountSource, VaultEntry, VaultPayload } from '../../types.ts'
 import {
   CLOUD_SYNC_CHANGE_LABELS,
@@ -51,7 +50,7 @@ export function buildCloudSyncDiff(sourcePayload: VaultPayload, basePayload: Vau
       continue
     }
     if (sourceMeta && baseMeta) {
-      const changes = diffEntryChanges(sourceMeta, baseMeta, sourceIndex, baseIndex)
+      const changes = diffEntryChanges(sourceMeta, baseMeta)
       if (changes.length) items.push(makeCloudSyncDiffItem('modified', sourceMeta, baseMeta, changes))
     }
   }
@@ -83,6 +82,17 @@ export function applyCloudSyncDiffItem(targetEntries: VaultEntry[], sourceEntrie
   if (item.details.some((detail) => detail.checked && detail.key === 'position')) {
     const moved = takeEntry(targetEntries, item.id)
     if (moved) insertEntryAt(targetEntries, item.sourceParentId, moved.entry, item.sourceIndex)
+  }
+}
+
+export function applyCloudSyncPositionChanges(targetEntries: VaultEntry[], sourceEntries: VaultEntry[]) {
+  const sourceIndex = indexEntries(sourceEntries)
+  for (const sourceMeta of sourceIndex.values()) {
+    if (!findEntry(targetEntries, sourceMeta.entry.id)) continue
+    if (sourceMeta.parentId && !findEntry(targetEntries, sourceMeta.parentId)) continue
+    const moved = takeEntry(targetEntries, sourceMeta.entry.id)
+    if (!moved) continue
+    insertEntryAt(targetEntries, sourceMeta.parentId, moved.entry, sourceMeta.index)
   }
 }
 
@@ -130,7 +140,7 @@ export function cloudSyncChangeLabel(changeType: CloudSyncChangeType) {
 }
 
 export function cloudSyncEntryLabel(item: CloudSyncDiffItem) {
-  return item.entryKind === 'folder' ? '分组' : '登录'
+  return entryKindLabel(item.entryKind)
 }
 
 export function autoCloudSyncManualReviewLabels(items: CloudSyncDiffItem[]) {
@@ -155,7 +165,7 @@ function makeCloudSyncDiffItem(
   return {
     id: entry?.id || '',
     changeType,
-    entryKind: entry?.kind === 'folder' ? 'folder' : 'login',
+    entryKind: entry?.kind || 'login',
     title: entry?.title || '未命名',
     path: meta?.path || '未命名',
     checked: changeType !== 'deleted',
@@ -189,14 +199,9 @@ function hasMissingAncestor(meta: EntryIndexMeta, otherIndex: Map<string, EntryI
 
 function diffEntryChanges(
   sourceMeta: EntryIndexMeta,
-  baseMeta: EntryIndexMeta,
-  sourceIndex: ReadonlyMap<string, EntryIndexMeta>,
-  baseIndex: ReadonlyMap<string, EntryIndexMeta>
+  baseMeta: EntryIndexMeta
 ) {
   const changes: CloudSyncChangeDetail[] = []
-  if (hasCloudSyncPositionChanged(sourceMeta.entry.id, sourceMeta, baseMeta, sourceIndex, baseIndex)) {
-    changes.push(makeCloudSyncChangeDetail('position', sourceMeta.path, baseMeta.path))
-  }
   const source = comparableCloudSyncEntry(sourceMeta.entry)
   const base = comparableCloudSyncEntry(baseMeta.entry)
   for (const key of CLOUD_SYNC_ENTRY_CHANGE_FIELDS) {
@@ -230,13 +235,18 @@ function formatCloudSyncValue(key: CloudSyncChangeField, value: unknown) {
     return formatUnixTime(Number(value || 0)) || '空'
   }
   if (key === 'kind') {
-    return value === 'folder' ? '分组' : '登录'
+    return entryKindLabel(String(value))
   }
   if (key === 'status') {
     return cloudSyncStatusLabel(normalizeEntryStatus(value))
   }
   if (key === 'loginAccountSource') {
     return cloudSyncLoginAccountSourceLabel(normalizeLoginAccountSource(value))
+  }
+  if (key === 'customFields') {
+    const fields = Array.isArray(value) ? value as Array<{ label?: unknown }> : []
+    const labels = fields.map((field) => String(field?.label || '')).filter(Boolean)
+    return labels.length ? `${labels.length} 项：${labels.join('、')}` : '空'
   }
   return compactCloudSyncText(String(value || ''))
 }
@@ -259,7 +269,7 @@ function cloudSyncLoginAccountSourceLabel(source: LoginAccountSource) {
 
 export function comparableCloudSyncEntry(entry: VaultEntry) {
   return {
-    kind: entry.kind === 'folder' ? 'folder' : 'login',
+    kind: entry.kind,
     title: entry.title || '',
     status: normalizeEntryStatus(entry.status),
     statusReason: entry.statusReason || '',
@@ -271,7 +281,8 @@ export function comparableCloudSyncEntry(entry: VaultEntry) {
     phone: entry.phone || '',
     loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
     note: entry.note || '',
-    totpSecret: entry.totpSecret || ''
+    totpSecret: entry.totpSecret || '',
+    customFields: JSON.parse(JSON.stringify(entry.customFields || []))
   }
 }
 
@@ -280,7 +291,7 @@ function applyCloudSyncEntryField(target: VaultEntry, source: VaultEntry, key: C
     case 'position':
       return
     case 'kind':
-      target.kind = source.kind === 'folder' ? 'folder' : 'login'
+      target.kind = source.kind
       if (target.kind === 'folder') target.children = target.children || []
       return
     case 'title':
@@ -320,7 +331,19 @@ function applyCloudSyncEntryField(target: VaultEntry, source: VaultEntry, key: C
     case 'totpSecret':
       target.totpSecret = source.totpSecret || ''
       return
+    case 'customFields':
+      target.customFields = JSON.parse(JSON.stringify(source.customFields || []))
+      return
   }
+}
+
+function entryKindLabel(kind: string) {
+  if (kind === 'folder') return '分组'
+  if (kind === 'secure-note') return '安全备注'
+  if (kind === 'card') return '银行卡'
+  if (kind === 'identity') return '身份'
+  if (kind === 'api-key') return 'API 密钥'
+  return '登录'
 }
 
 function normalizeLoginAccountSource(value: unknown): LoginAccountSource {

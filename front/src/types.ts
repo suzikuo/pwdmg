@@ -1,10 +1,19 @@
-export type EntryKind = 'login' | 'folder'
+export type EntryKind = 'login' | 'secure-note' | 'card' | 'identity' | 'api-key' | 'folder'
 export type LoginAccountSource = 'auto' | 'username' | 'email' | 'phone'
 export type EntryStatus = 'active' | 'disabled' | 'trashed'
 export type EntryHistoryAction = 'created' | 'updated' | 'disabled' | 'restored' | 'trashed'
-export type EntryHistoryField = 'title' | 'domains' | 'username' | 'email' | 'password' | 'phone' | 'loginAccountSource' | 'note' | 'totpSecret' | 'status'
+export type EntryHistoryField = 'title' | 'domains' | 'username' | 'email' | 'password' | 'phone' | 'loginAccountSource' | 'note' | 'totpSecret' | 'customFields' | 'status'
 export type VaultPayloadVersion = 1 | 2
 export type PasskeyTransport = 'usb' | 'nfc' | 'ble' | 'internal' | 'hybrid' | 'smart-card'
+export type VaultCustomFieldType = 'text' | 'secret' | 'date' | 'url' | 'email' | 'phone'
+
+export interface VaultCustomField {
+  id: string
+  label: string
+  value: string
+  type: VaultCustomFieldType
+  protected: boolean
+}
 
 export interface VaultEntryHistoryChange {
   field: EntryHistoryField
@@ -42,6 +51,7 @@ export interface VaultEntry {
   loginAccountSource?: LoginAccountSource
   note?: string
   totpSecret?: string
+  customFields?: VaultCustomField[]
   history?: VaultEntryHistory[]
   children?: VaultEntry[]
 }

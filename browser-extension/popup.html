@@ -39,39 +39,46 @@
 
     <div id="matchList" class="match-list" aria-label="当前网站匹配账号"></div>
 
-    <div class="auto-toggle-group">
+    <section class="quick-settings" aria-label="自动功能">
       <label class="auto-toggle">
-        <input id="autoFillToggle" type="checkbox" />
         <span>自动填充</span>
+        <input id="autoFillToggle" type="checkbox" role="switch" />
       </label>
       <label class="auto-toggle">
-        <input id="autoSaveToggle" type="checkbox" />
         <span>自动保存</span>
+        <input id="autoSaveToggle" type="checkbox" role="switch" />
       </label>
-    </div>
-
-    <section id="ignoredSiteSetting" class="ignored-site-setting" hidden>
-      <div class="ignored-current">
-        <div class="ignored-copy">
-          <strong>当前站点</strong>
-          <span id="ignoredCurrentState">未忽略</span>
-        </div>
-        <button id="toggleIgnoredSiteButton" class="secondary" type="button">忽略该网站</button>
-      </div>
-      <details class="ignored-manager">
-        <summary>管理已忽略网站 <span id="ignoredSiteCount">0</span></summary>
-        <div id="ignoredSiteList" class="ignored-site-list"></div>
-      </details>
     </section>
 
-    <section class="shortcut-setting">
-      <label for="shortcutInput">页面弹窗快捷键</label>
-      <div class="shortcut-row">
-        <input id="shortcutInput" type="text" readonly value="Alt+T" />
-        <button id="resetShortcutButton" class="secondary" type="button">重置</button>
+    <details class="advanced-settings">
+      <summary>
+        <span>更多设置</span>
+        <small>网站规则与快捷键</small>
+      </summary>
+      <div class="advanced-settings-body">
+        <section id="ignoredSiteSetting" class="ignored-site-setting" hidden>
+          <div class="ignored-current">
+            <div class="ignored-copy">
+              <strong>当前站点</strong>
+              <span id="ignoredCurrentState">未忽略</span>
+            </div>
+            <button id="toggleIgnoredSiteButton" class="secondary" type="button">忽略该网站</button>
+          </div>
+          <details class="ignored-manager">
+            <summary>已忽略网站 <span id="ignoredSiteCount">0</span></summary>
+            <div id="ignoredSiteList" class="ignored-site-list"></div>
+          </details>
+        </section>
+
+        <section class="shortcut-setting">
+          <label for="shortcutInput">页面弹窗快捷键</label>
+          <div class="shortcut-row">
+            <input id="shortcutInput" type="text" readonly value="Alt+T" />
+            <button id="resetShortcutButton" class="secondary" type="button">重置</button>
+          </div>
+        </section>
       </div>
-      <p>点击输入框后按组合键。浏览器全局快捷键请在扩展快捷键页面修改。</p>
-    </section>
+    </details>
 
     <footer class="popup-actions">
       <button id="refreshButton" class="secondary" type="button">刷新</button>

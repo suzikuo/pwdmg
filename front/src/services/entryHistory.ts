@@ -4,7 +4,7 @@ export const ENTRY_HISTORY_LIMIT = 10
 
 const TRACKED_FIELDS: EntryHistoryField[] = [
   'title', 'domains', 'username', 'email', 'password', 'phone',
-  'loginAccountSource', 'note', 'totpSecret', 'status'
+  'loginAccountSource', 'note', 'totpSecret', 'customFields', 'status'
 ]
 
 const FIELD_LABELS: Record<EntryHistoryField, string> = {
@@ -17,12 +17,13 @@ const FIELD_LABELS: Record<EntryHistoryField, string> = {
   loginAccountSource: '自动填充账号',
   note: '备注',
   totpSecret: 'TOTP',
+  customFields: '自定义字段',
   status: '状态'
 }
 
 const OPTIONAL_SNAPSHOT_FIELDS: Array<keyof VaultEntrySnapshot> = [
   'status', 'statusReason', 'statusUpdatedAt', 'deletedAt', 'username', 'email',
-  'password', 'phone', 'loginAccountSource', 'note', 'totpSecret'
+  'password', 'phone', 'loginAccountSource', 'note', 'totpSecret', 'customFields'
 ]
 
 export function createEntrySnapshot(entry: VaultEntry): VaultEntrySnapshot {
@@ -98,6 +99,19 @@ function historyFieldValue(
       key: value,
       display: value ? `已设置（${value.length} 位）` : '未设置'
     }
+  }
+
+  if (field === 'customFields') {
+    const fields = Array.isArray(entry.customFields) ? entry.customFields : []
+    const key = JSON.stringify(fields.map((item) => ({
+      id: item.id,
+      label: item.label,
+      value: item.value,
+      type: item.type,
+      protected: item.protected
+    })))
+    const labels = fields.map((item) => item.label).filter(Boolean)
+    return { key, display: labels.length ? `${labels.length} 项：${labels.join('、')}` : '未设置' }
   }
 
   if (field === 'loginAccountSource') {

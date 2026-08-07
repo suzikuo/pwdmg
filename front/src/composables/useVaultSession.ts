@@ -1,8 +1,9 @@
-import { SessionGeneration } from '../services/sessionGeneration'
+import { SessionGeneration } from '../services/sessionGeneration.ts'
 
 type SessionExpiryHandler = () => void
+type SessionTimeout = number | (() => number)
 
-export function useVaultSession(onExpire: SessionExpiryHandler, timeoutMs: number) {
+export function useVaultSession(onExpire: SessionExpiryHandler, timeoutMs: SessionTimeout) {
   const generation = new SessionGeneration()
   let timer = 0
 
@@ -25,10 +26,12 @@ export function useVaultSession(onExpire: SessionExpiryHandler, timeoutMs: numbe
   function schedule(unlocked: boolean) {
     cancel()
     if (!unlocked) return
+    const delay = typeof timeoutMs === 'function' ? timeoutMs() : timeoutMs
+    if (!Number.isFinite(Number(delay)) || Number(delay) <= 0) return
     timer = window.setTimeout(() => {
       timer = 0
       onExpire()
-    }, timeoutMs)
+    }, Number(delay))
   }
 
   function cancel() {

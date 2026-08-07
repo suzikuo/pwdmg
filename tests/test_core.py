@@ -381,6 +381,41 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(fill["email"], "")
             self.assertEqual(fill["loginAccountSource"], "auto")
 
+    def test_vault_service_preserves_item_kinds_and_protected_custom_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VaultService(
+                vault_path=Path(tmp) / "vault.json",
+                legacy_path=Path(tmp) / "missing.json",
+            )
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(
+                default_payload(
+                    [
+                        {
+                            "id": "card-1",
+                            "kind": "card",
+                            "title": "Travel card",
+                            "customFields": [
+                                {
+                                    "id": "field-1",
+                                    "label": "Card number",
+                                    "value": "4111111111111111",
+                                    "type": "secret",
+                                    "protected": True,
+                                }
+                            ],
+                            "children": [{"id": "nested", "kind": "login", "title": "Discard"}],
+                        }
+                    ]
+                )
+            )
+
+            entry = service.get_vault()["entries"][0]
+            self.assertEqual(entry["kind"], "card")
+            self.assertEqual(entry["customFields"][0]["value"], "4111111111111111")
+            self.assertTrue(entry["customFields"][0]["protected"])
+            self.assertEqual(entry["children"], [])
+
     def test_save_captured_login_creates_entry_in_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault_path = Path(tmp) / "vault.json"

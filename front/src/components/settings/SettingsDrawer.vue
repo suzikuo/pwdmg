@@ -86,6 +86,27 @@
           <van-cell center is-link title="密码健康" :label="passwordHealthLabel" @click="emit('open-password-health')">
             <template #value><span class="settings-entry-value">{{ passwordHealthScore }}</span></template>
           </van-cell>
+          <van-cell center title="自动锁定" :label="sessionTimeoutMinutes === 0 ? '已关闭，仅手动锁定' : '已开启'">
+            <template #right-icon>
+              <van-switch
+                :model-value="sessionTimeoutMinutes > 0"
+                size="18px"
+                @update:model-value="toggleSessionAutoLock(Boolean($event))"
+              />
+            </template>
+          </van-cell>
+          <van-cell v-if="sessionTimeoutMinutes > 0" center title="等待时间" :label="`无操作 ${sessionTimeoutMinutes} 分钟后锁定`">
+            <template #right-icon>
+              <van-stepper
+                :model-value="sessionTimeoutMinutes"
+                :min="Math.max(1, sessionTimeoutMin)"
+                :max="sessionTimeoutMax"
+                integer
+                button-size="24px"
+                @update:model-value="emit('update-session-timeout', $event)"
+              />
+            </template>
+          </van-cell>
         </div>
 
         <div v-if="showAndroidAutofillSettings" class="settings-group">
@@ -127,7 +148,7 @@
         </div>
       </section>
 
-      <section v-else-if="section === 'backup'" class="drawer-panel backup-panel">
+      <section v-else-if="section === 'backup'" ref="backupPanel" class="drawer-panel backup-panel">
         <p class="settings-note">上传/下载会先校验新增、修改、删除项；备份会直接上传一个带日期的云端文件，不在本地留存。</p>
         <van-form @submit="emit('save-settings')">
           <van-field :model-value="oss.bucketName" label="Bucket" placeholder="OSS Bucket 名称" @update:model-value="updateOss('bucketName', $event)" />
@@ -136,7 +157,7 @@
           <van-field :model-value="oss.region" label="Region" placeholder="oss-cn-hangzhou" @update:model-value="updateOss('region', $event)" />
           <van-field :model-value="oss.objectName" label="文件名" placeholder="mypwdmg-vault.json" @update:model-value="updateOss('objectName', $event)" />
           <van-cell center title="自动同步数据" label="保存后上传校验，回到前台下载校验">
-            <template #right-icon><van-switch :model-value="oss.autoSync" size="22" @update:model-value="emit('update-auto-sync', Boolean($event))" /></template>
+            <template #right-icon><van-switch :model-value="oss.autoSync" size="18" @update:model-value="emit('update-auto-sync', Boolean($event))" /></template>
           </van-cell>
           <van-cell center title="同步间隔" label="自动下载校验最小间隔（分钟）">
             <template #right-icon><van-stepper :model-value="oss.autoSyncIntervalMinutes" :min="autoSyncIntervalMin" :max="autoSyncIntervalMax" integer button-size="24px" @update:model-value="emit('update-auto-sync-interval', $event)" /></template>
@@ -209,6 +230,7 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
 import type { AppUpdateCheck, AppUpdateProgress, AndroidAutofillState, PluginListenerState, VaultEntry, VaultPayload } from '../../types'
 
 type DrawerSection = 'settings' | 'updates' | 'backup' | 'system'
@@ -220,7 +242,7 @@ type CloudDirection = 'upload' | 'download' | 'backup'
 type CloudStatus = 'started' | 'success' | 'review' | 'error' | 'skipped'
 type CloudLog = { id: string; at: number; direction: CloudDirection; automatic: boolean; status: CloudStatus; objectName: string; message: string; added: number; modified: number; deleted: number; selected: number; total: number }
 
-defineProps<{
+const props = defineProps<{
   open: boolean
   detailOpen: boolean
   section: DrawerSection
@@ -232,6 +254,10 @@ defineProps<{
   fontSizePercent: number
   uiScaleMin: number
   uiScaleMax: number
+  sessionTimeoutMinutes: number
+  sessionTimeoutMin: number
+  sessionTimeoutMax: number
+  sessionTimeoutDefault: number
   passwordHealthLabel: string
   passwordHealthScore: string
   showAndroidAutofillSettings: boolean
@@ -278,6 +304,17 @@ defineProps<{
   archiveEntryMeta: (entry: VaultEntry) => string
 }>()
 
+const backupPanel = ref<HTMLElement | null>(null)
+
+watch(
+  () => [props.open, props.section, props.detailOpen] as const,
+  async ([open, section]) => {
+    if (!open || section !== 'backup') return
+    await nextTick()
+    if (backupPanel.value) backupPanel.value.scrollTop = 0
+  }
+)
+
 const emit = defineEmits<{
   'update:open': [value: boolean]
   'update:detail-open': [value: boolean]
@@ -287,6 +324,7 @@ const emit = defineEmits<{
   'commit-ui-scale': [value: number | number[]]
   'update-font-size': [value: number | number[]]
   'commit-font-size': [value: number | number[]]
+  'update-session-timeout': [value: number | string]
   'open-password-sheet': []
   'open-password-health': []
   'open-android-settings': []
@@ -321,4 +359,9 @@ function updateOss(field: keyof OssSettings, value: unknown) {
   if (field === 'autoSync' || field === 'autoSyncIntervalMinutes') return
   emit('update-oss', field, String(value ?? ''))
 }
+
+function toggleSessionAutoLock(enabled: boolean) {
+  emit('update-session-timeout', enabled ? props.sessionTimeoutDefault : 0)
+}
+
 </script>

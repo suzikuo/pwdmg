@@ -20,7 +20,7 @@ type FlatEntry = Omit<VaultEntry, 'children'> & { parentId: string }
 const ENTRY_FIELDS: (keyof FlatEntry)[] = [
   'kind', 'title', 'status', 'statusReason', 'statusUpdatedAt', 'deletedAt', 'domains',
   'username', 'email', 'password', 'phone', 'loginAccountSource', 'note', 'totpSecret',
-  'history', 'parentId'
+  'customFields', 'history', 'parentId'
 ]
 
 export function mergeVaultPayloads(

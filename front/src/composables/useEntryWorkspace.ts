@@ -1,11 +1,13 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
+import type { EntryFilterMode } from '../services/entryWorkspace.ts'
 import type { VaultEntry } from '../types'
 
 type EntryTreeTransform = (entries: VaultEntry[]) => VaultEntry[]
-type EntryFilter = (entries: VaultEntry[], term: string) => VaultEntry[]
+type EntryFilter = (entries: VaultEntry[], term: string, mode: EntryFilterMode) => VaultEntry[]
 
 export type EntryWorkspaceState = {
   keyword: Ref<string>
+  entryFilter: Ref<EntryFilterMode>
   editorOpen: Ref<boolean>
   detailOpen: Ref<boolean>
   createSheetOpen: Ref<boolean>
@@ -25,6 +27,7 @@ export function useEntryWorkspace(
   filterEntries: EntryFilter
 ): EntryWorkspaceState {
   const keyword = ref('')
+  const entryFilter = ref<EntryFilterMode>('all')
   const editorOpen = ref(false)
   const detailOpen = ref(false)
   const createSheetOpen = ref(false)
@@ -37,7 +40,7 @@ export function useEntryWorkspace(
 
   const filteredEntries = computed(() => {
     const term = keyword.value.trim().toLowerCase()
-    return filterEntries(activeTree(getEntries()), term)
+    return filterEntries(activeTree(getEntries()), term, entryFilter.value)
   })
 
   function clearSelection() {
@@ -47,6 +50,7 @@ export function useEntryWorkspace(
 
   return {
     keyword,
+    entryFilter,
     editorOpen,
     detailOpen,
     createSheetOpen,

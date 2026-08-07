@@ -41,6 +41,8 @@ final class AndroidVaultStore {
     private static final String STATUS_ACTIVE = "active";
     private static final String STATUS_DISABLED = "disabled";
     private static final String STATUS_TRASHED = "trashed";
+    private static final Set<String> ENTRY_KINDS = new HashSet<>(Arrays.asList("login", "secure-note", "card", "identity", "api-key", "folder"));
+    private static final Set<String> CUSTOM_FIELD_TYPES = new HashSet<>(Arrays.asList("text", "secret", "date", "url", "email", "phone"));
     private static final int DEFAULT_ITERATIONS = 390000;
     private static final long UNLOCK_SESSION_TIMEOUT_MS = 15 * 60 * 1000L;
     private static final int MAX_IMPORT_BACKUPS = 5;
@@ -1256,7 +1258,8 @@ final class AndroidVaultStore {
         Set<String> seenIds,
         String path
     ) throws JSONException {
-        String kind = "folder".equals(entry.optString("kind")) ? "folder" : "login";
+        String rawKind = entry.optString("kind");
+        String kind = ENTRY_KINDS.contains(rawKind) ? rawKind : "login";
         String originalId = entry.optString("id");
         if (originalId.isEmpty()) originalId = "entry-missing-" + path;
         String entryId = originalId;
@@ -1287,8 +1290,26 @@ final class AndroidVaultStore {
                 .put("loginAccountSource", normalizeLoginAccountSource(entry.optString("loginAccountSource")))
                 .put("note", entry.optString("note"))
                 .put("totpSecret", entry.optString("totpSecret"))
+                .put("customFields", normalizeCustomFields(entry.optJSONArray("customFields")))
                 .put("history", entry.optJSONArray("history") == null ? new JSONArray() : new JSONArray(entry.optJSONArray("history").toString()))
                 .put("children", new JSONArray());
+        }
+        return normalized;
+    }
+
+    private static JSONArray normalizeCustomFields(JSONArray fields) throws JSONException {
+        JSONArray normalized = new JSONArray();
+        for (int index = 0; fields != null && index < fields.length() && index < 100; index += 1) {
+            JSONObject field = fields.optJSONObject(index);
+            if (field == null) continue;
+            String type = field.optString("type");
+            if (!CUSTOM_FIELD_TYPES.contains(type)) type = "text";
+            normalized.put(new JSONObject()
+                .put("id", limitedString(defaultString(field.optString("id"), "field-" + (index + 1)), 128))
+                .put("label", limitedString(defaultString(field.optString("label"), "Custom field"), 200))
+                .put("value", limitedString(field.optString("value"), 65536))
+                .put("type", type)
+                .put("protected", field.optBoolean("protected") || "secret".equals(type)));
         }
         return normalized;
     }
@@ -1585,6 +1606,11 @@ final class AndroidVaultStore {
 
     private static String defaultString(String value, String fallback) {
         return value == null || value.trim().isEmpty() ? fallback : value;
+    }
+
+    private static String limitedString(String value, int maximumLength) {
+        String text = value == null ? "" : value;
+        return text.length() <= maximumLength ? text : text.substring(0, maximumLength);
     }
 
     private static String normalizeLoginAccountSource(String value) {

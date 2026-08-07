@@ -1,10 +1,12 @@
-import type { EntryStatus, LoginAccountSource, VaultEntry, VaultPayload } from '../types'
+import type { EntryKind, EntryStatus, LoginAccountSource, VaultCustomField, VaultCustomFieldType, VaultEntry, VaultPayload } from '../types'
 import { limitEntryHistory } from './entryHistory.ts'
 import { normalizePasskeyState } from './passkeySchema.ts'
 import { secureRandomId } from './secureRandom.ts'
 
 const LOGIN_ACCOUNT_SOURCES = new Set<LoginAccountSource>(['auto', 'username', 'email', 'phone'])
 const ENTRY_STATUSES = new Set<EntryStatus>(['active', 'disabled', 'trashed'])
+const ENTRY_KINDS = new Set<EntryKind>(['login', 'secure-note', 'card', 'identity', 'api-key', 'folder'])
+const CUSTOM_FIELD_TYPES = new Set<VaultCustomFieldType>(['text', 'secret', 'date', 'url', 'email', 'phone'])
 
 export function nowSeconds() {
   return Math.floor(Date.now() / 1000)
@@ -69,7 +71,7 @@ function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), pa
     seenIds.add(id)
     return {
       id,
-      kind: entry.kind === 'folder' ? 'folder' : 'login',
+      kind: normalizeEntryKind(entry.kind),
       title: entry.title || 'Untitled',
       status: normalizeEntryStatus(entry.status),
       statusReason: entry.statusReason || '',
@@ -83,9 +85,32 @@ function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), pa
       loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
       note: entry.note || '',
       totpSecret: entry.totpSecret || '',
+      customFields: normalizeCustomFields(entry.customFields),
       history: Array.isArray(entry.history) ? limitEntryHistory(entry.history) : [],
-      children: normalizeEntries(entry.children || [], seenIds, path)
+      children: entry.kind === 'folder' ? normalizeEntries(entry.children || [], seenIds, path) : []
     }
+  })
+}
+
+function normalizeEntryKind(value: unknown): EntryKind {
+  return typeof value === 'string' && ENTRY_KINDS.has(value as EntryKind) ? value as EntryKind : 'login'
+}
+
+function normalizeCustomFields(value: unknown): VaultCustomField[] {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, 100).flatMap((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+    const field = raw as Partial<VaultCustomField>
+    const type = typeof field.type === 'string' && CUSTOM_FIELD_TYPES.has(field.type as VaultCustomFieldType)
+      ? field.type as VaultCustomFieldType
+      : 'text'
+    return [{
+      id: String(field.id || `field-${index + 1}`).slice(0, 128),
+      label: String(field.label || '自定义字段').slice(0, 200),
+      value: String(field.value || '').slice(0, 65_536),
+      type,
+      protected: field.protected === true || type === 'secret'
+    }]
   })
 }
 

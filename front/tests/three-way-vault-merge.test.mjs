@@ -20,6 +20,19 @@ test('merges independent entry additions and field updates', () => {
   assert.equal(merged.payload.entries[0].note, 'remote-note')
 })
 
+test('preserves custom fields during an independent concurrent edit', () => {
+  const base = payload([entry('shared')])
+  const local = clone(base)
+  const remote = clone(base)
+  local.entries[0].username = 'local-user'
+  remote.entries[0].customFields = [{ id: 'field-1', label: 'Token', value: 'secret', type: 'secret', protected: true }]
+
+  const merged = mergeVaultPayloads(base, local, remote)
+  assert.deepEqual(merged.conflicts, [])
+  assert.equal(merged.payload.entries[0].username, 'local-user')
+  assert.deepEqual(merged.payload.entries[0].customFields, remote.entries[0].customFields)
+})
+
 test('merges independent additions inside the same folder without shifting existing siblings', () => {
   const base = payload([folder('group', [entry('a'), entry('b')])])
   const local = clone(base)
@@ -94,6 +107,7 @@ function entry(id, overrides = {}) {
     loginAccountSource: 'auto',
     note: '',
     totpSecret: '',
+    customFields: [],
     history: [],
     children: [],
     ...overrides

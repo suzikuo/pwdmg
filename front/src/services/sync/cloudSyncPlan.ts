@@ -1,6 +1,17 @@
 import type { VaultPayload } from '../../types.ts'
-import { buildCloudSyncDiff, type CloudSyncDiffItem, type CloudSyncDirection } from './legacyDiff.ts'
-import { resolvePasskeyState, type ResolvedPasskeyState } from './passkeyRemoteGate.ts'
+import {
+  applyCloudSyncDiffItem,
+  applyCloudSyncPositionChanges,
+  buildCloudSyncDiff,
+  type CloudSyncDiffItem,
+  type CloudSyncDirection,
+  type CloudSyncPreview
+} from './legacyDiff.ts'
+import {
+  applyResolvedPasskeyState,
+  resolvePasskeyState,
+  type ResolvedPasskeyState
+} from './passkeyRemoteGate.ts'
 import { mergeVaultPayloads } from './threeWayVaultMerge.ts'
 
 export type CloudSyncPlan = {
@@ -35,6 +46,31 @@ export function hasLocalCloudChanges(input: {
   return input.localUpdatedAt > 0 && (
     input.remoteUpdatedAt <= 0 || input.localUpdatedAt > input.remoteUpdatedAt
   )
+}
+
+export function buildCloudSyncTargetPayload(
+  preview: Pick<CloudSyncPreview, 'basePayload' | 'sourcePayload' | 'resolvedPasskeyState'>,
+  selectedItems: CloudSyncDiffItem[],
+  settings: VaultPayload['settings']
+): VaultPayload {
+  const target = clone(preview.basePayload)
+  applyResolvedPasskeyState(target, preview.resolvedPasskeyState)
+  target.settings = clone(settings)
+  for (const item of selectedItems) {
+    applyCloudSyncDiffItem(target.entries, preview.sourcePayload.entries, item)
+  }
+  applyCloudSyncPositionChanges(target.entries, preview.sourcePayload.entries)
+  return target
+}
+
+export async function isCloudSyncDownloadTargetApplied(input: {
+  direction: CloudSyncDirection
+  currentPayload: VaultPayload
+  targetPayload: VaultPayload
+  fingerprint: (payload: VaultPayload) => Promise<string>
+}) {
+  if (input.direction !== 'download') return false
+  return await input.fingerprint(input.currentPayload) === await input.fingerprint(input.targetPayload)
 }
 
 export async function createCloudSyncPlan(input: {
@@ -123,4 +159,8 @@ export async function createCloudSyncPlan(input: {
       targetNeedsWrite
     }
   }
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
 }

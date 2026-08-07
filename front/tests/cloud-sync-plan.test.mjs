@@ -3,8 +3,10 @@ import test from 'node:test'
 
 import { defaultVaultPayload } from '../src/services/vaultDefaults.ts'
 import {
+  buildCloudSyncTargetPayload,
   createCloudSyncPlan,
-  hasLocalCloudChanges
+  hasLocalCloudChanges,
+  isCloudSyncDownloadTargetApplied
 } from '../src/services/sync/cloudSyncPlan.ts'
 
 const fingerprint = async (payload) => JSON.stringify({
@@ -225,6 +227,40 @@ test('uses the checkpoint fingerprint instead of timestamps when deciding local 
     localUpdatedAt: 100,
     remoteUpdatedAt: 200
   }), true)
+})
+
+test('builds one selected download target and recognizes idempotent convergence', async () => {
+  const local = payload([login('local')])
+  const remote = payload([login('local'), login('remote')])
+  const planned = await createCloudSyncPlan({
+    requestedDirection: 'download',
+    localPayload: local,
+    remotePayload: remote,
+    ancestorPayload: null,
+    fingerprint
+  })
+
+  assert.equal(planned.ok, true)
+  const target = buildCloudSyncTargetPayload(planned.plan, planned.plan.items, local.settings)
+  assert.deepEqual(target.entries.map((entry) => entry.id), ['local', 'remote'])
+  assert.equal(await isCloudSyncDownloadTargetApplied({
+    direction: 'download',
+    currentPayload: { ...target, revision: target.revision + 3, updatedAt: target.updatedAt + 30 },
+    targetPayload: target,
+    fingerprint
+  }), true)
+  assert.equal(await isCloudSyncDownloadTargetApplied({
+    direction: 'upload',
+    currentPayload: target,
+    targetPayload: target,
+    fingerprint
+  }), false)
+  assert.equal(await isCloudSyncDownloadTargetApplied({
+    direction: 'download',
+    currentPayload: local,
+    targetPayload: target,
+    fingerprint
+  }), false)
 })
 
 function payload(entries) {

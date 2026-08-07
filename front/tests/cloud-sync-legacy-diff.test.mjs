@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   applyCloudSyncDiffItem,
+  applyCloudSyncPositionChanges,
   buildCloudSyncDiff,
   cloudSyncDiffCountsForItems,
   cloudSyncSelectionStats
@@ -159,16 +160,32 @@ test('applies only checked modified fields', () => {
   assert.equal(targetEntries[0].password, 'local-pass')
 })
 
-test('applies selected position changes without field changes', () => {
+test('does not expose position-only changes for manual review', () => {
   const sourceEntries = [folder('folder', [login('moved')]), login('stable')]
   const targetEntries = [login('moved'), folder('folder'), login('stable')]
-  const [item] = buildCloudSyncDiff(payload(sourceEntries), payload(targetEntries))
+  assert.deepEqual(buildCloudSyncDiff(payload(sourceEntries), payload(targetEntries)), [])
+})
 
-  assert.equal(item.id, 'moved')
-  assert.deepEqual(item.details.map((detail) => detail.key), ['position'])
+test('applies position changes automatically without a review item', () => {
+  const sourceEntries = [folder('folder', [login('moved')]), login('stable')]
+  const targetEntries = [login('moved'), folder('folder'), login('stable')]
 
-  applyCloudSyncDiffItem(targetEntries, sourceEntries, item)
+  applyCloudSyncPositionChanges(targetEntries, sourceEntries)
 
   assert.deepEqual(targetEntries.map((entry) => entry.id), ['folder', 'stable'])
   assert.deepEqual(targetEntries[0].children.map((entry) => entry.id), ['moved'])
+})
+
+test('keeps field review separate while applying a position change automatically', () => {
+  const sourceEntries = [folder('folder', [login('moved', { note: 'source-note' })]), login('stable')]
+  const targetEntries = [login('moved', { note: 'local-note' }), folder('folder'), login('stable')]
+  const [item] = buildCloudSyncDiff(payload(sourceEntries), payload(targetEntries))
+
+  assert.equal(item.id, 'moved')
+  assert.deepEqual(item.details.map((detail) => detail.key), ['note'])
+  applyCloudSyncDiffItem(targetEntries, sourceEntries, item)
+  applyCloudSyncPositionChanges(targetEntries, sourceEntries)
+
+  assert.equal(targetEntries[0].children[0].note, 'source-note')
+  assert.deepEqual(targetEntries.map((entry) => entry.id), ['folder', 'stable'])
 })

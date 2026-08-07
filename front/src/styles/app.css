@@ -15,8 +15,8 @@
   --app-font-md: calc(14px * var(--ui-scale));
   --app-font-lg: calc(16px * var(--ui-scale));
   --app-font-xl: calc(22px * var(--ui-scale));
-  --topbar-height: max(48px, calc(50px * var(--ui-scale)));
-  --top-icon-size: max(40px, calc(38px * var(--ui-scale)));
+  --topbar-height: max(42px, calc(44px * var(--ui-scale)));
+  --top-icon-size: max(34px, calc(34px * var(--ui-scale)));
   --editor-popup-max-height: min(88vh, 720px);
   --editor-popup-max-height: min(88dvh, 720px);
   --sheet-viewport-height: 100vh;
@@ -53,9 +53,22 @@
   --van-font-size-sm: var(--app-font-sm);
   --van-font-size-md: var(--app-font-md);
   --van-font-size-lg: var(--app-font-lg);
-  --van-cell-vertical-padding: calc(10px * var(--ui-scale));
-  --van-cell-horizontal-padding: calc(16px * var(--ui-scale));
-  --van-button-small-height: calc(32px * var(--ui-scale));
+  --van-cell-vertical-padding: calc(7px * var(--ui-scale));
+  --van-cell-horizontal-padding: calc(12px * var(--ui-scale));
+  --van-button-mini-height: calc(24px * var(--ui-scale));
+  --van-button-small-height: calc(28px * var(--ui-scale));
+  --van-button-default-height: calc(34px * var(--ui-scale));
+  --van-button-large-height: calc(38px * var(--ui-scale));
+  --van-button-default-font-size: var(--app-font-md);
+  --van-button-normal-font-size: var(--app-font-md);
+  --van-button-normal-padding: 0 calc(10px * var(--ui-scale));
+  --van-button-small-padding: 0 calc(7px * var(--ui-scale));
+  --van-button-mini-padding: 0 calc(5px * var(--ui-scale));
+  --van-search-input-height: calc(28px * var(--ui-scale));
+  --van-empty-padding: calc(16px * var(--ui-scale)) 0;
+  --van-empty-image-size: calc(112px * var(--ui-scale));
+  --van-empty-description-margin-top: calc(8px * var(--ui-scale));
+  --van-empty-description-font-size: var(--app-font-sm);
   --van-tag-default-color: var(--text-muted);
   --van-tag-plain-background: transparent;
 }
@@ -124,8 +137,8 @@ body {
   display: grid;
   align-content: center;
   align-content: safe center;
-  gap: 18px;
-  padding: calc(28px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
+  gap: 12px;
+  padding: calc(20px + env(safe-area-inset-top)) 14px calc(20px + env(safe-area-inset-bottom));
   max-width: 460px;
   margin: 0 auto;
 }
@@ -169,7 +182,7 @@ body {
 }
 
 .auth-card {
-  padding: 12px;
+  padding: 9px;
 }
 
 .auth-card-compact {
@@ -178,7 +191,7 @@ body {
 
 .auth-status {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .auth-status p {
@@ -190,7 +203,7 @@ body {
 .workspace {
   min-height: 100vh;
   min-height: 100dvh;
-  padding-bottom: 22px;
+  padding-bottom: 14px;
 }
 
 .app-topbar {
@@ -200,8 +213,8 @@ body {
   min-height: calc(var(--topbar-height) + env(safe-area-inset-top));
   display: flex;
   align-items: center;
-  gap: calc(8px * var(--ui-scale));
-  padding: calc(6px * var(--ui-scale) + env(safe-area-inset-top)) 10px calc(6px * var(--ui-scale));
+  gap: calc(5px * var(--ui-scale));
+  padding: calc(4px * var(--ui-scale) + env(safe-area-inset-top)) 8px calc(4px * var(--ui-scale));
   border-bottom: 1px solid var(--border-soft);
   background: color-mix(in srgb, var(--panel-bg), transparent 6%);
   backdrop-filter: blur(14px);
@@ -215,7 +228,7 @@ body {
 .top-actions {
   display: flex;
   align-items: center;
-  gap: calc(4px * var(--ui-scale));
+  gap: calc(2px * var(--ui-scale));
 }
 
 .top-icon {
@@ -231,11 +244,11 @@ body {
 }
 
 .top-icon .van-icon {
-  font-size: calc(21px * var(--ui-scale));
+  font-size: calc(18px * var(--ui-scale));
 }
 
 .plus-glyph {
-  font-size: calc(25px * var(--ui-scale));
+  font-size: calc(22px * var(--ui-scale));
   font-weight: 520;
   line-height: 1;
 }
@@ -256,8 +269,8 @@ body {
 
 .top-menu-popover .van-popover__action {
   width: max(136px, calc(148px * var(--ui-scale)));
-  height: max(34px, calc(38px * var(--ui-scale)));
-  padding: 0 calc(12px * var(--ui-scale));
+  height: max(30px, calc(34px * var(--ui-scale)));
+  padding: 0 calc(10px * var(--ui-scale));
   font-size: var(--app-font-md);
 }
 
@@ -305,14 +318,48 @@ body {
   position: sticky;
   top: calc(var(--topbar-height) + env(safe-area-inset-top));
   z-index: 24;
-  padding: calc(8px * var(--ui-scale)) 10px;
+  padding: calc(5px * var(--ui-scale)) 8px;
   border-bottom: 1px solid var(--border-soft);
   background: color-mix(in srgb, var(--app-bg), transparent 8%);
   backdrop-filter: blur(12px);
+  display: grid;
+  gap: 5px;
 }
 
 .search-strip .van-search {
   padding: 0;
+}
+
+.search-filter-segments {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-height: 30px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel-bg);
+}
+
+.search-filter-segments button {
+  min-width: 0;
+  border: 0;
+  border-right: 1px solid var(--border-soft);
+  padding: 0 6px;
+  color: var(--text-muted);
+  background: transparent;
+  font: inherit;
+  font-size: var(--app-font-sm);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.search-filter-segments button:last-child {
+  border-right: 0;
+}
+
+.search-filter-segments button.active {
+  color: var(--brand-strong);
+  background: color-mix(in srgb, var(--brand), transparent 88%);
 }
 
 .drag-mode-strip {
@@ -321,9 +368,9 @@ body {
   z-index: 24;
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: calc(36px * var(--ui-scale));
-  padding: calc(7px * var(--ui-scale)) 12px;
+  gap: 6px;
+  min-height: calc(32px * var(--ui-scale));
+  padding: calc(4px * var(--ui-scale)) 9px;
   border-bottom: 1px solid color-mix(in srgb, var(--brand), transparent 70%);
   color: var(--brand-strong);
   background: color-mix(in srgb, var(--brand), var(--panel-bg) 88%);
@@ -349,7 +396,7 @@ body {
 
 .workspace-grid {
   display: grid;
-  gap: calc(12px * var(--ui-scale));
+  gap: calc(8px * var(--ui-scale));
   width: min(100%, 1280px);
   max-width: 1280px;
   margin: 0 auto;
@@ -362,9 +409,9 @@ body {
 .summary-strip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: calc(8px * var(--ui-scale));
-  margin: calc(12px * var(--ui-scale)) 10px 0;
-  padding: calc(12px * var(--ui-scale));
+  gap: calc(6px * var(--ui-scale));
+  margin: calc(8px * var(--ui-scale)) 8px 0;
+  padding: calc(8px * var(--ui-scale));
 }
 
 .summary-strip div {
@@ -422,7 +469,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .entry-block {
-  margin: calc(8px * var(--ui-scale)) 10px;
+  margin: calc(5px * var(--ui-scale)) 8px;
   overflow: hidden;
   box-shadow: none;
   transition:
@@ -490,12 +537,12 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .entry-kind-mark {
-  width: max(28px, calc(30px * var(--ui-scale)));
-  height: max(28px, calc(30px * var(--ui-scale)));
+  width: max(26px, calc(28px * var(--ui-scale)));
+  height: max(26px, calc(28px * var(--ui-scale)));
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  margin-right: 10px;
+  margin-right: 7px;
   border-radius: 8px;
   color: var(--text-muted);
   background: var(--panel-bg-muted);
@@ -544,7 +591,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .entry-title-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -556,7 +603,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .entry-meta {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   color: var(--text-muted);
 }
@@ -570,23 +617,23 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .entry-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .folder-children {
-  padding: 6px 0 8px;
+  padding: 3px 0 5px;
   background: color-mix(in srgb, var(--brand), var(--panel-bg-muted) 92%);
 }
 
 .mini-icon-action.van-button--mini {
-  width: calc(30px * var(--ui-scale));
-  min-width: calc(30px * var(--ui-scale));
+  width: calc(27px * var(--ui-scale));
+  min-width: calc(27px * var(--ui-scale));
   padding: 0;
 }
 
 .mini-delete-action {
-  width: calc(30px * var(--ui-scale));
-  min-width: calc(30px * var(--ui-scale));
+  width: calc(27px * var(--ui-scale));
+  min-width: calc(27px * var(--ui-scale));
   height: max(24px, calc(26px * var(--ui-scale)));
   display: grid;
   place-items: center;
@@ -611,15 +658,15 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .swipe-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   height: 100%;
-  padding: 0 8px;
+  padding: 0 6px;
   background: var(--panel-bg);
 }
 
 .swipe-icon-action {
-  width: calc(30px * var(--ui-scale));
-  min-width: calc(30px * var(--ui-scale));
+  width: calc(27px * var(--ui-scale));
+  min-width: calc(27px * var(--ui-scale));
   height: max(24px, calc(26px * var(--ui-scale)));
   display: grid;
   place-items: center;
@@ -655,7 +702,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .desktop-preview {
   display: none;
   min-height: 440px;
-  padding: calc(18px * var(--ui-scale));
+  padding: calc(13px * var(--ui-scale));
   position: sticky;
   top: calc(var(--topbar-height) + 20px);
   align-self: start;
@@ -677,8 +724,9 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .preview-header h2,
 .detail-header h2 {
   margin: 4px 0 0;
-  font-size: calc(var(--app-font-xl) + 4px);
-  line-height: 1.15;
+  font-size: var(--app-font-lg);
+  line-height: 1.2;
+  font-weight: 700;
   letter-spacing: 0;
   overflow-wrap: anywhere;
 }
@@ -686,13 +734,13 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .preview-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin: 20px 0;
+  gap: 8px;
+  margin: 14px 0;
 }
 
 .preview-grid div {
   min-width: 0;
-  padding: 12px;
+  padding: 9px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
@@ -707,7 +755,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .preview-actions {
   display: grid;
-  gap: 10px;
+  gap: 7px;
 }
 
 .desktop-preview .detail-content {
@@ -732,8 +780,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .editor-popup {
-  --editor-row-height: 56px;
-  --editor-textarea-height: 84px;
+  --editor-row-height: 46px;
+  --editor-textarea-height: 72px;
   --editor-label-width: clamp(72px, 22vw, 104px);
   height: 100vh !important;
   height: 100dvh !important;
@@ -753,7 +801,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
   max-width: 760px;
   width: 100%;
   margin: 0 auto;
-  padding: calc(10px * var(--ui-scale)) clamp(12px, 3vw, 20px) max(22px, env(safe-area-inset-bottom));
+  padding: calc(7px * var(--ui-scale)) clamp(9px, 2vw, 14px) max(14px, env(safe-area-inset-bottom));
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -770,15 +818,15 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .editor-popup .van-nav-bar {
   flex: 0 0 auto;
-  min-height: calc(48px + env(safe-area-inset-top));
+  min-height: calc(44px + env(safe-area-inset-top));
 }
 
 .detail-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 4px 4px 12px;
+  gap: 8px;
+  padding: 2px 2px 8px;
   min-width: 0;
 }
 
@@ -789,10 +837,62 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .detail-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   flex: 0 0 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.detail-action-popover .van-popover__content {
+  min-width: 104px;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  box-shadow: var(--shadow-soft);
+}
+
+.detail-action-popover .van-popover__action {
+  width: 104px;
+  height: 28px;
+  padding: 0 9px;
+  color: var(--text-main);
+  font-size: var(--app-font-sm);
+}
+
+.detail-action-popover .van-popover__action-icon {
+  margin-right: 6px;
+  font-size: 14px;
+}
+
+.detail-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 45px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  color: var(--text-main);
+  background: var(--panel-bg);
+  font: inherit;
+  font-size: var(--app-font-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.detail-menu-trigger .van-icon {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.detail-menu-trigger:active,
+.detail-menu-trigger:hover,
+.detail-menu-trigger:focus-visible {
+  color: var(--brand-strong);
+  border-color: color-mix(in srgb, var(--brand), transparent 46%);
+  background: color-mix(in srgb, var(--brand), transparent 90%);
 }
 
 .detail-status-note {
@@ -811,35 +911,12 @@ body.is-entry-pointer-drag .entry-drop-zone {
   font-size: var(--app-font-sm);
 }
 
-.detail-delete-button {
-  width: max(26px, calc(28px * var(--ui-scale)));
-  height: max(26px, calc(28px * var(--ui-scale)));
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 8px;
-  padding: 0;
-  color: #dc2626;
-  background: color-mix(in srgb, #ef4444, transparent 90%);
-  cursor: pointer;
-}
-
-.detail-delete-button .van-icon {
-  font-size: calc(16px * var(--ui-scale));
-}
-
-.detail-delete-button:active,
-.detail-delete-button:hover {
-  color: #b91c1c;
-  background: color-mix(in srgb, #ef4444, transparent 84%);
-}
-
 .detail-row {
   display: grid;
-  grid-template-columns: minmax(46px, 64px) minmax(0, 1fr) repeat(2, max(28px, calc(30px * var(--ui-scale))));
+  grid-template-columns: minmax(46px, 64px) minmax(0, 1fr) repeat(2, 28px);
   align-items: center;
-  gap: calc(8px * var(--ui-scale));
-  padding: calc(12px * var(--ui-scale)) 4px;
+  gap: 6px;
+  padding: calc(8px * var(--ui-scale)) 2px;
   border-top: 1px solid var(--border-soft);
   min-width: 0;
 }
@@ -858,9 +935,10 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .icon-action.van-button--mini {
-  width: max(28px, calc(30px * var(--ui-scale)));
-  min-width: max(28px, calc(30px * var(--ui-scale)));
-  height: max(28px, calc(30px * var(--ui-scale)));
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
   padding: 0;
   border-color: transparent;
   color: var(--text-muted);
@@ -868,12 +946,13 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .icon-action.van-button--mini .van-icon {
-  font-size: calc(17px * var(--ui-scale));
+  font-size: 15px;
 }
 
 .inline-icon-button {
-  width: max(28px, calc(30px * var(--ui-scale)));
-  height: max(28px, calc(30px * var(--ui-scale)));
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
   border: 0;
@@ -885,7 +964,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .inline-icon-button .van-icon {
-  font-size: calc(17px * var(--ui-scale));
+  font-size: 15px;
 }
 
 .inline-icon-button:active,
@@ -902,9 +981,9 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .detail-note {
   display: grid;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 12px;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 9px;
   border-radius: 8px;
   color: var(--text-muted);
   background: var(--panel-bg-muted);
@@ -919,7 +998,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .detail-note-text {
   width: 100%;
-  min-height: 88px;
+  min-height: 68px;
   max-height: 240px;
   box-sizing: border-box;
   border: 0;
@@ -945,6 +1024,12 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .editor-password-toggle {
   flex: 0 0 auto;
   margin: -4px -6px -4px 4px;
+}
+
+.editor-password-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .totp-progress {
@@ -994,8 +1079,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   align-content: start;
-  padding: 8px 0 16px;
-  scroll-padding: 16px 0 24px;
+  padding: 5px 0 10px;
+  scroll-padding: 12px 0 18px;
 }
 
 .editor-field.van-cell,
@@ -1003,15 +1088,15 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: flex;
   align-items: center;
   min-height: var(--editor-row-height);
-  padding: 0 16px;
+  padding: 0 12px;
   overflow: visible;
   font-size: var(--app-font-md);
   line-height: 24px;
 }
 
 .editor-field.van-field::after {
-  right: 16px;
-  left: 16px;
+  right: 12px;
+  left: 12px;
 }
 
 .editor-field .van-field__label {
@@ -1020,7 +1105,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
   height: var(--editor-row-height);
   display: flex;
   align-items: center;
-  margin-right: 12px;
+  margin-right: 9px;
   line-height: 24px;
   color: var(--text-muted);
   overflow: visible;
@@ -1029,7 +1114,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .editor-field .van-field__value,
 .editor-field .van-field__body {
   min-width: 0;
-  min-height: 32px;
+  min-height: 28px;
   overflow: visible;
 }
 
@@ -1038,47 +1123,47 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .editor-field .van-field__control {
-  min-height: 32px;
-  padding: 4px 0;
+  min-height: 28px;
+  padding: 2px 0;
   overflow: visible;
   line-height: 24px;
   font-size: var(--app-font-md);
 }
 
 .editor-field-single .van-field__control {
-  height: 32px;
+  height: 28px;
 }
 
 .editor-field-area.van-field {
   align-items: flex-start;
   min-height: var(--editor-textarea-height);
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: 7px;
+  padding-bottom: 7px;
 }
 
 .editor-field-area .van-field__label {
   height: auto;
-  min-height: 32px;
+  min-height: 28px;
   align-items: flex-start;
   padding-top: 4px;
 }
 
 .editor-field-area .van-field__control {
-  height: calc(var(--editor-textarea-height) - 20px);
-  min-height: calc(var(--editor-textarea-height) - 20px);
+  height: calc(var(--editor-textarea-height) - 14px);
+  min-height: calc(var(--editor-textarea-height) - 14px);
   overflow-y: auto;
   resize: none;
 }
 
 .editor-submit-bar {
   flex: 0 0 auto;
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  padding: 7px 10px calc(7px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border-soft);
   background: var(--panel-bg);
 }
 
 .editor-submit-bar .van-button {
-  height: 48px;
+  height: 40px;
   margin: 0;
 }
 
@@ -1095,10 +1180,10 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: grid;
   grid-template-columns: var(--editor-label-width, var(--van-field-label-width, 6.2em)) minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
+  gap: 9px;
   min-height: var(--editor-row-height);
   min-width: 0;
-  padding: 0 16px;
+  padding: 0 12px;
   color: var(--text-main);
   background: var(--panel-bg);
 }
@@ -1122,8 +1207,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 8px 0 14px;
-  padding: calc(12px * var(--ui-scale));
+  margin: 5px 0 9px;
+  padding: calc(9px * var(--ui-scale));
   border: 1px solid color-mix(in srgb, var(--brand), transparent 70%);
   border-radius: 8px;
   background: color-mix(in srgb, var(--brand), transparent 90%);
@@ -1145,15 +1230,15 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .settings-note {
   color: var(--text-muted);
   font-size: 12px;
-  line-height: 1.6;
-  padding: 8px 4px 14px;
+  line-height: 1.45;
+  padding: 5px 2px 9px;
 }
 
 .backup-actions {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 6px;
-  padding: 4px 0;
+  gap: 4px;
+  padding: 2px 0;
 }
 
 .backup-actions .van-button {
@@ -1185,13 +1270,13 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .backup-info-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .backup-info-grid div {
   min-width: 0;
-  padding: 10px;
+  padding: 7px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--panel-bg-muted);
@@ -1540,7 +1625,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .cloud-sync-body {
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 9px;
 }
 
 .cloud-sync-target {
@@ -1565,12 +1650,12 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .cloud-sync-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .cloud-sync-summary div {
   min-width: 0;
-  padding: 10px;
+  padding: 7px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--panel-bg-muted);
@@ -1584,21 +1669,21 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .cloud-sync-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   justify-content: flex-end;
-  padding: 10px 0 4px;
+  padding: 7px 0 3px;
 }
 
 .cloud-sync-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .cloud-sync-item {
   min-width: 0;
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  padding: 7px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--panel-bg-muted);
@@ -1712,19 +1797,19 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  gap: 7px;
+  padding: 7px 9px calc(7px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border-soft);
   background: var(--panel-bg);
 }
 
 .system-panel {
-  gap: 12px;
+  gap: 8px;
 }
 
 .system-group-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .system-group-list button {
@@ -1733,10 +1818,10 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: grid;
   grid-template-columns: calc(34px * var(--ui-scale)) minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 7px;
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 7px 9px;
   color: var(--text-main);
   text-align: left;
   background: var(--panel-bg-muted);
@@ -1912,18 +1997,27 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .backup-action-button.van-button--small {
-  height: max(28px, calc(30px * var(--ui-scale)));
-  padding: 0 8px;
-  font-size: var(--app-font-sm);
+  height: 28px;
+  min-height: 28px;
+  padding: 0 3px;
+  font-size: 11px;
+}
+
+.backup-action-button .van-button__icon {
+  font-size: 13px;
+}
+
+.backup-action-button .van-button__text {
+  white-space: nowrap;
 }
 
 .nav-drawer {
-  width: min(86vw, 360px);
+  width: min(84vw, 340px);
   height: 100%;
   max-height: 100vh;
   max-height: 100dvh;
   overflow: hidden;
-  max-width: 360px;
+  max-width: 340px;
   background: var(--panel-bg);
 }
 
@@ -1933,8 +2027,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: calc(14px * var(--ui-scale));
-  padding: calc(14px * var(--ui-scale) + env(safe-area-inset-top)) 12px max(18px, env(safe-area-inset-bottom));
+  gap: calc(9px * var(--ui-scale));
+  padding: calc(10px * var(--ui-scale) + env(safe-area-inset-top)) 9px max(12px, env(safe-area-inset-bottom));
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--panel-bg);
@@ -1943,14 +2037,14 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .drawer-head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 9px;
   min-width: 0;
-  padding: 4px 4px 8px;
+  padding: 2px 2px 5px;
 }
 
 .drawer-mark {
-  width: 42px;
-  height: 42px;
+  width: 36px;
+  height: 36px;
   flex: 0 0 auto;
   font-size: 14px;
 }
@@ -1974,14 +2068,14 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .drawer-nav button {
-  min-height: max(40px, calc(44px * var(--ui-scale)));
+  min-height: max(34px, calc(38px * var(--ui-scale)));
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: 7px;
   border: 0;
   border-radius: 8px;
-  padding: 0 12px;
+  padding: 0 9px;
   color: var(--text-main);
   text-align: left;
   background: transparent;
@@ -2014,21 +2108,21 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .drawer-panel {
   min-height: 0;
   display: grid;
-  gap: 10px;
-  padding-top: 4px;
+  gap: 7px;
+  padding-top: 2px;
   align-content: start;
 }
 
 .settings-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 .settings-group {
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  gap: 6px;
+  padding: 7px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
@@ -2055,13 +2149,13 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .drawer-panel .van-button {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .scale-setting {
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: 7px;
+  padding: 9px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
@@ -2072,16 +2166,16 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .password-setting {
   display: grid;
-  gap: 8px;
-  padding: 12px;
+  gap: 6px;
+  padding: 9px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
 
 .plugin-setting {
   display: grid;
-  gap: 8px;
-  padding: 12px;
+  gap: 6px;
+  padding: 9px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
@@ -2096,13 +2190,13 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .plugin-actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .prompt-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .plugin-status-pill {
@@ -2199,7 +2293,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: grid;
   gap: 8px;
   min-height: 0;
-  padding: 12px;
+  padding: 9px;
   overflow-y: auto;
 }
 
@@ -2222,15 +2316,15 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .plugin-detail-body {
   display: grid;
-  gap: 12px;
+  gap: 8px;
   min-height: 0;
-  padding: 12px 12px max(18px, env(safe-area-inset-bottom));
+  padding: 9px 9px max(12px, env(safe-area-inset-bottom));
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 .password-health-body {
-  gap: 16px;
+  gap: 11px;
 }
 
 .password-health-summary {
@@ -2244,7 +2338,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: grid;
   min-width: 0;
   gap: 4px;
-  padding: 14px 6px;
+  padding: 9px 5px;
   text-align: center;
 }
 
@@ -2291,9 +2385,9 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) 18px;
   align-items: center;
-  gap: 10px;
+  gap: 7px;
   min-width: 0;
-  padding: 12px 2px;
+  padding: 8px 2px;
   border: 0;
   border-bottom: 1px solid var(--border-soft);
   color: var(--text-main);
@@ -2435,7 +2529,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
     grid-template-columns: minmax(190px, 220px) minmax(0, 1fr);
     grid-template-rows: auto 1fr;
     align-items: start;
-    gap: calc(18px * var(--ui-scale));
+    gap: calc(12px * var(--ui-scale));
     overflow: hidden;
   }
 
@@ -2473,6 +2567,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .van-button {
   border-radius: 8px;
+  padding-right: calc(12px * var(--ui-scale));
+  padding-left: calc(12px * var(--ui-scale));
 }
 
 .van-cell {
@@ -2491,6 +2587,7 @@ body.is-entry-pointer-drag .entry-drop-zone {
 
 .van-field__control::placeholder {
   color: var(--text-muted);
+  font-size: var(--app-font-sm);
 }
 
 body.is-resizing-pane {
@@ -2524,10 +2621,10 @@ body.is-entry-pointer-drag .entry-kind-mark {
 
   .detail-view-tabs button {
     min-width: 0;
-    min-height: 40px;
+    min-height: 32px;
     border: 0;
     border-radius: 6px;
-    padding: 0 12px;
+    padding: 0 9px;
     color: var(--text-muted);
     background: transparent;
     font: inherit;
@@ -2562,40 +2659,40 @@ body.is-entry-pointer-drag .entry-kind-mark {
 
   .entry-context-menu button,
   .top-menu-popover .van-popover__action {
-    min-height: 40px;
+    min-height: 32px;
   }
 
   .van-button--small,
   .van-button--mini {
-    min-height: 40px;
+    min-height: 30px;
   }
 
   .van-stepper__minus,
   .van-stepper__plus {
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    min-height: 40px;
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    min-height: 30px;
   }
 
   .detail-row {
-    grid-template-columns: minmax(46px, 64px) minmax(0, 1fr) repeat(2, 40px);
+    grid-template-columns: minmax(42px, 56px) minmax(0, 1fr) repeat(2, 30px);
   }
 
-  .detail-delete-button,
   .icon-action.van-button--mini,
   .inline-icon-button,
   .swipe-icon-action {
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
   }
+
 }
 
 @media (min-width: 820px) {
   .workspace-grid {
     grid-template-columns: minmax(340px, var(--vault-pane-width, 450px)) 10px minmax(0, 1fr);
-    padding: 14px 16px;
+    padding: 10px 12px;
     align-items: start;
   }
 
@@ -2669,13 +2766,13 @@ body.is-entry-pointer-drag .entry-kind-mark {
   }
 
   .detail-row {
-    grid-template-columns: minmax(42px, 54px) minmax(0, 1fr) repeat(2, 40px);
-    gap: 6px;
+    grid-template-columns: minmax(40px, 50px) minmax(0, 1fr) repeat(2, 30px);
+    gap: 4px;
   }
 
   .icon-action.van-button--mini {
-    width: 40px;
-    min-width: 40px;
+    width: 30px;
+    min-width: 30px;
   }
 
   .account-source-field {

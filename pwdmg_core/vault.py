@@ -40,6 +40,8 @@ LOCAL_IMPORT_BACKUP_SUFFIX = ".json"
 LOGIN_ACCOUNT_SOURCES = {"auto", "username", "email", "phone"}
 CAPTURE_ACCOUNT_KINDS = {"generic", "username", "email", "phone"}
 ENTRY_STATUSES = {"active", "disabled", "trashed"}
+ENTRY_KINDS = {"login", "secure-note", "card", "identity", "api-key", "folder"}
+CUSTOM_FIELD_TYPES = {"text", "secret", "date", "url", "email", "phone"}
 MAX_CAPTURE_TEXT_LENGTH = 512
 MAX_CAPTURE_PASSWORD_LENGTH = 4096
 MAX_VAULT_ENVELOPE_BYTES = 24 * 1024 * 1024
@@ -732,7 +734,7 @@ class VaultService:
         seen_ids: set[str],
         path: tuple[int, ...],
     ) -> Dict[str, Any]:
-        kind = entry.get("kind") if entry.get("kind") in {"login", "folder"} else "login"
+        kind = entry.get("kind") if entry.get("kind") in ENTRY_KINDS else "login"
         original_id = str(entry.get("id") or "")
         if not original_id:
             original_id = "entry-missing-" + "-".join(str(index) for index in path)
@@ -781,10 +783,28 @@ class VaultService:
                     ),
                     "note": str(entry.get("note") or ""),
                     "totpSecret": str(entry.get("totpSecret") or ""),
+                    "customFields": self._normalize_custom_fields(entry.get("customFields")),
                     "history": copy.deepcopy(entry.get("history")) if isinstance(entry.get("history"), list) else [],
                     "children": [],
                 }
             )
+        return normalized
+
+    def _normalize_custom_fields(self, value: Any) -> List[Dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for index, raw in enumerate(value[:100]):
+            if not isinstance(raw, dict):
+                continue
+            field_type = raw.get("type") if raw.get("type") in CUSTOM_FIELD_TYPES else "text"
+            normalized.append({
+                "id": str(raw.get("id") or f"field-{index + 1}")[:128],
+                "label": str(raw.get("label") or "Custom field")[:200],
+                "value": str(raw.get("value") or "")[:65536],
+                "type": field_type,
+                "protected": raw.get("protected") is True or field_type == "secret",
+            })
         return normalized
 
     def _normalize_login_account_source(self, value: Any) -> str:
@@ -1030,6 +1050,7 @@ class VaultService:
             "loginAccountSource": capture["loginAccountSource"],
             "note": "",
             "totpSecret": "",
+            "customFields": [],
             "history": [],
             "children": [],
         }

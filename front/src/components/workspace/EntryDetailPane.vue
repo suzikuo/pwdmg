@@ -8,6 +8,7 @@
     :totp-remaining="totpRemaining"
     :totp-progress="totpProgress"
     @edit="emit('edit', $event)"
+    @duplicate="emit('duplicate', $event)"
     @delete="emit('delete', $event)"
     @disable="emit('disable', $event)"
     @restore="emit('restore', $event)"
@@ -35,6 +36,7 @@ defineProps<{
 
 const emit = defineEmits<{
   edit: [entry: VaultEntry]
+  duplicate: [entryId: string]
   delete: [entryId: string]
   disable: [entryId: string]
   restore: [entryId: string]
