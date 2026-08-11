@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List
 
-from .domain import domain_matches, normalize_domain
+from .domain import entry_matches_page, normalize_domain
 
 
 @dataclass
@@ -33,8 +33,8 @@ class VaultIndex:
     def path_for(self, entry_id: str) -> List[str]:
         return list(self.paths_by_id.get(entry_id) or [])
 
-    def matching_logins(self, hostname: str) -> List[Dict[str, Any]]:
-        host = normalize_domain(hostname)
+    def matching_logins(self, hostname: str, page_url: str = "") -> List[Dict[str, Any]]:
+        host = normalize_domain(hostname, strip_www=False)
         if not host:
             return []
 
@@ -45,7 +45,7 @@ class VaultIndex:
 
         for entry in self.wildcard_entries:
             domains = entry.get("domains") or []
-            if any("*" in normalize_domain(domain) and domain_matches(host, domain) for domain in domains):
+            if any("*" in normalize_domain(domain) and entry_matches_page(entry, host, page_url) for domain in domains):
                 candidate_entries.add(id(entry))
 
         if not candidate_entries:
@@ -55,6 +55,7 @@ class VaultIndex:
             for entry in self.login_entries
             if id(entry) in candidate_entries
             and str(entry.get("id") or "") not in self.ambiguous_ids
+            and entry_matches_page(entry, host, page_url)
         ]
 
     def _visit(self, entries: Iterable[Dict[str, Any]], parents: List[str]) -> None:
@@ -85,7 +86,8 @@ class VaultIndex:
             self.login_entries.append(entry)
             has_wildcard = False
             for raw_domain in entry.get("domains") or []:
-                domain = normalize_domain(raw_domain)
+                mode = entry.get("autofillMatchMode") or "base-domain"
+                domain = normalize_domain(raw_domain, strip_www=mode == "base-domain")
                 if not domain:
                     continue
                 if "*" in domain:
@@ -97,5 +99,5 @@ class VaultIndex:
 
 
 def _domain_suffixes(hostname: str) -> List[str]:
-    parts = normalize_domain(hostname).split(".")
+    parts = normalize_domain(hostname, strip_www=False).split(".")
     return [".".join(parts[index:]) for index in range(len(parts)) if parts[index:]]

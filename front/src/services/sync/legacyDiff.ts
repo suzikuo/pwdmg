@@ -1,4 +1,5 @@
 import type { EntryStatus, LoginAccountSource, VaultEntry, VaultPayload } from '../../types.ts'
+import { normalizeAutofillMatchMode } from '../autofillRules.ts'
 import {
   CLOUD_SYNC_CHANGE_LABELS,
   CLOUD_SYNC_ENTRY_CHANGE_FIELDS,
@@ -243,10 +244,25 @@ function formatCloudSyncValue(key: CloudSyncChangeField, value: unknown) {
   if (key === 'loginAccountSource') {
     return cloudSyncLoginAccountSourceLabel(normalizeLoginAccountSource(value))
   }
+  if (key === 'autofillMatchMode') {
+    const labels = {
+      'base-domain': '根域及子域',
+      'exact-host': '仅精确主机',
+      subdomain: '仅下级子域',
+      'url-prefix': 'URL 前缀',
+      never: '永不填充'
+    }
+    return labels[normalizeAutofillMatchMode(value)]
+  }
   if (key === 'customFields') {
     const fields = Array.isArray(value) ? value as Array<{ label?: unknown }> : []
     const labels = fields.map((field) => String(field?.label || '')).filter(Boolean)
     return labels.length ? `${labels.length} 项：${labels.join('、')}` : '空'
+  }
+  if (key === 'attachments') {
+    const attachments = Array.isArray(value) ? value as Array<{ name?: unknown }> : []
+    const names = attachments.map((attachment) => String(attachment?.name || '')).filter(Boolean)
+    return names.length ? `${names.length} 项：${names.join('、')}` : '空'
   }
   return compactCloudSyncText(String(value || ''))
 }
@@ -275,6 +291,7 @@ export function comparableCloudSyncEntry(entry: VaultEntry) {
     statusReason: entry.statusReason || '',
     deletedAt: Number(entry.deletedAt || 0),
     domains: Array.isArray(entry.domains) ? [...entry.domains] : [],
+    autofillMatchMode: normalizeAutofillMatchMode(entry.autofillMatchMode),
     username: entry.username || '',
     email: entry.email || '',
     password: entry.password || '',
@@ -282,7 +299,8 @@ export function comparableCloudSyncEntry(entry: VaultEntry) {
     loginAccountSource: normalizeLoginAccountSource(entry.loginAccountSource),
     note: entry.note || '',
     totpSecret: entry.totpSecret || '',
-    customFields: JSON.parse(JSON.stringify(entry.customFields || []))
+    customFields: JSON.parse(JSON.stringify(entry.customFields || [])),
+    attachments: JSON.parse(JSON.stringify(entry.attachments || []))
   }
 }
 
@@ -310,6 +328,9 @@ function applyCloudSyncEntryField(target: VaultEntry, source: VaultEntry, key: C
     case 'domains':
       target.domains = Array.isArray(source.domains) ? [...source.domains] : []
       return
+    case 'autofillMatchMode':
+      target.autofillMatchMode = normalizeAutofillMatchMode(source.autofillMatchMode)
+      return
     case 'username':
       target.username = source.username || ''
       return
@@ -333,6 +354,9 @@ function applyCloudSyncEntryField(target: VaultEntry, source: VaultEntry, key: C
       return
     case 'customFields':
       target.customFields = JSON.parse(JSON.stringify(source.customFields || []))
+      return
+    case 'attachments':
+      target.attachments = JSON.parse(JSON.stringify(source.attachments || []))
       return
   }
 }

@@ -11,8 +11,26 @@
       <van-nav-bar safe-area-inset-top :title="editingId ? `编辑${entryKindLabel(form.kind)}` : `新建${entryKindLabel(form.kind)}`" left-arrow @click-left="emit('update:open', false)" />
       <van-form id="entry-editor-form" class="editor-form" @submit="emit('submit')">
         <van-field class="editor-field editor-field-single" :model-value="form.title" label="名称" placeholder="例如 Github" :rules="[{ required: true }]" @update:model-value="updateField('title', $event)" />
-        <van-field v-if="form.kind === 'login'" class="editor-field editor-field-area" :model-value="domainText" label="域名" type="textarea" placeholder="github.com，多行或逗号分隔" @update:model-value="emit('update-domain', String($event))" />
+        <van-field
+          v-if="form.kind === 'login'"
+          class="editor-field editor-field-area"
+          :model-value="domainText"
+          label="网站规则"
+          type="textarea"
+          :placeholder="form.autofillMatchMode === 'url-prefix' ? 'https://example.com/account' : 'example.com，多行或逗号分隔'"
+          @update:model-value="emit('update-domain', String($event))"
+        />
         <template v-if="form.kind === 'login'">
+          <label class="autofill-rule-field">
+            <span>匹配方式</span>
+            <select
+              :value="form.autofillMatchMode || 'base-domain'"
+              aria-label="自动填充匹配方式"
+              @change="updateField('autofillMatchMode', ($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="option in autofillMatchModeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
           <van-field class="editor-field editor-field-single" :model-value="form.username || ''" label="账号" autocomplete="username" placeholder="用户名/账号名" @update:model-value="updateField('username', $event)" />
           <van-field class="editor-field editor-field-single" :model-value="form.email || ''" label="邮箱" type="email" autocomplete="email" placeholder="邮箱地址" @update:model-value="updateField('email', $event)" />
           <van-field
@@ -76,9 +94,9 @@
 import { ref, watch } from 'vue'
 import CustomFieldEditor from './CustomFieldEditor.vue'
 import { entryKindLabel } from '../../services/entryKinds.ts'
-import type { LoginAccountSource, VaultCustomField, VaultEntry } from '../../types'
+import type { AutofillMatchMode, LoginAccountSource, VaultCustomField, VaultEntry } from '../../types'
 
-type EditorField = 'title' | 'username' | 'email' | 'password' | 'phone' | 'loginAccountSource' | 'totpSecret' | 'note'
+type EditorField = 'title' | 'username' | 'email' | 'password' | 'phone' | 'autofillMatchMode' | 'loginAccountSource' | 'totpSecret' | 'note'
 
 const props = defineProps<{
   open: boolean
@@ -87,6 +105,7 @@ const props = defineProps<{
   editingId: string
   busy: boolean
   totpCode: string
+  autofillMatchModeOptions: Array<{ label: string; value: AutofillMatchMode }>
   loginAccountSourceOptions: Array<{ label: string; value: LoginAccountSource }>
 }>()
 

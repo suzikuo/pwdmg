@@ -50,6 +50,27 @@ class PasswordManagerApi:
     def readLegacyLocalStorage(self) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.read_legacy_local_storage())
 
+    def getAttachmentStorageState(self) -> Dict[str, Any]:
+        return self._call_result(lambda: self.service.attachment_storage_state())
+
+    def readAttachmentObject(self, attachmentId: str) -> Dict[str, Any]:
+        return self._call_result(lambda: self.service.read_attachment_object(attachmentId))
+
+    def writeAttachmentObject(self, attachmentId: str, objectText: str) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.write_attachment_object(attachmentId, objectText)
+        )
+
+    def retainAttachmentObject(self, attachmentId: str) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.retain_attachment_object(attachmentId)
+        )
+
+    def collectAttachmentObjects(self, referencedIds: list[str]) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.collect_attachment_objects(referencedIds)
+        )
+
     def cleanupLegacyStorage(
         self,
         expectedDigest: str,
@@ -67,6 +88,20 @@ class PasswordManagerApi:
 
     def unlock(self, password: str) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.unlock(password))
+
+    def getDeviceUnlockState(self) -> Dict[str, Any]:
+        return self._call_result(lambda: self.service.device_unlock_state())
+
+    def enableDeviceUnlock(self, password: str, reauthSeconds: int) -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.enable_device_unlock(password, reauthSeconds)
+        )
+
+    def disableDeviceUnlock(self) -> Dict[str, Any]:
+        return self._call_result(lambda: self.service.disable_device_unlock())
+
+    def readDeviceUnlockKey(self) -> Dict[str, Any]:
+        return self._call_result(lambda: self.service.read_device_unlock_key())
 
     def lock(self) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.lock() or self.service.state())
@@ -92,12 +127,29 @@ class PasswordManagerApi:
     def importVaultBackup(self, envelopeText: str) -> Dict[str, Any]:
         return self._call_result(lambda: self.service.import_backup(envelopeText))
 
-    def queryMatches(self, hostname: str) -> Dict[str, Any]:
-        return self._call_result(lambda: self.service.query_matches(hostname))
+    def exportPortableBackup(self, targetPath: str) -> Dict[str, Any]:
+        from pathlib import Path
 
-    def getFillPayload(self, entryId: str, hostname: str) -> Dict[str, Any]:
+        return self._call_result(lambda: self.service.export_portable_backup(Path(targetPath)))
+
+    def inspectPortableBackup(self, packagePath: str) -> Dict[str, Any]:
+        from pathlib import Path
+
+        return self._call_result(lambda: self.service.inspect_portable_backup(Path(packagePath)))
+
+    def importPortableBackup(self, packagePath: str, password: str) -> Dict[str, Any]:
+        from pathlib import Path
+
         return self._call_result(
-            lambda: self.service.get_fill_payload_for_host(entryId, hostname)
+            lambda: self.service.import_portable_backup(Path(packagePath), password)
+        )
+
+    def queryMatches(self, hostname: str, pageUrl: str = "") -> Dict[str, Any]:
+        return self._call_result(lambda: self.service.query_matches(hostname, pageUrl))
+
+    def getFillPayload(self, entryId: str, hostname: str, pageUrl: str = "") -> Dict[str, Any]:
+        return self._call_result(
+            lambda: self.service.get_fill_payload_for_host(entryId, hostname, pageUrl)
         )
 
     def listSaveTargets(self) -> Dict[str, Any]:

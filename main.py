@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import os
 import shutil
 import sys
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +23,12 @@ from pwdmg_core.paths import (
     ensure_app_dir,
 )
 from pwdmg_core.version import APP_VERSION
+from pwdmg_core.desktop_shell import DesktopShellActions, WindowsDesktopShell
 
 _desktop_window: webview.Window | None = None
 _desktop_state: "DesktopWindowState | None" = None
+_desktop_shell: WindowsDesktopShell | None = None
+_desktop_exit_requested = False
 WEBVIEW_CACHE_STATE_FILE = "frontend_cache_state.json"
 WEBVIEW_CACHE_DIR_NAMES = {
     "BrowserMetrics",
@@ -38,6 +45,7 @@ WEBVIEW_CACHE_DIR_NAMES = {
 }
 DESKTOP_MIN_WIDTH = 360
 DESKTOP_MIN_HEIGHT = 480
+MAX_ATTACHMENT_EXPORT_BYTES = 10 * 1024 * 1024
 
 
 def read_passwordless_marker(vault_path: Path) -> bool:
@@ -72,6 +80,7 @@ class DesktopPasswordManagerApi:
     def __init__(self) -> None:
         self._api = None
         self._updater = None
+        self._portable_backup_selection: tuple[str, Path] | None = None
 
     @property
     def api(self):
@@ -123,6 +132,64 @@ class DesktopPasswordManagerApi:
     def readLegacyLocalStorage(self) -> dict[str, Any]:
         return self.api.readLegacyLocalStorage()
 
+    def getAttachmentStorageState(self) -> dict[str, Any]:
+        return self.api.getAttachmentStorageState()
+
+    def readAttachmentObject(self, attachmentId: str) -> dict[str, Any]:
+        return self.api.readAttachmentObject(attachmentId)
+
+    def writeAttachmentObject(self, attachmentId: str, objectText: str) -> dict[str, Any]:
+        return self.api.writeAttachmentObject(attachmentId, objectText)
+
+    def retainAttachmentObject(self, attachmentId: str) -> dict[str, Any]:
+        return self.api.retainAttachmentObject(attachmentId)
+
+    def collectAttachmentObjects(self, referencedIds: list[str]) -> dict[str, Any]:
+        return self.api.collectAttachmentObjects(referencedIds)
+
+    def saveAttachmentFile(self, displayName: str, contentBase64: str) -> dict[str, Any]:
+        def save_file() -> dict[str, Any]:
+            name = Path(str(displayName or "attachment")).name.strip() or "attachment"
+            if len(name) > 255 or name in {".", ".."}:
+                raise ValueError("Attachment name is invalid")
+            encoded = str(contentBase64 or "")
+            if len(encoded) > ((MAX_ATTACHMENT_EXPORT_BYTES + 2) // 3) * 4 + 4:
+                raise ValueError("Attachment is too large")
+            try:
+                content = bytearray(base64.b64decode(encoded.encode("ascii"), validate=True))
+            except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+                raise ValueError("Attachment content is invalid") from exc
+            if len(content) > MAX_ATTACHMENT_EXPORT_BYTES:
+                content[:] = b"\x00" * len(content)
+                raise ValueError("Attachment is too large")
+            try:
+                window = _desktop_window
+                if window is None:
+                    raise RuntimeError("Desktop window is unavailable")
+                selected = window.create_file_dialog(webview.SAVE_DIALOG, save_filename=name)
+                if not selected:
+                    return {"saved": False, "path": ""}
+                selected_path = selected[0] if isinstance(selected, (list, tuple)) else selected
+                target = Path(str(selected_path)).resolve()
+                temp_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                try:
+                    with temp_path.open("xb") as handle:
+                        handle.write(content)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(str(temp_path), str(target))
+                finally:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except OSError:
+                        pass
+                return {"saved": True, "path": str(target)}
+            finally:
+                content[:] = b"\x00" * len(content)
+
+        return self._call_result(save_file, "ATTACHMENT_EXPORT_FAILED")
+
     def cleanupLegacyStorage(
         self,
         expectedDigest: str,
@@ -135,6 +202,18 @@ class DesktopPasswordManagerApi:
 
     def unlock(self, password: str) -> dict[str, Any]:
         return self.api.unlock(password)
+
+    def getDeviceUnlockState(self) -> dict[str, Any]:
+        return self.api.getDeviceUnlockState()
+
+    def enableDeviceUnlock(self, password: str, reauthSeconds: int) -> dict[str, Any]:
+        return self.api.enableDeviceUnlock(password, reauthSeconds)
+
+    def disableDeviceUnlock(self) -> dict[str, Any]:
+        return self.api.disableDeviceUnlock()
+
+    def readDeviceUnlockKey(self) -> dict[str, Any]:
+        return self.api.readDeviceUnlockKey()
 
     def lock(self) -> dict[str, Any]:
         return self.api.lock()
@@ -158,11 +237,84 @@ class DesktopPasswordManagerApi:
     def importVaultBackup(self, envelopeText: str) -> dict[str, Any]:
         return self.api.importVaultBackup(envelopeText)
 
-    def queryMatches(self, hostname: str) -> dict[str, Any]:
-        return self.api.queryMatches(hostname)
+    def exportPortableBackupPackage(self) -> dict[str, Any]:
+        try:
+            window = _desktop_window
+            if window is None:
+                raise RuntimeError("Desktop window is unavailable")
+            default_name = f"mypwdmg-{time.strftime('%Y%m%d-%H%M%S')}.mypwdmg-backup"
+            selected = window.create_file_dialog(
+                webview.SAVE_DIALOG,
+                save_filename=default_name,
+                file_types=("My Password Backup (*.mypwdmg-backup)",),
+            )
+            if not selected:
+                return {"ok": True, "data": {"saved": False, "path": ""}}
+            selected_path = selected[0] if isinstance(selected, (list, tuple)) else selected
+            target = Path(str(selected_path)).resolve()
+            if target.suffix.lower() != ".mypwdmg-backup":
+                target = target.with_name(f"{target.name}.mypwdmg-backup")
+            result = self.api.exportPortableBackup(str(target))
+            if result.get("ok") and isinstance(result.get("data"), dict):
+                result["data"]["saved"] = True
+            return result
+        except Exception as exc:
+            return {"ok": False, "code": "PORTABLE_BACKUP_EXPORT_FAILED", "message": str(exc)}
 
-    def getFillPayload(self, entryId: str, hostname: str) -> dict[str, Any]:
-        return self.api.getFillPayload(entryId, hostname)
+    def selectPortableBackupPackage(self) -> dict[str, Any]:
+        try:
+            self._portable_backup_selection = None
+            window = _desktop_window
+            if window is None:
+                raise RuntimeError("Desktop window is unavailable")
+            selected = window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                allow_multiple=False,
+                file_types=("My Password Backup (*.mypwdmg-backup)",),
+            )
+            if not selected:
+                return {"ok": True, "data": {"selected": False}}
+            selected_path = selected[0] if isinstance(selected, (list, tuple)) else selected
+            package_path = Path(str(selected_path)).resolve()
+            if package_path.suffix.lower() != ".mypwdmg-backup":
+                raise ValueError("Portable backup file extension is invalid")
+            inspected = self.api.inspectPortableBackup(str(package_path))
+            if not inspected.get("ok") or not isinstance(inspected.get("data"), dict):
+                return inspected
+            token = uuid.uuid4().hex
+            self._portable_backup_selection = (token, package_path)
+            return {
+                "ok": True,
+                "data": {
+                    **inspected["data"],
+                    "selected": True,
+                    "selectionToken": token,
+                },
+            }
+        except Exception as exc:
+            return {"ok": False, "code": "PORTABLE_BACKUP_SELECT_FAILED", "message": str(exc)}
+
+    def importPortableBackupPackage(self, selectionToken: str, password: str) -> dict[str, Any]:
+        selected = self._portable_backup_selection
+        if selected is None or not isinstance(selectionToken, str) or selectionToken != selected[0]:
+            return {"ok": False, "code": "INVALID_SELECTION", "message": "Portable backup selection has expired"}
+        result = self.api.importPortableBackup(str(selected[1]), password)
+        if result.get("ok"):
+            self._portable_backup_selection = None
+        return result
+
+    def discardPortableBackupSelection(self, selectionToken: str) -> dict[str, Any]:
+        selected = self._portable_backup_selection
+        discarded = bool(selected and isinstance(selectionToken, str) and selectionToken == selected[0])
+        if discarded:
+            self._portable_backup_selection = None
+        return {"ok": True, "data": {"discarded": discarded}}
+
+    def queryMatches(self, hostname: str, pageUrl: str = "") -> dict[str, Any]:
+        return self.api.queryMatches(hostname, pageUrl)
+
+    def getFillPayload(self, entryId: str, hostname: str, pageUrl: str = "") -> dict[str, Any]:
+        return self.api.getFillPayload(entryId, hostname, pageUrl)
 
     def listSaveTargets(self) -> dict[str, Any]:
         return self.api.listSaveTargets()
@@ -227,6 +379,7 @@ class DesktopPasswordManagerApi:
     def applyDesktopUpdate(self, packagePath: str) -> dict[str, Any]:
         try:
             data = self.updater.apply(packagePath)
+            begin_desktop_exit()
             window = _desktop_window
             state = _desktop_state
             if window is not None and state is not None:
@@ -248,17 +401,18 @@ class DesktopPasswordManagerApi:
 
     def safeExit(self) -> dict[str, Any]:
         try:
-            window = _desktop_window
-            state = _desktop_state
-            if window is not None and state is not None:
-                state.save_window(window)
-            if window is not None:
-                timer = threading.Timer(0.05, window.destroy)
-                timer.daemon = True
-                timer.start()
+            request_desktop_exit()
             return {"ok": True, "data": None}
         except Exception as exc:
             return {"ok": False, "code": "EXIT_FAILED", "message": str(exc)}
+
+    def openExternalUrl(self, url: str) -> dict[str, Any]:
+        from pwdmg_core.desktop_commands import open_external_url
+
+        def open_url() -> None:
+            open_external_url(url)
+
+        return self._call_result(open_url, "OPEN_URL_FAILED")
 
 
 def to_int(value: Any, default: int) -> int:
@@ -395,6 +549,18 @@ class DesktopWindowState:
             self._config.update(next_config)
             self._write_locked()
 
+    def reset_position(self, x_position: int, y_position: int) -> None:
+        with self._lock:
+            if self._save_timer:
+                self._save_timer.cancel()
+                self._save_timer = None
+            self._pending_config.clear()
+            self._config.update({
+                "x_position": int(x_position),
+                "y_position": int(y_position),
+            })
+            self._write_locked()
+
     def _write_locked(self) -> None:
         self._config = normalize_desktop_config(self._config)
         write_desktop_config(self._config)
@@ -417,12 +583,109 @@ def bind_desktop_config_events(
     def on_move(_x_position: int, _y_position: int) -> None:
         state.schedule_save_window(window)
 
-    def on_closing(*_args: Any) -> None:
+    def on_closing(*_args: Any) -> bool | None:
         state.save_window(window)
+        shell = _desktop_shell
+        if (
+            shell is not None
+            and shell.status.tray_available
+            and not _desktop_exit_requested
+        ):
+            timer = threading.Timer(0.01, window.hide)
+            timer.daemon = True
+            timer.start()
+            return False
+        return None
 
     window.events.resized += on_resize
     window.events.moved += on_move
     window.events.closing += on_closing
+
+
+def resolve_desktop_icon_path() -> Path | None:
+    candidates = [
+        Path(__file__).resolve().parent / "ico.ico",
+        Path(sys.executable).resolve().parent / "ico.ico",
+    ]
+    bundle_root = getattr(sys, "_MEIPASS", "")
+    if bundle_root:
+        candidates.append(Path(bundle_root) / "ico.ico")
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def begin_desktop_exit() -> None:
+    global _desktop_exit_requested
+    _desktop_exit_requested = True
+    shell = _desktop_shell
+    if shell is not None:
+        shell.stop()
+
+
+def request_desktop_exit() -> None:
+    begin_desktop_exit()
+    window = _desktop_window
+    state = _desktop_state
+    if window is not None and state is not None:
+        state.save_window(window)
+    if window is not None:
+        timer = threading.Timer(0.05, window.destroy)
+        timer.daemon = True
+        timer.start()
+
+
+def show_desktop_window(open_quick_access: bool = False) -> None:
+    window = _desktop_window
+    if window is None or _desktop_exit_requested:
+        return
+    try:
+        window.show()
+        window.restore()
+        window.on_top = True
+
+        def release_topmost() -> None:
+            try:
+                if not _desktop_exit_requested:
+                    window.on_top = False
+            except Exception:
+                pass
+
+        timer = threading.Timer(0.18, release_topmost)
+        timer.daemon = True
+        timer.start()
+        if open_quick_access:
+            window.run_js(
+                "window.dispatchEvent(new CustomEvent('mypwdmg:quick-access'))"
+            )
+    except Exception:
+        pass
+
+
+def reset_desktop_window_position() -> None:
+    window = _desktop_window
+    state = _desktop_state
+    if window is None or state is None or _desktop_exit_requested:
+        return
+    target_x = int(DEFAULT_DESKTOP_CONFIG["x_position"])
+    target_y = int(DEFAULT_DESKTOP_CONFIG["y_position"])
+    try:
+        window.show()
+        window.restore()
+        window.move(target_x, target_y)
+        state.reset_position(target_x, target_y)
+    except Exception:
+        pass
+
+
+def lock_desktop_vault() -> None:
+    window = _desktop_window
+    if window is None or _desktop_exit_requested:
+        return
+    try:
+        window.run_js(
+            "window.dispatchEvent(new CustomEvent('mypwdmg:lock-request'))"
+        )
+    except Exception:
+        pass
 
 
 def missing_frontend_page(checked_paths: list[Path]) -> str:
@@ -537,8 +800,9 @@ def refresh_webview_cache_if_frontend_changed(webview_storage_dir: Path, fronten
 
 
 def main() -> None:
-    global _desktop_window, _desktop_state
+    global _desktop_window, _desktop_state, _desktop_shell, _desktop_exit_requested
 
+    _desktop_exit_requested = False
     config = load_desktop_config()
     startup_config = get_pywebview_startup_config(config)
     webview_storage_dir = ensure_app_dir() / "webview_storage"
@@ -561,13 +825,30 @@ def main() -> None:
     _desktop_window = window
     _desktop_state = desktop_state
     bind_desktop_config_events(window, desktop_state)
-    webview.start(
-        record_initial_desktop_config,
-        (window, desktop_state),
-        debug=False,
-        private_mode=False,
-        storage_path=str(webview_storage_dir),
+    desktop_shell = WindowsDesktopShell(
+        DesktopShellActions(
+            quick_access=lambda: show_desktop_window(True),
+            show_main=show_desktop_window,
+            reset_position=reset_desktop_window_position,
+            lock=lock_desktop_vault,
+            exit=request_desktop_exit,
+        ),
+        resolve_desktop_icon_path(),
     )
+    _desktop_shell = desktop_shell
+    desktop_shell.start()
+    try:
+        webview.start(
+            record_initial_desktop_config,
+            (window, desktop_state),
+            debug=False,
+            private_mode=False,
+            storage_path=str(webview_storage_dir),
+        )
+    finally:
+        _desktop_exit_requested = True
+        desktop_shell.stop()
+        _desktop_shell = None
 
 
 if __name__ == "__main__":

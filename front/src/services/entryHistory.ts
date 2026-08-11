@@ -3,13 +3,14 @@ import type { EntryHistoryAction, EntryHistoryField, VaultEntry, VaultEntryHisto
 export const ENTRY_HISTORY_LIMIT = 10
 
 const TRACKED_FIELDS: EntryHistoryField[] = [
-  'title', 'domains', 'username', 'email', 'password', 'phone',
-  'loginAccountSource', 'note', 'totpSecret', 'customFields', 'status'
+  'title', 'domains', 'autofillMatchMode', 'username', 'email', 'password', 'phone',
+  'loginAccountSource', 'note', 'totpSecret', 'customFields', 'attachments', 'status'
 ]
 
 const FIELD_LABELS: Record<EntryHistoryField, string> = {
   title: '名称',
   domains: '域名',
+  autofillMatchMode: '自动填充匹配',
   username: '账号',
   email: '邮箱',
   password: '密码',
@@ -18,12 +19,13 @@ const FIELD_LABELS: Record<EntryHistoryField, string> = {
   note: '备注',
   totpSecret: 'TOTP',
   customFields: '自定义字段',
+  attachments: '附件',
   status: '状态'
 }
 
 const OPTIONAL_SNAPSHOT_FIELDS: Array<keyof VaultEntrySnapshot> = [
   'status', 'statusReason', 'statusUpdatedAt', 'deletedAt', 'username', 'email',
-  'password', 'phone', 'loginAccountSource', 'note', 'totpSecret', 'customFields'
+  'password', 'phone', 'autofillMatchMode', 'loginAccountSource', 'note', 'totpSecret', 'customFields', 'attachments'
 ]
 
 export function createEntrySnapshot(entry: VaultEntry): VaultEntrySnapshot {
@@ -114,9 +116,28 @@ function historyFieldValue(
     return { key, display: labels.length ? `${labels.length} 项：${labels.join('、')}` : '未设置' }
   }
 
+  if (field === 'attachments') {
+    const attachments = Array.isArray(entry.attachments) ? entry.attachments : []
+    const key = JSON.stringify(attachments.map((item) => ({ id: item.id, name: item.name, size: item.size, sha256: item.sha256 })))
+    const names = attachments.map((item) => item.name).filter(Boolean)
+    return { key, display: names.length ? `${names.length} 项：${names.join('、')}` : '未设置' }
+  }
+
   if (field === 'loginAccountSource') {
     const value = entry.loginAccountSource || 'auto'
     const labels = { auto: '自动', username: '账号', email: '邮箱', phone: '手机号' }
+    return { key: value, display: labels[value] }
+  }
+
+  if (field === 'autofillMatchMode') {
+    const value = entry.autofillMatchMode || 'base-domain'
+    const labels = {
+      'base-domain': '根域及子域',
+      'exact-host': '仅精确主机',
+      subdomain: '仅下级子域',
+      'url-prefix': 'URL 前缀',
+      never: '永不填充'
+    }
     return { key: value, display: labels[value] }
   }
 

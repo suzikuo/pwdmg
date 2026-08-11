@@ -684,6 +684,42 @@ if (!window.__mypwdmgContentScriptLoaded) {
   `
   }
 
+  function renderRiskConfirmation(entryId, risks, manualMode, anchor) {
+    const riskLabels = {
+      'insecure-http': '此页面使用未加密的 HTTP 连接',
+      'third-party-frame': '登录表单位于第三方页面框架中',
+      'invalid-page-context': '无法确认当前页面的安全上下文'
+    }
+    const labels = (Array.isArray(risks) ? risks : [])
+      .map((risk) => riskLabels[risk])
+      .filter(Boolean)
+    positionRoot(anchor)
+    const root = ensureRoot()
+    root.innerHTML = `
+      <div class="mypwdmg-panel" role="alertdialog" aria-label="确认自动填充风险">
+        <div class="mypwdmg-title">
+          <div class="mypwdmg-title-text">
+            <span>确认自动填充</span>
+            <small>需要再次确认</small>
+          </div>
+          <button class="mypwdmg-close" type="button" title="取消" aria-label="取消">×</button>
+        </div>
+        <div class="mypwdmg-risk-body">
+          <strong>当前页面存在风险</strong>
+          <ul>${labels.map((label) => `<li>${escapeHtml(label)}</li>`).join('')}</ul>
+          <div class="mypwdmg-risk-actions">
+            <button class="mypwdmg-save-secondary mypwdmg-risk-cancel" type="button">取消</button>
+            <button class="mypwdmg-save-primary mypwdmg-risk-confirm" type="button">仍要填充</button>
+          </div>
+        </div>
+      </div>
+    `
+    addTrustedClick(root.querySelector('.mypwdmg-close'), removeRoot)
+    addTrustedClick(root.querySelector('.mypwdmg-risk-cancel'), removeRoot)
+    addTrustedClick(root.querySelector('.mypwdmg-risk-confirm'), () => fillEntry(entryId, manualMode, true, risks))
+    root.querySelector('.mypwdmg-title')?.addEventListener('pointerdown', startPanelDrag)
+  }
+
   function accountLabel(entry) {
     return entry.username || entry.email || entry.phone || ''
   }
@@ -916,13 +952,22 @@ if (!window.__mypwdmgContentScriptLoaded) {
     renderPanel(lastMatches, lastMatches.length ? '' : '当前站点暂无匹配账号。', fields.anchor, manualMode)
   }
 
-  async function fillEntry(entryId, manualMode = false, authorizedSelection = false) {
+  async function fillEntry(entryId, manualMode = false, authorizedSelection = false, acknowledgedRisks = []) {
     if (!entryId) return { ok: false, code: 'ENTRY_REQUIRED' }
     if (extensionContextInvalidated) return { ok: false, code: 'EXTENSION_CONTEXT_INVALIDATED' }
     if (pendingSave?.token) return { ok: false, code: 'SAVE_PROMPT_ACTIVE' }
     if (!authorizedSelection) return { ok: false, code: 'TRUSTED_GESTURE_REQUIRED' }
 
-    const authorization = await sendMessage({ type: 'MYPWDMG_AUTHORIZE_FILL', entryId })
+    const authorization = await sendMessage({
+      type: 'MYPWDMG_AUTHORIZE_FILL',
+      entryId,
+      acknowledgedRisks
+    })
+    if (authorization?.code === 'FILL_RISK_CONFIRMATION_REQUIRED') {
+      const fields = detectLoginFields()
+      renderRiskConfirmation(entryId, authorization.data?.risks || [], manualMode, fields?.anchor || activeInput())
+      return authorization
+    }
     if (!authorization?.ok || !authorization.data?.token) {
       const fields = detectLoginFields()
       renderPanel(lastMatches, authorization?.message || '填充授权失败，请重试。', fields?.anchor, manualMode)

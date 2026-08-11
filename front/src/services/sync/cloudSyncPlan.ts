@@ -60,6 +60,9 @@ export function buildCloudSyncTargetPayload(
     applyCloudSyncDiffItem(target.entries, preview.sourcePayload.entries, item)
   }
   applyCloudSyncPositionChanges(target.entries, preview.sourcePayload.entries)
+  const attachmentKey = preview.sourcePayload.attachmentKey || preview.basePayload.attachmentKey
+  if (attachmentKey) target.attachmentKey = attachmentKey
+  else delete target.attachmentKey
   return target
 }
 
@@ -92,6 +95,18 @@ export async function createCloudSyncPlan(input: {
   let convergedPayload: VaultPayload | null = null
   let localChangedSinceBase = false
   let remoteChangedSinceBase = false
+
+  if (
+    localPayload.attachmentKey &&
+    remotePayload.attachmentKey &&
+    localPayload.attachmentKey !== remotePayload.attachmentKey
+  ) {
+    return {
+      ok: false,
+      code: 'conflict',
+      message: '两端附件数据密钥不同，已停止同步以避免附件损坏'
+    }
+  }
 
   if (ancestorPayload) {
     const [ancestorFingerprint, localFingerprint, remoteFingerprint] = await Promise.all([

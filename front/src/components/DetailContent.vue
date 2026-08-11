@@ -16,9 +16,8 @@
           @select="selectDetailAction"
         >
           <template #reference>
-            <button class="detail-menu-trigger" type="button" aria-label="打开操作菜单">
-              <span>...</span>
-              <van-icon name="arrow-down" />
+            <button class="top-icon detail-menu-trigger" type="button" aria-label="打开操作菜单">
+              <van-icon name="ellipsis" />
             </button>
           </template>
         </van-popover>
@@ -49,9 +48,13 @@
     <div class="detail-primary" :class="{ 'is-mobile-hidden': activeView === 'history' }">
     <template v-if="entry.kind === 'login'">
     <div class="detail-row" v-if="entry.domains?.length">
-      <small>域名</small>
+      <small>{{ entry.autofillMatchMode === 'url-prefix' ? 'URL 前缀' : '域名' }}</small>
       <strong>{{ entry.domains.join(', ') }}</strong>
       <van-button class="icon-action" size="mini" icon="description-o" plain aria-label="复制域名" @click="$emit('copy', entry.domains.join(', '))" />
+    </div>
+    <div class="detail-row detail-rule-row">
+      <small>填充匹配</small>
+      <strong>{{ autofillMatchModeLabel(entry.autofillMatchMode) }}</strong>
     </div>
     <div class="detail-row">
       <small>账号</small>
@@ -99,6 +102,29 @@
       </div>
     </div>
     </template>
+    <section v-if="entry.kind === 'login' && linkedPasskeys.length" class="detail-passkeys">
+      <div class="detail-passkeys-head">
+        <div>
+          <small>通行密钥</small>
+          <strong>{{ linkedPasskeys.length }} 个已关联</strong>
+        </div>
+      </div>
+      <div class="detail-passkey-list">
+        <div v-for="passkey in linkedPasskeys" :key="passkey.id" class="detail-passkey-item">
+          <span class="detail-passkey-icon"><van-icon name="shield-o" /></span>
+          <span class="detail-passkey-copy">
+            <strong>{{ passkey.displayLabel }}</strong>
+            <small>{{ passkey.accountLabel }} · {{ passkey.backupState ? '已备份' : passkey.backupEligible ? '可备份' : '仅本机' }}</small>
+          </span>
+          <button type="button" class="inline-icon-button" aria-label="管理通行密钥" title="管理通行密钥" @click="$emit('open-passkey', passkey.id)">
+            <van-icon name="setting-o" />
+          </button>
+          <button type="button" class="inline-icon-button is-danger" aria-label="解除通行密钥关联" title="解除关联" @click="$emit('unlink-passkey', passkey.id)">
+            <van-icon name="cross" />
+          </button>
+        </div>
+      </div>
+    </section>
     <div v-for="field in entry.customFields || []" :key="field.id" class="detail-row detail-custom-field">
       <small>{{ field.label || '未命名字段' }}</small>
       <strong>{{ customFieldValue(field) }}</strong>
@@ -113,6 +139,53 @@
       />
       <van-button class="icon-action" size="mini" icon="description-o" plain aria-label="复制字段" @click="$emit('copy', field.value)" />
     </div>
+    <section v-if="entry.kind !== 'folder'" class="detail-attachments">
+      <div class="detail-attachments-head">
+        <div>
+          <small>附件</small>
+          <strong>{{ entry.attachments?.length || 0 }}</strong>
+        </div>
+        <button
+          v-if="attachmentActionsSupported && entry.status !== 'trashed'"
+          type="button"
+          class="inline-icon-button"
+          :disabled="attachmentBusy"
+          aria-label="添加附件"
+          title="添加附件"
+          @click="attachmentInput?.click()"
+        >
+          <van-icon name="plus" />
+        </button>
+        <input ref="attachmentInput" class="visually-hidden" type="file" tabindex="-1" @change="selectAttachmentFile" />
+      </div>
+      <div v-if="entry.attachments?.length" class="detail-attachment-list">
+        <div v-for="attachment in entry.attachments" :key="attachment.id" class="detail-attachment-item">
+          <span class="detail-attachment-icon"><van-icon name="description-o" /></span>
+          <span class="detail-attachment-copy">
+            <strong :title="attachment.name">{{ attachment.name }}</strong>
+            <small>{{ formatAttachmentSize(attachment.size) }} · {{ attachment.mimeType }}</small>
+          </span>
+          <button
+            v-if="attachmentActionsSupported"
+            type="button"
+            class="inline-icon-button"
+            :disabled="attachmentBusy"
+            aria-label="保存附件"
+            title="保存附件"
+            @click="$emit('save-attachment', entry.id, attachment.id)"
+          ><van-icon name="down" /></button>
+          <button
+            v-if="attachmentActionsSupported && entry.status !== 'trashed'"
+            type="button"
+            class="inline-icon-button is-danger"
+            :disabled="attachmentBusy"
+            aria-label="删除附件"
+            title="删除附件"
+            @click="$emit('remove-attachment', entry.id, attachment.id)"
+          ><van-icon name="delete-o" /></button>
+        </div>
+      </div>
+    </section>
     <div class="detail-note" v-if="entry.note">
       <div class="detail-note-head">
         <small>备注</small>
@@ -182,9 +255,10 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { VaultCustomField, VaultEntry, VaultEntryHistory, VaultEntryHistoryChange } from '../types'
+import type { AutofillMatchMode, VaultCustomField, VaultEntry, VaultEntryHistory, VaultEntryHistoryChange } from '../types'
 import { buildEntryHistoryChanges, entryHistoryFieldLabel } from '../services/entryHistory'
 import { entryKindLabel } from '../services/entryKinds.ts'
+import type { PasskeyPresentationItem } from '../services/passkeyPresentation.ts'
 
 const props = defineProps<{
   entry: VaultEntry | null
@@ -193,7 +267,20 @@ const props = defineProps<{
   totpCode: string
   totpRemaining: number
   totpProgress: number
+  linkedPasskeys: PasskeyPresentationItem[]
+  attachmentBusy: boolean
+  attachmentActionsSupported: boolean
 }>()
+
+function autofillMatchModeLabel(mode: AutofillMatchMode | undefined) {
+  return {
+    'base-domain': '根域及子域',
+    'exact-host': '仅精确主机',
+    subdomain: '仅下级子域',
+    'url-prefix': 'URL 前缀',
+    never: '永不填充'
+  }[mode || 'base-domain']
+}
 
 const visibleHistory = computed(() =>
   (props.entry?.history || []).filter((item) => item.action !== 'created').slice(0, 10)
@@ -206,7 +293,7 @@ const detailMenuOpen = ref(false)
 type DetailMenuAction = {
   text: string
   icon: string
-  key: 'duplicate' | 'edit' | 'disable' | 'restore' | 'delete' | 'purge'
+  key: 'duplicate' | 'edit' | 'move' | 'disable' | 'restore' | 'delete' | 'purge'
   color?: string
 }
 
@@ -219,6 +306,9 @@ const detailMenuActions = computed<DetailMenuAction[]>(() => {
     actions.push(
       { text: '副本', icon: 'description-o', key: 'duplicate' },
       { text: '编辑', icon: 'edit', key: 'edit' },
+      ...(entry.status === 'active' || !entry.status
+        ? [{ text: '移动到', icon: 'location-o', key: 'move' as const }]
+        : []),
     )
   }
   if (entry.status === 'active' || !entry.status) {
@@ -247,6 +337,7 @@ watch(() => visibleHistory.value.length, (length) => {
 
 const emit = defineEmits<{
   edit: [entry: VaultEntry]
+  move: [entryId: string]
   duplicate: [entryId: string]
   delete: [entryId: string]
   disable: [entryId: string]
@@ -257,13 +348,35 @@ const emit = defineEmits<{
   copy: [value: string]
   'toggle-password': []
   'refresh-totp': []
+  'open-passkey': [passkeyId: string]
+  'unlink-passkey': [passkeyId: string]
+  'add-attachment': [entryId: string, file: File]
+  'save-attachment': [entryId: string, attachmentId: string]
+  'remove-attachment': [entryId: string, attachmentId: string]
 }>()
+
+const attachmentInput = ref<HTMLInputElement | null>(null)
+
+function selectAttachmentFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (file && props.entry) emit('add-attachment', props.entry.id, file)
+}
+
+function formatAttachmentSize(value: number) {
+  const bytes = Math.max(0, Number(value) || 0)
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
 
 function selectDetailAction(action: DetailMenuAction) {
   const entry = props.entry
   if (!entry) return
   if (action.key === 'duplicate') emit('duplicate', entry.id)
   else if (action.key === 'edit') emit('edit', entry)
+  else if (action.key === 'move') emit('move', entry.id)
   else if (action.key === 'disable') emit('disable', entry.id)
   else if (action.key === 'restore') emit('restore', entry.id)
   else if (action.key === 'delete') emit('delete', entry.id)

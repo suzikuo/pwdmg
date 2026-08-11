@@ -18,6 +18,7 @@
           'is-folder': entry.kind === 'folder',
           'is-login': entry.kind !== 'folder',
           'is-selected': entry.id === selectedId,
+          'is-batch-selected': selectionMode && selectedIds.has(entry.id),
           'is-draggable': draggableEnabled,
           'is-dragging': draggingId === entry.id
         }"
@@ -28,7 +29,7 @@
         @dragover.prevent="entry.kind === 'folder' && draggableEnabled"
         @drop.stop="entry.kind === 'folder' && dropEntry($event, entry.id, 0)"
       >
-      <van-swipe-cell :disabled="draggableEnabled">
+      <van-swipe-cell :disabled="draggableEnabled || selectionMode">
         <van-cell
           class="entry-cell"
           clickable
@@ -68,7 +69,20 @@
             </div>
           </template>
           <template #right-icon>
-            <div class="entry-right">
+            <div v-if="selectionMode" class="entry-right is-selection">
+              <van-icon :name="selectedIds.has(entry.id) ? 'checked' : 'circle'" />
+            </div>
+            <div v-else class="entry-right">
+              <button
+                class="entry-favorite-toggle"
+                type="button"
+                :class="{ 'is-active': favoriteIds.has(entry.id) }"
+                :aria-label="favoriteIds.has(entry.id) ? '取消收藏' : '收藏'"
+                :aria-pressed="favoriteIds.has(entry.id)"
+                @click.stop="emit('toggle-favorite', entry.id)"
+              >
+                <van-icon :name="favoriteIds.has(entry.id) ? 'star' : 'star-o'" />
+              </button>
               <van-icon :name="entry.kind === 'folder' ? (isOpen(entry.id) ? 'arrow-up' : 'arrow-down') : 'arrow'" />
             </div>
           </template>
@@ -92,6 +106,9 @@
           :parent-id="entry.id"
           :auto-expand="autoExpand"
           :draggable-enabled="draggableEnabled"
+          :favorite-ids="favoriteIds"
+          :selection-mode="selectionMode"
+          :selected-ids="selectedIds"
           :depth="depth + 1"
           @view="$emit('view', $event)"
           @edit="$emit('edit', $event)"
@@ -100,6 +117,8 @@
           @create="$emit('create', $event)"
           @move-entry="$emit('move-entry', $event)"
           @context-menu="$emit('context-menu', $event)"
+          @toggle-favorite="$emit('toggle-favorite', $event)"
+          @toggle-selection="$emit('toggle-selection', $event)"
         />
       </div>
       </div>
@@ -132,12 +151,18 @@ const props = withDefaults(defineProps<{
   parentId?: string
   autoExpand?: boolean
   draggableEnabled?: boolean
+  favoriteIds?: ReadonlySet<string>
+  selectionMode?: boolean
+  selectedIds?: ReadonlySet<string>
   depth?: number
 }>(), {
   selectedId: '',
   parentId: '',
   autoExpand: false,
   draggableEnabled: true,
+  favoriteIds: () => new Set<string>(),
+  selectionMode: false,
+  selectedIds: () => new Set<string>(),
   depth: 0
 })
 
@@ -149,6 +174,8 @@ const emit = defineEmits<{
   create: [parentId: string]
   'move-entry': [payload: { entryId: string; targetParentId: string; targetIndex: number }]
   'context-menu': [payload: { entry: VaultEntry; x: number; y: number }]
+  'toggle-favorite': [entryId: string]
+  'toggle-selection': [entryId: string]
 }>()
 
 const expanded = ref(new Set<string>())
@@ -184,6 +211,10 @@ function toggleFolder(entryId: string) {
 
 function handlePrimary(entry: VaultEntry) {
   if (suppressNextClick) return
+  if (props.selectionMode) {
+    emit('toggle-selection', entry.id)
+    return
+  }
   if (entry.kind === 'folder') {
     toggleFolder(entry.id)
     return
@@ -192,7 +223,7 @@ function handlePrimary(entry: VaultEntry) {
 }
 
 function handleContextMenu(event: MouseEvent, entry: VaultEntry) {
-  if (pointerDrag?.active) return
+  if (pointerDrag?.active || props.selectionMode) return
   emit('context-menu', { entry, x: event.clientX, y: event.clientY })
 }
 

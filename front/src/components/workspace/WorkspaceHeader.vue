@@ -43,8 +43,34 @@
     </div>
   </header>
 
-  <div v-if="searchActive" class="search-strip">
+  <div v-if="selectionMode" class="batch-mode-strip" role="toolbar" aria-label="批量操作">
+    <button class="batch-mode-close" type="button" aria-label="退出选择" @click="emit('exit-selection')">
+      <van-icon name="cross" />
+    </button>
+    <strong>已选 {{ selectionCount }}</strong>
+    <div class="batch-mode-actions">
+      <button type="button" @click="emit('toggle-select-all')">
+        <van-icon :name="allVisibleSelected ? 'close' : 'passed'" />
+        <span>{{ allVisibleSelected ? '全不选' : '全选' }}</span>
+      </button>
+      <button type="button" :disabled="selectionCount === 0" @click="emit('batch-move')">
+        <van-icon name="location-o" /><span>移动</span>
+      </button>
+      <button type="button" :disabled="selectionCount === 0" @click="emit('batch-favorite')">
+        <van-icon :name="allSelectedFavorite ? 'star' : 'star-o'" />
+        <span>{{ allSelectedFavorite ? '取消收藏' : '收藏' }}</span>
+      </button>
+      <button type="button" :disabled="selectionCount === 0" @click="emit('batch-archive')">
+        <van-icon name="certificate" /><span>归档</span>
+      </button>
+      <button class="is-danger" type="button" :disabled="selectionCount === 0" @click="emit('batch-trash')">
+        <van-icon name="delete-o" /><span>回收站</span>
+      </button>
+    </div>
+  </div>
+  <div v-else-if="!dragMode" class="search-strip" :class="{ 'is-filter-only': !searchActive }">
     <van-search
+      v-if="searchActive"
       ref="searchInput"
       :model-value="keyword"
       shape="round"
@@ -59,7 +85,10 @@
         :class="{ active: entryFilter === option.value }"
         :aria-pressed="entryFilter === option.value"
         @click="emit('update:entry-filter', option.value)"
-      >{{ option.label }}</button>
+      >
+        <van-icon v-if="option.icon" :name="option.icon" />
+        <span>{{ option.label }}</span>
+      </button>
     </div>
   </div>
   <div v-if="dragMode" class="drag-mode-strip">
@@ -87,6 +116,10 @@ const props = defineProps<{
   keyword: string
   entryFilter: EntryFilterMode
   dragMode: boolean
+  selectionMode: boolean
+  selectionCount: number
+  allVisibleSelected: boolean
+  allSelectedFavorite: boolean
   createMenuOpen: boolean
   moreMenuOpen: boolean
   createMenuActions: WorkspaceAction[]
@@ -95,12 +128,14 @@ const props = defineProps<{
 
 const searchInput = ref<{ $el?: HTMLElement } | null>(null)
 const searchActive = computed(() => props.searchOpen || Boolean(props.keyword) || props.entryFilter !== 'all')
-const filterOptions: Array<{ label: string; value: EntryFilterMode }> = [
-  { label: '全部', value: 'all' },
-  { label: '登录', value: 'login' },
-  { label: '其他', value: 'other' },
-  { label: 'TOTP', value: 'totp' },
-  { label: '分组', value: 'folder' }
+const filterOptions: Array<{ label: string; value: EntryFilterMode; icon?: string }> = [
+  { label: '全部', value: 'all', icon: 'apps-o' },
+  { label: '收藏', value: 'favorites', icon: 'star-o' },
+  { label: '最近', value: 'recent', icon: 'clock-o' },
+  { label: '登录', value: 'login', icon: 'user-o' },
+  { label: '其他', value: 'other', icon: 'label-o' },
+  { label: 'TOTP', value: 'totp', icon: 'shield-o' },
+  { label: '分组', value: 'folder', icon: 'cluster-o' }
 ]
 
 watch(() => props.searchOpen, async (open) => {
@@ -122,5 +157,11 @@ const emit = defineEmits<{
   'close-create-menu': []
   'close-more-menu': []
   'exit-drag': []
+  'exit-selection': []
+  'toggle-select-all': []
+  'batch-move': []
+  'batch-favorite': []
+  'batch-archive': []
+  'batch-trash': []
 }>()
 </script>

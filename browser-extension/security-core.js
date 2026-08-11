@@ -9,6 +9,7 @@
   const OTP_STRONG_RE = /(^|[^a-z0-9])(otp|totp|2fa|mfa|one[\s_-]*time(?:[\s_-]*(?:password|code))?|verification[\s_-]*code|authenticator[\s_-]*(?:code|token)|passcode)(?=$|[^a-z0-9])|\u9a8c\u8bc1\u7801|\u52a8\u6001\u7801|\u52a8\u6001\u53e3\u4ee4|\u4e8c\u6b21\u9a8c\u8bc1/i
   const OTP_WEAK_RE = /(^|[^a-z0-9])(code|pin)(?=$|[^a-z0-9])/i
   const CARD_CODE_RE = /(^|[^a-z0-9])(cvv|cvc|card[\s_-]*security|card[\s_-]*code)(?=$|[^a-z0-9])/i
+  const AUTOFILL_MATCH_MODES = new Set(['base-domain', 'exact-host', 'subdomain', 'url-prefix', 'never'])
 
   function normalizeHost(value = '') {
     const raw = String(value || '').trim()
@@ -17,20 +18,20 @@
       const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`
       const parsed = new URL(candidate)
       if (!parsed.hostname) return ''
-      return parsed.hostname.toLowerCase().replace(/^www\./, '').replace(/^\.+|\.+$/g, '')
+      return parsed.hostname.toLowerCase().replace(/^\.+|\.+$/g, '')
     } catch {
       return ''
     }
   }
 
-  function normalizeSavedDomain(value = '') {
+  function normalizeSavedDomain(value = '', stripWww = true) {
     let domain = String(value || '').trim().toLowerCase()
     if (!domain) return ''
     domain = domain.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
     domain = domain.split('/', 1)[0].split('@').at(-1) || ''
     if (domain.startsWith('[')) return ''
     domain = domain.replace(/:\d+$/, '').replace(/^\.+|\.+$/g, '')
-    return domain.startsWith('www.') ? domain.slice(4) : domain
+    return stripWww && domain.startsWith('www.') ? domain.slice(4) : domain
   }
 
   function domainMatches(hostname = '', savedDomain = '') {
@@ -46,10 +47,62 @@
     return host === domain || host.endsWith(`.${domain}`)
   }
 
+  function normalizeAutofillMatchMode(value = '') {
+    return AUTOFILL_MATCH_MODES.has(value) ? value : 'base-domain'
+  }
+
+  function normalizeUrlPrefix(value = '') {
+    try {
+      const parsed = new URL(String(value || '').trim())
+      if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) return ''
+      parsed.hash = ''
+      return parsed.href
+    } catch {
+      return ''
+    }
+  }
+
+  function autofillRuleMatches(hostname = '', pageUrl = '', savedRule = '', mode = 'base-domain') {
+    const normalizedMode = normalizeAutofillMatchMode(mode)
+    if (normalizedMode === 'never') return false
+
+    const host = normalizeHost(hostname)
+    if (normalizedMode === 'url-prefix') {
+      const page = normalizeUrlPrefix(pageUrl)
+      const rule = normalizeUrlPrefix(savedRule)
+      if (!page || !rule) return false
+      const parsedPage = new URL(page)
+      const parsedRule = new URL(rule)
+      if (host && normalizeHost(parsedPage.hostname) !== host) return false
+      if (parsedPage.origin !== parsedRule.origin) return false
+      if (page === rule) return true
+      if (!page.startsWith(rule)) return false
+      const nextCharacter = page.slice(rule.length, rule.length + 1)
+      return /[/?&=]$/.test(rule) || ['/','?','&'].includes(nextCharacter)
+    }
+
+    const domain = normalizeSavedDomain(savedRule, normalizedMode === 'base-domain')
+    if (!host || !domain) return false
+    if (domain.includes('*')) {
+      const pattern = domain
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*/g, '[^.]*')
+      return new RegExp(`^${pattern}$`, 'i').test(host)
+    }
+    if (normalizedMode === 'exact-host') return host === domain
+    if (normalizedMode === 'subdomain') return host !== domain && host.endsWith(`.${domain}`)
+    return host === domain || host.endsWith(`.${domain}`)
+  }
+
   function entryMatchesHostname(entry, hostname = '') {
+    return entryMatchesPage(entry, hostname, '')
+  }
+
+  function entryMatchesPage(entry, hostname = '', pageUrl = '') {
     if (!entry || typeof entry !== 'object') return false
     const domains = Array.isArray(entry.domains) ? entry.domains : []
-    return domains.some((domain) => domainMatches(hostname, domain))
+    const mode = normalizeAutofillMatchMode(entry.autofillMatchMode)
+    return domains.some((domain) => autofillRuleMatches(hostname, pageUrl, domain, mode))
   }
 
   function webContext(values = {}) {
@@ -120,10 +173,14 @@
   }
 
   return Object.freeze({
+    autofillRuleMatches,
     domainMatches,
+    entryMatchesPage,
     entryMatchesHostname,
+    normalizeAutofillMatchMode,
     normalizeHost,
     normalizeSavedDomain,
+    normalizeUrlPrefix,
     otpEvidence,
     passwordEvidence,
     sameDocumentContext,

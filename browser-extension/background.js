@@ -15,6 +15,9 @@ const AUTO_FILL_ENABLED_KEY = 'autoFillEnabled'
 const AUTO_SAVE_ENABLED_KEY = 'autoSaveEnabled'
 const IGNORED_SITES_KEY = 'ignoredSites'
 const MANUAL_PANEL_SHORTCUT_KEY = 'manualPanelShortcut'
+const RECENT_FILL_BY_ORIGIN_KEY = 'recentFillEntryIdsByOrigin.v1'
+const RECENT_FILL_MAX_ORIGINS = 80
+const RECENT_FILL_MAX_ENTRIES = 12
 const DEFAULT_MANUAL_PANEL_SHORTCUT = 'Alt+T'
 const PASSKEY_PROXY_PERMISSION = 'webAuthenticationProxy'
 const PASSKEY_PROXY_RECOVERY_KEY = 'passkeyProxyProbePending'
@@ -135,6 +138,63 @@ function storageGet(defaults) {
 
 function storageSet(values) {
   return new Promise((resolve) => chrome.storage.local.set(values, resolve))
+}
+
+function fillRiskCodes(context, sender) {
+  const risks = []
+  try {
+    if (new URL(context.url).protocol === 'http:') risks.push('insecure-http')
+  } catch {
+    risks.push('invalid-page-context')
+  }
+  if (context.frameId > 0) {
+    const topHost = normalizeHost(sender?.tab?.url || '')
+    if (!topHost || topHost !== context.hostname) risks.push('third-party-frame')
+  }
+  return risks
+}
+
+function acknowledgedRisksMatch(actual, acknowledged) {
+  if (!actual.length) return true
+  const values = Array.isArray(acknowledged) ? acknowledged.map(String) : []
+  return actual.length === values.length && actual.every((value, index) => value === values[index])
+}
+
+async function recentFillIds(context) {
+  if (!context?.origin) return []
+  const values = await storageGet({ [RECENT_FILL_BY_ORIGIN_KEY]: {} })
+  const records = values[RECENT_FILL_BY_ORIGIN_KEY]
+  if (!records || typeof records !== 'object' || Array.isArray(records)) return []
+  const ids = records[context.origin]
+  return Array.isArray(ids) ? ids.map(String).filter(Boolean).slice(0, RECENT_FILL_MAX_ENTRIES) : []
+}
+
+async function rankMatchesByRecent(response, context) {
+  if (!response?.ok || !Array.isArray(response.data) || response.data.length < 2) return response
+  const recentIds = await recentFillIds(context)
+  if (!recentIds.length) return response
+  const ranks = new Map(recentIds.map((id, index) => [id, index]))
+  return {
+    ...response,
+    data: response.data.map((entry, index) => ({ entry, index })).sort((left, right) => {
+      const leftRank = ranks.get(String(left.entry?.id || '')) ?? Number.MAX_SAFE_INTEGER
+      const rightRank = ranks.get(String(right.entry?.id || '')) ?? Number.MAX_SAFE_INTEGER
+      return leftRank - rightRank || left.index - right.index
+    }).map((item) => item.entry)
+  }
+}
+
+async function rememberRecentFill(context, entryId) {
+  if (!context?.origin || !entryId) return
+  const values = await storageGet({ [RECENT_FILL_BY_ORIGIN_KEY]: {} })
+  const current = values[RECENT_FILL_BY_ORIGIN_KEY]
+  const records = current && typeof current === 'object' && !Array.isArray(current) ? { ...current } : {}
+  const ids = Array.isArray(records[context.origin]) ? records[context.origin].map(String) : []
+  records[context.origin] = [String(entryId), ...ids.filter((id) => id !== String(entryId))]
+    .slice(0, RECENT_FILL_MAX_ENTRIES)
+  const originKeys = Object.keys(records)
+  for (const key of originKeys.slice(0, Math.max(0, originKeys.length - RECENT_FILL_MAX_ORIGINS))) delete records[key]
+  await storageSet({ [RECENT_FILL_BY_ORIGIN_KEY]: records })
 }
 
 function normalizeShortcut(value, fallback = DEFAULT_MANUAL_PANEL_SHORTCUT) {
@@ -588,8 +648,10 @@ function notifyContextCaptureReady(context) {
   sendMessageToContext(context, { type: 'MYPWDMG_CAPTURE_READY' }).catch(() => {})
 }
 
-function queryCacheKey(hostname = '') {
-  return normalizeHost(hostname)
+function queryCacheKey(hostname = '', pageUrl = '') {
+  const host = normalizeHost(hostname)
+  if (!host) return ''
+  return `${host}\n${Security.normalizeUrlPrefix(pageUrl)}`
 }
 
 function queryHostnames(hostname = '') {
@@ -605,30 +667,36 @@ function queryHostnames(hostname = '') {
   return candidates
 }
 
-function filterMatchesForHostname(response, hostname = '') {
+function filterMatchesForPage(response, hostname = '', pageUrl = '') {
   if (!response?.ok || !Array.isArray(response.data)) return response
   return {
     ...response,
-    data: response.data.filter((entry) => Security.entryMatchesHostname(entry, hostname))
+    data: response.data.filter((entry) => Security.entryMatchesPage(entry, hostname, pageUrl))
   }
 }
 
-async function queryMatchesWithParentFallback(hostname = '') {
+async function queryNativeMatches(hostname = '', pageUrl = '') {
+  let response = await nativeCall('queryMatches', { hostname, pageUrl })
+  if (response?.code === 'INVALID_INPUT') {
+    response = await nativeCall('queryMatches', { hostname })
+  }
+  return filterMatchesForPage(response, hostname, pageUrl)
+}
+
+async function queryMatchesWithParentFallback(hostname = '', pageUrl = '') {
   const host = normalizeHost(hostname)
   const candidates = queryHostnames(host)
   const primaryHostname = host || hostname
-  const primary = filterMatchesForHostname(
-    await nativeCall('queryMatches', { hostname: primaryHostname }),
-    host
-  )
+  const primary = await queryNativeMatches(primaryHostname, pageUrl)
   if (!primary?.ok || !Array.isArray(primary.data) || primary.data.length || candidates.length < 2) {
     return primary
   }
 
   for (const candidate of candidates.slice(1)) {
-    const fallback = filterMatchesForHostname(
-      await nativeCall('queryMatches', { hostname: candidate }),
-      host
+    const fallback = filterMatchesForPage(
+      await queryNativeMatches(candidate, pageUrl),
+      host,
+      pageUrl
     )
     if (!fallback?.ok || !Array.isArray(fallback.data)) return fallback
     if (fallback.data.length) return fallback
@@ -636,10 +704,10 @@ async function queryMatchesWithParentFallback(hostname = '') {
   return primary
 }
 
-async function queryMatchesCached(hostname = '') {
+async function queryMatchesCached(hostname = '', pageUrl = '') {
   pruneQueryCache()
-  const key = queryCacheKey(hostname)
-  if (!key) return queryMatchesWithParentFallback(hostname)
+  const key = queryCacheKey(hostname, pageUrl)
+  if (!key) return queryMatchesWithParentFallback(hostname, pageUrl)
 
   const cached = queryCache.get(key)
   if (cached && cached.expiresAt > Date.now()) return cached.response
@@ -649,7 +717,7 @@ async function queryMatchesCached(hostname = '') {
 
   const cacheVersion = queryCacheVersion
   let request
-  request = queryMatchesWithParentFallback(key).then((response) => {
+  request = queryMatchesWithParentFallback(hostname, pageUrl).then((response) => {
     if (response?.ok && cacheVersion === queryCacheVersion) {
       queryCache.set(key, {
         response,
@@ -668,13 +736,13 @@ async function queryMatchesCached(hostname = '') {
   return request
 }
 
-function matchingEntry(response, entryId, hostname) {
+function matchingEntry(response, entryId, hostname, pageUrl = '') {
   if (!response?.ok || !Array.isArray(response.data)) return null
   const requestedId = String(entryId || '')
   if (!requestedId) return null
   return response.data.find((entry) => (
     String(entry?.id || '') === requestedId
-    && Security.entryMatchesHostname(entry, hostname)
+    && Security.entryMatchesPage(entry, hostname, pageUrl)
   )) || null
 }
 
@@ -684,16 +752,26 @@ function payloadMatchesEntry(payload, entry) {
     .every((key) => String(payload[key] ?? '') === String(entry[key] ?? ''))
 }
 
-async function authorizeFill(entryId, sender) {
+async function authorizeFill(entryId, sender, acknowledgedRisks = []) {
   prunePendingCaptures()
   const context = senderWebContext(sender)
   if (!context) return contextError()
 
-  const matches = await queryMatchesCached(context.hostname)
+  const matches = await queryMatchesCached(context.hostname, context.url)
   if (!matches?.ok) return matches
-  const matchedEntry = matchingEntry(matches, entryId, context.hostname)
+  const matchedEntry = matchingEntry(matches, entryId, context.hostname, context.url)
   if (!matchedEntry) {
     return contextError('ENTRY_NOT_AUTHORIZED_FOR_SITE')
+  }
+
+  const risks = fillRiskCodes(context, sender)
+  if (!acknowledgedRisksMatch(risks, acknowledgedRisks)) {
+    return {
+      ok: false,
+      code: 'FILL_RISK_CONFIRMATION_REQUIRED',
+      message: '当前页面存在填充风险，请确认后继续。',
+      data: { risks }
+    }
   }
 
   const token = newToken()
@@ -717,28 +795,35 @@ async function getAuthorizedFill(entryId, token, sender) {
     return contextError('FILL_AUTH_CONTEXT_MISMATCH')
   }
 
-  const matches = await queryMatchesWithParentFallback(context.hostname)
+  const matches = await queryMatchesWithParentFallback(context.hostname, context.url)
   if (!matches?.ok) return matches
-  const matchedEntry = matchingEntry(matches, entryId, context.hostname)
+  const matchedEntry = matchingEntry(matches, entryId, context.hostname, context.url)
   if (!matchedEntry) {
     return contextError('ENTRY_NOT_AUTHORIZED_FOR_SITE')
   }
 
   let response = await nativeCall('getFillPayload', {
     entryId: String(entryId),
-    hostname: context.hostname
+    hostname: context.hostname,
+    pageUrl: context.url
   })
-  // Older installed Hosts only accept entryId. The extension has already
-  // authorized and revalidated the entry for this page before this fallback.
+  // Older installed Hosts may accept hostname but not pageUrl.
   if (response?.code === 'INVALID_INPUT') {
     response = await nativeCall('getFillPayload', {
-      entryId: String(entryId)
+      entryId: String(entryId),
+      hostname: context.hostname
     })
+  }
+  // Very old Hosts only accept entryId. The extension has already authorized
+  // and revalidated the entry for this exact page before this fallback.
+  if (response?.code === 'INVALID_INPUT') {
+    response = await nativeCall('getFillPayload', { entryId: String(entryId) })
   }
   if (!response?.ok) return response
   if (!payloadMatchesEntry(response.data, matchedEntry)) {
     return contextError('ENTRY_ID_MISMATCH')
   }
+  await rememberRecentFill(context, entryId)
   return response
 }
 
@@ -994,7 +1079,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === 'MYPWDMG_QUERY_MATCHES') {
       const context = await queryContextForSender(sender)
-      sendResponse(context ? await queryMatchesCached(context.hostname) : contextError())
+      const response = context ? await queryMatchesCached(context.hostname, context.url) : contextError()
+      sendResponse(context ? await rankMatchesByRecent(response, context) : response)
       return
     }
     if (message?.type === 'MYPWDMG_UNLOCK') {
@@ -1017,7 +1103,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return
     }
     if (message?.type === 'MYPWDMG_AUTHORIZE_FILL') {
-      sendResponse(await authorizeFill(message.entryId, sender))
+      sendResponse(await authorizeFill(message.entryId, sender, message.acknowledgedRisks))
       return
     }
     if (message?.type === 'MYPWDMG_GET_FILL') {

@@ -326,6 +326,33 @@
   background: var(--mypwdmg-accent);
 }
 
+.mypwdmg-risk-body {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  color: var(--mypwdmg-text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.mypwdmg-risk-body > strong {
+  color: var(--mypwdmg-text);
+  font-size: 13px;
+}
+
+.mypwdmg-risk-body ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.mypwdmg-risk-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
 .mypwdmg-save-body {
   display: grid;
   gap: 10px;

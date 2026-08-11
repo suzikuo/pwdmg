@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { analyzePasswordHealth, estimatePasswordStrength } from '../src/services/passwordHealth.ts'
+import {
+  analyzePasswordHealth,
+  estimatePasswordStrength,
+  parseExpiryDate
+} from '../src/services/passwordHealth.ts'
 
 test('analyzes active login entries recursively and respects inactive ancestors', () => {
   const entries = [
@@ -143,6 +147,103 @@ test('handles cycles, duplicate IDs, and configured traversal bounds', () => {
   assert.deepEqual(new Set(report.entries.map((item) => item.entryId)), new Set(['first', 'second']))
 })
 
+test('detects only explicit valid insecure HTTP URLs across domains and typed fields', () => {
+  const report = analyzePasswordHealth([
+    login('http-login', { domains: ['http://example.com/login', 'example.org', 'https://safe.example'] }),
+    content('secure-note', 'http-field', {
+      customFields: [
+        { id: 'u1', label: 'Endpoint', value: 'HTTP://api.example.test/v1', type: 'url', protected: false },
+        { id: 'u2', label: 'Text', value: 'http://not-a-url-field.test', type: 'text', protected: false },
+        { id: 'u3', label: 'Invalid', value: 'http://', type: 'url', protected: false }
+      ]
+    }),
+    login('safe-login', { domains: ['https://example.com', 'portal.example.com'] })
+  ])
+
+  assert.equal(report.summary.insecureUrlCount, 2)
+  assert.equal(report.entries.find((item) => item.entryId === 'http-login').insecureUrlCount, 1)
+  assert.ok(report.entries.find((item) => item.entryId === 'http-field').issues.includes('insecure-url'))
+  assert.equal(report.entries.find((item) => item.entryId === 'safe-login').issues.includes('insecure-url'), false)
+})
+
+test('groups exact semantic duplicates without exposing protected comparison content', () => {
+  const protectedValue = 'private duplicate material must stay internal'
+  const shared = {
+    title: 'Recovery note',
+    note: 'same note',
+    customFields: [{ id: 'field-a', label: 'Code', value: protectedValue, type: 'secret', protected: true }]
+  }
+  const report = analyzePasswordHealth([
+    content('secure-note', 'copy-b', { ...shared, history: [{ id: 'newer-local-history' }] }),
+    content('secure-note', 'copy-a', {
+      ...shared,
+      customFields: [{ ...shared.customFields[0], id: 'different-field-id' }]
+    }),
+    content('secure-note', 'different', {
+      ...shared,
+      customFields: [{ ...shared.customFields[0], value: `${protectedValue}-changed` }]
+    }),
+    login('space-a', { title: 'Whitespace-sensitive', password: ' secret-with-spaces ' }),
+    login('space-b', { title: 'Whitespace-sensitive', password: 'secret-with-spaces' })
+  ])
+
+  assert.equal(report.summary.duplicateGroupCount, 1)
+  assert.equal(report.summary.duplicateEntryCount, 2)
+  assert.deepEqual(report.duplicateGroups[0].entries.map((item) => item.entryId), ['copy-a', 'copy-b'])
+  assert.equal(report.entries.find((item) => item.entryId === 'space-a').issues.includes('duplicate'), false)
+  assert.equal(report.entries.find((item) => item.entryId === 'space-b').issues.includes('duplicate'), false)
+  assert.equal(JSON.stringify(report).includes(protectedValue), false)
+})
+
+test('does not merge otherwise identical entries with different autofill rules', () => {
+  const base = login('base-rule', 'same-secret')
+  base.domains = ['example.com']
+  base.autofillMatchMode = 'base-domain'
+  const exact = { ...base, id: 'exact-rule', autofillMatchMode: 'exact-host' }
+
+  const report = analyzePasswordHealth([base, exact])
+
+  assert.equal(report.summary.duplicateGroupCount, 0)
+  assert.equal(report.entries.some((entry) => entry.issues.includes('duplicate')), false)
+})
+
+test('parses unambiguous expiry shapes and reports expired and soon-expiring typed dates', () => {
+  const now = Date.UTC(2026, 7, 7)
+  const report = analyzePasswordHealth([
+    content('card', 'card', {
+      customFields: [
+        { id: 'expired', label: '旧卡', value: '07/26', type: 'date', protected: false },
+        { id: 'soon', label: '新卡', value: '08/2026', type: 'date', protected: false },
+        { id: 'future', label: '以后', value: '2027-12', type: 'date', protected: false },
+        { id: 'ambiguous', label: '不明确', value: '1/2/27', type: 'date', protected: false }
+      ]
+    })
+  ], { now, expiringWithinDays: 30 })
+
+  const card = report.entries[0]
+  assert.ok(card.issues.includes('expired'))
+  assert.ok(card.issues.includes('expiring'))
+  assert.deepEqual(card.expirations.map((item) => item.fieldId), ['expired', 'soon'])
+  assert.equal(report.summary.expiredCount, 1)
+  assert.equal(report.summary.expiringCount, 1)
+  assert.equal(parseExpiryDate('2024-02-29'), Date.UTC(2024, 2, 1) - 1)
+  assert.equal(parseExpiryDate('2025-02-29'), undefined)
+  assert.equal(parseExpiryDate('13/2027'), undefined)
+})
+
+test('reports expected TOTP only for explicitly marked active logins without a secret', () => {
+  const report = analyzePasswordHealth([
+    login('missing-totp'),
+    login('configured-totp', { totpSecret: 'JBSWY3DPEHPK3PXP' }),
+    content('secure-note', 'not-a-login')
+  ], { totpExpectedIds: new Set(['missing-totp', 'configured-totp', 'not-a-login']) })
+
+  assert.equal(report.summary.missingTotpCount, 1)
+  assert.ok(report.entries.find((item) => item.entryId === 'missing-totp').issues.includes('missing-totp'))
+  assert.equal(report.entries.find((item) => item.entryId === 'configured-totp').issues.includes('missing-totp'), false)
+  assert.equal(report.entries.find((item) => item.entryId === 'not-a-login').issues.includes('missing-totp'), false)
+})
+
 function login(id, overrides = {}) {
   return {
     id,
@@ -161,4 +262,18 @@ function login(id, overrides = {}) {
 
 function folder(id, children, overrides = {}) {
   return { ...login(id), kind: 'folder', children, ...overrides }
+}
+
+function content(kind, id, overrides = {}) {
+  return {
+    id,
+    kind,
+    title: id,
+    status: 'active',
+    domains: [],
+    customFields: [],
+    history: [],
+    children: [],
+    ...overrides
+  }
 }

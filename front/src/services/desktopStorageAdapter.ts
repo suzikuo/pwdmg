@@ -1,4 +1,4 @@
-import type { ApiResult, AppInfo, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, PluginListenerState } from '../types'
+import type { ApiResult, AppInfo, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, AttachmentObjectRetention, AttachmentObjectWrite, AttachmentStorageState, PluginListenerState } from '../types'
 import { fail, ok } from './apiTypes'
 import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
 
@@ -14,6 +14,11 @@ export const desktopStorageAdapter: VaultStorageAdapter = {
     ? call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup)
     : call<WriteEnvelopeResult>('writeVaultEnvelope', envelopeText, protectBackup, expectedRevision),
   readLegacyLocalStorage: () => call<string>('readLegacyLocalStorage'),
+  getAttachmentStorageState: () => call<AttachmentStorageState>('getAttachmentStorageState'),
+  readAttachmentObject: (attachmentId) => call<string>('readAttachmentObject', attachmentId),
+  writeAttachmentObject: (attachmentId, objectText) => call<AttachmentObjectWrite>('writeAttachmentObject', attachmentId, objectText),
+  retainAttachmentObject: (attachmentId) => call<AttachmentObjectRetention>('retainAttachmentObject', attachmentId),
+  collectAttachmentObjects: (referencedIds) => call<{ retained: number; deleted: number }>('collectAttachmentObjects', referencedIds),
   cleanupLegacyStorage: (expectedDigest) => call<unknown>('cleanupLegacyStorage', expectedDigest),
   getPluginListenerState: () => call<PluginListenerState>('getPluginListenerState'),
   enablePluginListener: (extensionId, browsers) => call<PluginListenerState>('enablePluginListener', extensionId, browsers),

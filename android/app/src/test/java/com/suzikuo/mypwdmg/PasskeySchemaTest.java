@@ -35,6 +35,14 @@ public class PasskeySchemaTest {
     }
 
     @Test
+    public void optionalUserLabelIsNormalizedWithoutSchemaBump() throws Exception {
+        PasskeySchema.State normalized = PasskeySchema.normalize(new JSONObject()
+            .put("passkeys", new JSONArray().put(samplePasskey().put("label", "  Work key  "))));
+        assertEquals(1, normalized.schemaVersion);
+        assertEquals("Work key", normalized.passkeys.getJSONObject(0).getString("label"));
+    }
+
+    @Test
     public void malformedVersionsAndCollectionsAreRejected() throws Exception {
         assertInvalid(new JSONObject().put("version", 3), "version");
         assertInvalid(new JSONObject().put("version", "2"), "version");

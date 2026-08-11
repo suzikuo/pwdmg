@@ -12,8 +12,8 @@ class FakeApi:
     def getState(self):
         return {"ok": True, "data": {"locked": True}}
 
-    def getFillPayload(self, entryId, hostname):
-        return {"ok": True, "data": {"id": entryId, "hostname": hostname}}
+    def getFillPayload(self, entryId, hostname, pageUrl=""):
+        return {"ok": True, "data": {"id": entryId, "hostname": hostname, "pageUrl": pageUrl}}
 
     def unlock(self, password):
         raise RuntimeError(f"must not escape: {password}")
@@ -60,6 +60,19 @@ class NativeHostTest(unittest.TestCase):
         })
         self.assertTrue(response["ok"])
         self.assertEqual(response["data"]["hostname"], "login.example.com")
+
+    @patch("pwdmg_core.native_host.is_plugin_listener_enabled", return_value=True)
+    def test_dispatch_accepts_optional_page_url_context(self, _enabled):
+        response = native_host.dispatch(FakeApi(), {
+            "method": "getFillPayload",
+            "params": {
+                "entryId": "entry-1",
+                "hostname": "login.example.com",
+                "pageUrl": "https://login.example.com/account",
+            },
+        })
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["data"]["pageUrl"], "https://login.example.com/account")
 
 
 if __name__ == "__main__":

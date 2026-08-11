@@ -1,5 +1,7 @@
 import type {
   AndroidAutofillState,
+  AttachmentObjectRetention,
+  AttachmentStorageState,
   AppUpdateApply,
   AppUpdateCheck,
   AppUpdateDownload,
@@ -7,9 +9,14 @@ import type {
   ApiResult,
   AppInfo,
   AppState,
+  DeviceUnlockState,
   PluginListenerState,
+  PortableBackupExport,
+  PortableBackupImport,
+  PortableBackupSelection,
   VaultBackupExport,
   VaultBackupImport,
+  VaultAttachment,
   VaultPayload
 } from '../types'
 
@@ -24,12 +31,29 @@ export type StartupData = {
   vault?: VaultPayload
 }
 
+export type AttachmentCreateResult = {
+  reference: VaultAttachment
+  vault: VaultPayload
+}
+
 export interface PasswordManagerApiAdapter {
   getAppInfo: () => Promise<ApiResult<AppInfo>>
   getStartupData: () => Promise<ApiResult<StartupData>>
   getState: () => Promise<ApiResult<AppState>>
   createVault: (password: string, importLegacy: boolean) => Promise<ApiResult<CreateVaultResult>>
   unlock: (password: string) => Promise<ApiResult<VaultPayload>>
+  getDeviceUnlockState: () => Promise<ApiResult<DeviceUnlockState>>
+  enableDeviceUnlock: (password: string, reauthSeconds: number) => Promise<ApiResult<DeviceUnlockState>>
+  disableDeviceUnlock: () => Promise<ApiResult<DeviceUnlockState>>
+  quickUnlock: () => Promise<ApiResult<VaultPayload>>
+  getAttachmentStorageState: () => Promise<ApiResult<AttachmentStorageState>>
+  createAttachmentObject: (name: string, mimeType: string, bytes: Uint8Array) => Promise<ApiResult<AttachmentCreateResult>>
+  readAttachmentBytes: (reference: VaultAttachment) => Promise<ApiResult<Uint8Array>>
+  saveAttachmentToFile: (reference: VaultAttachment) => Promise<ApiResult<{ saved: boolean; path: string }>>
+  readAttachmentCiphertext: (reference: VaultAttachment) => Promise<ApiResult<string>>
+  writeAttachmentCiphertext: (reference: VaultAttachment, objectText: string) => Promise<ApiResult<null>>
+  retainAttachmentObject: (attachmentId: string) => Promise<ApiResult<AttachmentObjectRetention>>
+  collectAttachmentObjects: (referencedIds: string[]) => Promise<ApiResult<{ retained: number; deleted: number }>>
   lock: () => Promise<ApiResult<AppState>>
   getVault: () => Promise<ApiResult<VaultPayload>>
   saveVault: (payload: VaultPayload) => Promise<ApiResult<VaultPayload>>
@@ -40,6 +64,10 @@ export interface PasswordManagerApiAdapter {
   previewVaultBackup: (envelopeText: string) => Promise<ApiResult<VaultPayload>>
   previewVaultBackupWithPassword: (envelopeText: string, password: string) => Promise<ApiResult<VaultPayload>>
   importVaultBackup: (envelopeText: string) => Promise<ApiResult<VaultBackupImport>>
+  exportPortableBackupPackage: () => Promise<ApiResult<PortableBackupExport>>
+  selectPortableBackupPackage: () => Promise<ApiResult<PortableBackupSelection>>
+  importPortableBackupPackage: (selectionToken: string, password: string) => Promise<ApiResult<PortableBackupImport>>
+  discardPortableBackupSelection: (selectionToken: string) => Promise<ApiResult<{ discarded: boolean }>>
   getPluginListenerState: () => Promise<ApiResult<PluginListenerState>>
   enablePluginListener: (extensionId: string, browsers: string[]) => Promise<ApiResult<PluginListenerState>>
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
@@ -48,6 +76,7 @@ export interface PasswordManagerApiAdapter {
   checkAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateCheck>>
   downloadAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateDownload>>
   applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
+  openExternalUrl: (url: string) => Promise<ApiResult<null>>
   safeExit: () => Promise<ApiResult<null>>
 }
 

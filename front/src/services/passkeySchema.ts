@@ -10,7 +10,7 @@ const RP_ID_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const PASSKEY_TRANSPORTS = new Set<PasskeyTransport>(['usb', 'nfc', 'ble', 'internal', 'hybrid', 'smart-card'])
 const PASSKEY_TRANSPORT_ORDER: PasskeyTransport[] = ['internal', 'hybrid', 'usb', 'nfc', 'ble', 'smart-card']
 const PASSKEY_FIELDS = new Set([
-  'id', 'credentialId', 'rpId', 'rpName', 'userHandle', 'userName', 'userDisplayName',
+  'id', 'label', 'credentialId', 'rpId', 'rpName', 'userHandle', 'userName', 'userDisplayName',
   'algorithm', 'publicKeyCose', 'privateKeyPkcs8', 'discoverable', 'backupEligible',
   'backupState', 'transports', 'entryId', 'createdAt', 'updatedAt'
 ])
@@ -101,9 +101,11 @@ function normalizePasskeys(values: unknown[]): VaultPasskey[] {
       updatedAt
     }
     const rpName = readOptionalText(raw.rpName, `passkeys[${index}].rpName`, MAX_DISPLAY_LENGTH)
+    const label = readOptionalText(raw.label, `passkeys[${index}].label`, MAX_DISPLAY_LENGTH)
     const userDisplayName = readOptionalText(raw.userDisplayName, `passkeys[${index}].userDisplayName`, MAX_DISPLAY_LENGTH)
     const entryId = readOptionalText(raw.entryId, `passkeys[${index}].entryId`, MAX_ID_LENGTH)
     if (rpName) result.rpName = rpName
+    if (label) result.label = label
     if (userDisplayName) result.userDisplayName = userDisplayName
     if (entryId) result.entryId = entryId
     return result

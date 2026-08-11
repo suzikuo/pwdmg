@@ -83,6 +83,39 @@ public class AndroidVaultStoreMutationTest {
     }
 
     @Test
+    public void autofillModesUseStrictHostBoundariesAndFailClosedForUrlPrefixes() {
+        assertTrue(AndroidVaultStore.autofillRuleMatches("login.example.com", "example.com", "base-domain"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("login.example.com", "example.com", "exact-host"));
+        assertTrue(AndroidVaultStore.autofillRuleMatches("login.example.com", "example.com", "subdomain"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "example.com", "subdomain"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "https://example.com/account", "url-prefix"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "example.com", "never"));
+        assertTrue(AndroidVaultStore.autofillRuleMatches("www.example.com", "www.example.com", "exact-host"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "www.example.com", "exact-host"));
+    }
+
+    @Test
+    public void normalizationPreservesUrlPrefixesAndDefaultsLegacyEntries() throws Exception {
+        JSONObject prefix = login("prefix", "https://Example.com/account#fragment")
+            .put("autofillMatchMode", "url-prefix");
+        JSONArray normalized = AndroidVaultStore.normalizeEntries(new JSONArray()
+            .put(prefix)
+            .put(login("legacy", "example.com")));
+
+        assertEquals("https://example.com/account", normalized.getJSONObject(0).getJSONArray("domains").getString(0));
+        assertEquals("url-prefix", normalized.getJSONObject(0).getString("autofillMatchMode"));
+        assertEquals("base-domain", normalized.getJSONObject(1).getString("autofillMatchMode"));
+    }
+
+    @Test
+    public void neverFillEntriesAreExcludedFromHostAndFallbackQueries() throws Exception {
+        JSONObject never = login("never", "example.com").put("autofillMatchMode", "never");
+        JSONObject payload = new JSONObject().put("entries", new JSONArray().put(never));
+        assertEquals(0, AndroidVaultStore.queryMatchesFromPayload(payload, "example.com").length());
+        assertEquals(0, AndroidVaultStore.queryMatchesFromPayload(payload, "", true).length());
+    }
+
+    @Test
     public void normalizationRepairsMissingAndDuplicateIdsAcrossTheWholeTree() throws Exception {
         JSONArray entries = new JSONArray()
             .put(login("duplicate", "example.com"))

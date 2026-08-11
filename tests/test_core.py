@@ -6,12 +6,51 @@ import unittest
 from pathlib import Path
 
 from pwdmg_core.crypto import VaultCryptoError, decrypt_payload, encrypt_payload
-from pwdmg_core.domain import domain_matches
+from pwdmg_core.domain import autofill_rule_matches, domain_matches
 from pwdmg_core.totp import generate_totp
 from pwdmg_core.vault import VaultLockedError, VaultService, default_payload
 
 
 class CoreTests(unittest.TestCase):
+    def test_attachment_references_are_preserved_and_strictly_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VaultService(
+                vault_path=Path(tmp) / "vault.json",
+                legacy_path=Path(tmp) / "missing.json",
+            )
+            attachment = {
+                "id": "123e4567-e89b-42d3-a456-426614174000",
+                "name": "codes.txt",
+                "mimeType": "text/plain",
+                "size": 10,
+                "sha256": "a" * 64,
+                "ciphertextSha256": "b" * 64,
+                "createdAt": 100,
+            }
+            normalized = service._normalize_payload({**default_payload([{
+                "id": "entry-1",
+                "kind": "secure-note",
+                "title": "Recovery",
+                "attachments": [attachment],
+            }]), "attachmentKey": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="})
+            self.assertEqual(normalized["entries"][0]["attachments"], [attachment])
+            with self.assertRaisesRegex(ValueError, "key is missing"):
+                service._normalize_payload(default_payload([{
+                    "id": "entry-without-key",
+                    "kind": "secure-note",
+                    "title": "Missing key",
+                    "attachments": [attachment],
+                }]))
+            invalid = dict(attachment)
+            invalid["id"] = "../secret"
+            with self.assertRaises(ValueError):
+                service._normalize_payload({**default_payload([{
+                    "id": "entry-2",
+                    "kind": "secure-note",
+                    "title": "Bad",
+                    "attachments": [invalid],
+                }]), "attachmentKey": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="})
+
     def test_vault_service_serializes_shared_session_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = VaultService(
@@ -153,6 +192,23 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(domain_matches("signin.aws.amazon.com.evil.test", "signin.aws.amazon.com"))
         self.assertFalse(domain_matches("badexample.com", "example.com"))
 
+    def test_autofill_matching_modes_are_boundary_safe(self):
+        self.assertTrue(autofill_rule_matches("login.example.com", "https://login.example.com/sign-in", "example.com", "base-domain"))
+        self.assertFalse(autofill_rule_matches("login.example.com", "https://login.example.com/sign-in", "example.com", "exact-host"))
+        self.assertTrue(autofill_rule_matches("login.example.com", "https://login.example.com/sign-in", "example.com", "subdomain"))
+        self.assertFalse(autofill_rule_matches("example.com", "https://example.com/sign-in", "example.com", "subdomain"))
+        self.assertFalse(autofill_rule_matches("login.example.com", "https://login.example.com/sign-in", "example.com", "never"))
+        self.assertTrue(autofill_rule_matches("www.example.com", "https://www.example.com/", "www.example.com", "exact-host"))
+        self.assertFalse(autofill_rule_matches("example.com", "https://example.com/", "www.example.com", "exact-host"))
+
+    def test_url_prefix_matching_requires_url_origin_and_path_boundary(self):
+        rule = "https://example.com/account"
+        self.assertTrue(autofill_rule_matches("example.com", "https://example.com/account/profile", rule, "url-prefix"))
+        self.assertTrue(autofill_rule_matches("example.com", "https://example.com/account?view=1", rule, "url-prefix"))
+        self.assertFalse(autofill_rule_matches("example.com", "https://example.com/accounting", rule, "url-prefix"))
+        self.assertFalse(autofill_rule_matches("example.com", "http://example.com/account/profile", rule, "url-prefix"))
+        self.assertFalse(autofill_rule_matches("example.com", "", rule, "url-prefix"))
+
     def test_totp_known_vector(self):
         secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
         self.assertEqual(generate_totp(secret, timestamp=59), "287082")
@@ -223,6 +279,43 @@ class CoreTests(unittest.TestCase):
             matches = service.query_matches("us-east-2.signin.aws.amazon.com")
             self.assertEqual(matches[0]["id"], "entry-aws")
             self.assertTrue(matches[0]["hasTotp"])
+
+    def test_vault_service_enforces_saved_autofill_mode_for_query_and_fill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = VaultService(vault_path=Path(tmp) / "vault.json", legacy_path=Path(tmp) / "missing.json")
+            service.create_vault("password123", import_legacy=False)
+            service.save_vault(default_payload([
+                {
+                    "id": "exact",
+                    "kind": "login",
+                    "title": "Exact",
+                    "domains": ["example.com"],
+                    "autofillMatchMode": "exact-host",
+                    "password": "exact-secret",
+                },
+                {
+                    "id": "prefix",
+                    "kind": "login",
+                    "title": "Prefix",
+                    "domains": ["https://example.com/account"],
+                    "autofillMatchMode": "url-prefix",
+                    "password": "prefix-secret",
+                },
+                {
+                    "id": "never",
+                    "kind": "login",
+                    "title": "Never",
+                    "domains": ["example.com"],
+                    "autofillMatchMode": "never",
+                    "password": "never-secret",
+                },
+            ]))
+
+            self.assertEqual([item["id"] for item in service.query_matches("example.com", "https://example.com/account/profile")], ["exact", "prefix"])
+            self.assertEqual(service.query_matches("login.example.com", "https://login.example.com/account"), [])
+            self.assertEqual(service.get_fill_payload_for_host("prefix", "example.com", "https://example.com/account/profile")["password"], "prefix-secret")
+            with self.assertRaises(ValueError):
+                service.get_fill_payload_for_host("prefix", "example.com", "https://example.com/accounting")
 
     def test_vault_service_query_matches_saved_aws_parent_domain(self):
         with tempfile.TemporaryDirectory() as tmp:

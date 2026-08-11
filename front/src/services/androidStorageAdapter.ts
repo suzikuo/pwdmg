@@ -22,6 +22,11 @@ export const androidStorageAdapter: VaultStorageAdapter = {
     expectedRevision ?? -1
   ),
   readLegacyLocalStorage: () => call<string>('readLegacyLocalStorage'),
+  getAttachmentStorageState: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
+  readAttachmentObject: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
+  writeAttachmentObject: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
+  retainAttachmentObject: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
+  collectAttachmentObjects: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
   cacheUnlockedSession: (password) => call('unlock', password),
   clearUnlockedSession: () => call('lock'),
   getPluginListenerState: async () => ok(emptyPluginListenerState('android')),

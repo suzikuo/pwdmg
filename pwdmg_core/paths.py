@@ -11,6 +11,8 @@ LOCAL_BACKUP_DIR = APP_DIR / "backups"
 UPDATE_DIR = APP_DIR / "updates"
 NATIVE_HOST_DIR = APP_DIR / "native-host"
 PLUGIN_CONFIG_FILE = APP_DIR / "plugin_config.json"
+DEVICE_UNLOCK_FILE = APP_DIR / "device_unlock.json"
+ATTACHMENT_DIR = APP_DIR / "attachments"
 
 
 DEFAULT_DESKTOP_CONFIG = {

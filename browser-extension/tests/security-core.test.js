@@ -161,6 +161,19 @@ test('domain authorization accepts only matching saved domains', () => {
   assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'example.com'), false)
 })
 
+test('autofill rule modes enforce host and URL boundaries', () => {
+  const pageUrl = 'https://login.example.com/account/profile'
+  assert.equal(Security.entryMatchesPage({ domains: ['example.com'], autofillMatchMode: 'base-domain' }, 'login.example.com', pageUrl), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['example.com'], autofillMatchMode: 'exact-host' }, 'login.example.com', pageUrl), false)
+  assert.equal(Security.entryMatchesPage({ domains: ['example.com'], autofillMatchMode: 'subdomain' }, 'login.example.com', pageUrl), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['login.example.com'], autofillMatchMode: 'subdomain' }, 'login.example.com', pageUrl), false)
+  assert.equal(Security.entryMatchesPage({ domains: ['https://login.example.com/account'], autofillMatchMode: 'url-prefix' }, 'login.example.com', pageUrl), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['https://login.example.com/account'], autofillMatchMode: 'url-prefix' }, 'login.example.com', 'https://login.example.com/accounting'), false)
+  assert.equal(Security.entryMatchesPage({ domains: ['example.com'], autofillMatchMode: 'never' }, 'example.com', 'https://example.com/'), false)
+  assert.equal(Security.entryMatchesPage({ domains: ['www.example.com'], autofillMatchMode: 'exact-host' }, 'www.example.com', 'https://www.example.com/'), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['www.example.com'], autofillMatchMode: 'exact-host' }, 'example.com', 'https://example.com/'), false)
+})
+
 test('background rejects foreign senders and keeps vault controls extension-page-only', async () => {
   const calls = []
   const background = loadBackground((method, params) => {
@@ -393,6 +406,7 @@ test('fill retries the legacy Native Host signature after parameter rejection', 
     )),
     [
       `${summary.id}|login.example.com`,
+      `${summary.id}|login.example.com`,
       `${summary.id}|`
     ]
   )
@@ -485,7 +499,7 @@ test('background revalidates fills and retains failed save tokens', () => {
     background.indexOf('function forgetPromptToken')
   )
   assert.match(authorizedFill, /sameDocumentContext/)
-  assert.match(authorizedFill, /queryMatchesWithParentFallback\(context\.hostname\)/)
+  assert.match(authorizedFill, /queryMatchesWithParentFallback\(context\.hostname, context\.url\)/)
   assert.match(authorizedFill, /matchingEntry/)
   assert.match(authorizedFill, /payloadMatchesEntry/)
   assert.match(authorizedFill, /hostname: context\.hostname/)
@@ -555,6 +569,83 @@ test('background fill grants are site-bound, document-bound, and single-use', as
     authorizationToken: nextAuthorization.data.token
   }, otherDocument)
   assert.equal(wrongDocument.code, 'FILL_AUTH_CONTEXT_MISMATCH')
+})
+
+test('risky HTTP and third-party-frame fills require an exact second-click acknowledgement', async () => {
+  const summary = {
+    id: 'entry-risk',
+    title: 'Risk',
+    username: 'alice',
+    email: '',
+    phone: '',
+    loginAccountSource: 'username',
+    domains: ['example.com']
+  }
+  const background = loadBackground((method) => (
+    method === 'queryMatches' ? { ok: true, data: [summary] } : { ok: true, data: { ...summary, password: 'secret', totp: '' } }
+  ))
+  const httpSender = {
+    tab: { id: 7, url: 'http://login.example.com/' },
+    frameId: 0,
+    documentId: 'doc-http',
+    url: 'http://login.example.com/form'
+  }
+
+  const warning = await background.dispatch({ type: 'MYPWDMG_AUTHORIZE_FILL', entryId: summary.id }, httpSender)
+  assert.equal(warning.code, 'FILL_RISK_CONFIRMATION_REQUIRED')
+  assert.deepEqual(Array.from(warning.data.risks), ['insecure-http'])
+  const authorized = await background.dispatch({
+    type: 'MYPWDMG_AUTHORIZE_FILL',
+    entryId: summary.id,
+    acknowledgedRisks: ['insecure-http']
+  }, httpSender)
+  assert.equal(authorized.ok, true)
+
+  const frameSender = {
+    tab: { id: 7, url: 'https://app.other.test/' },
+    frameId: 2,
+    documentId: 'doc-frame',
+    url: 'https://login.example.com/form'
+  }
+  const frameWarning = await background.dispatch({ type: 'MYPWDMG_AUTHORIZE_FILL', entryId: summary.id }, frameSender)
+  assert.deepEqual(Array.from(frameWarning.data.risks), ['third-party-frame'])
+})
+
+test('successful authorized retrieval ranks that entry first for the same origin', async () => {
+  const entries = ['first', 'second'].map((id) => ({
+    id,
+    title: id,
+    username: id,
+    email: '',
+    phone: '',
+    loginAccountSource: 'username',
+    domains: ['example.com']
+  }))
+  const background = loadBackground((method, params) => {
+    if (method === 'queryMatches') return { ok: true, data: entries }
+    const entry = entries.find((item) => item.id === params.entryId)
+    return { ok: true, data: { ...entry, password: 'secret', totp: '' } }
+  })
+  const sender = {
+    tab: { id: 7, url: 'https://login.example.com/' },
+    frameId: 0,
+    documentId: 'doc-recent',
+    url: 'https://login.example.com/form'
+  }
+
+  const initial = await background.dispatch({ type: 'MYPWDMG_QUERY_MATCHES' }, sender)
+  assert.deepEqual(initial.data.map((entry) => entry.id), ['first', 'second'])
+  const authorization = await background.dispatch({ type: 'MYPWDMG_AUTHORIZE_FILL', entryId: 'second' }, sender)
+  const fill = await background.dispatch({
+    type: 'MYPWDMG_GET_FILL',
+    entryId: 'second',
+    authorizationToken: authorization.data.token
+  }, sender)
+  assert.equal(fill.ok, true)
+
+  const ranked = await background.dispatch({ type: 'MYPWDMG_QUERY_MATCHES' }, sender)
+  assert.deepEqual(ranked.data.map((entry) => entry.id), ['second', 'first'])
+  assert.deepEqual(Array.from(background.getStorage()['recentFillEntryIdsByOrigin.v1']['https://login.example.com']), ['second'])
 })
 
 test('failed capture saves remain retryable and prompts never cross origins', async () => {

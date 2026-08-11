@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import json
 import shutil
@@ -23,10 +24,20 @@ from .crypto import (
     validate_envelope,
     validate_revision,
 )
-from .domain import domain_matches, find_entry, normalize_domain
+from .domain import (
+    domain_matches,
+    entry_matches_page,
+    find_entry,
+    normalize_autofill_match_mode,
+    normalize_autofill_rule,
+    normalize_domain,
+)
 from .file_lock import FileLockTimeoutError, exclusive_file_lock
+from .device_unlock import DEFAULT_REAUTH_SECONDS, DeviceUnlockStore
 from .legacy import legacy_file_digest, migrate_legacy_file
-from .paths import LEGACY_LOCAL_STORAGE_FILE, LOCAL_BACKUP_DIR, VAULT_FILE, ensure_app_dir
+from .attachment_store import AttachmentObjectStore
+from .portable_backup import PortableBackupArchive, inspect_portable_backup, write_portable_backup
+from .paths import ATTACHMENT_DIR, DEVICE_UNLOCK_FILE, LEGACY_LOCAL_STORAGE_FILE, LOCAL_BACKUP_DIR, VAULT_FILE, ensure_app_dir
 from .passkey_schema import normalize_passkey_state
 from .totp import generate_totp
 from .vault_index import VaultIndex
@@ -94,6 +105,8 @@ class VaultService:
         vault_path: Path | None = None,
         legacy_path: Path | None = None,
         session_seconds: int = SESSION_SECONDS,
+        device_unlock_store: DeviceUnlockStore | None = None,
+        attachment_store: AttachmentObjectStore | None = None,
     ) -> None:
         self._session_lock = threading.RLock()
         ensure_app_dir()
@@ -102,12 +115,36 @@ class VaultService:
         self.backup_dir = LOCAL_BACKUP_DIR if vault_path is None else self.vault_path.parent / "backups"
         self.legacy_path = legacy_path or LEGACY_LOCAL_STORAGE_FILE
         self.session_seconds = session_seconds
+        device_unlock_path = DEVICE_UNLOCK_FILE if vault_path is None else self.vault_path.parent / "device_unlock.json"
+        self.device_unlock_store = device_unlock_store or DeviceUnlockStore(device_unlock_path)
+        attachment_dir = ATTACHMENT_DIR if vault_path is None else self.vault_path.parent / "attachments"
+        self.attachment_store = attachment_store or AttachmentObjectStore(attachment_dir)
         self._payload: Dict[str, Any] | None = None
         self._key: VaultKey | None = None
         self._index: VaultIndex | None = None
         self._passwordless = False
         self._expires_at = 0.0
         self._vault_file_signature = (0, 0, 0)
+
+    @_serialized_session_call
+    def attachment_storage_state(self) -> Dict[str, int]:
+        return self.attachment_store.state()
+
+    @_serialized_session_call
+    def read_attachment_object(self, attachment_id: str) -> str:
+        return self.attachment_store.read(attachment_id)
+
+    @_serialized_session_call
+    def write_attachment_object(self, attachment_id: str, object_text: str) -> Dict[str, Any]:
+        return self.attachment_store.write(attachment_id, object_text)
+
+    @_serialized_session_call
+    def retain_attachment_object(self, attachment_id: str) -> Dict[str, Any]:
+        return self.attachment_store.retain(attachment_id)
+
+    @_serialized_session_call
+    def collect_attachment_objects(self, referenced_ids: Iterable[str]) -> Dict[str, int]:
+        return self.attachment_store.collect(referenced_ids)
 
     @_serialized_session_call
     def state(self) -> Dict[str, Any]:
@@ -130,6 +167,45 @@ class VaultService:
         }
 
     @_serialized_session_call
+    def device_unlock_state(self) -> Dict[str, Any]:
+        return self.device_unlock_store.state(self.vault_path)
+
+    @_serialized_session_call
+    def enable_device_unlock(
+        self,
+        password: str,
+        reauth_seconds: int = DEFAULT_REAUTH_SECONDS,
+    ) -> Dict[str, Any]:
+        if not self.vault_path.exists():
+            raise FileNotFoundError("Vault does not exist")
+        if not isinstance(password, str) or not password:
+            raise ValueError("主密码为空时无需启用设备快速解锁")
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            envelope = self._read_envelope()
+            _, key = decrypt_payload(password, envelope)
+            return self.device_unlock_store.enable(self.vault_path, key, reauth_seconds)
+
+    @_serialized_session_call
+    def disable_device_unlock(self) -> Dict[str, Any]:
+        self.device_unlock_store.disable()
+        return self.device_unlock_store.state(self.vault_path)
+
+    @_serialized_session_call
+    def read_device_unlock_key(self) -> Dict[str, Any]:
+        with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
+            key = self.device_unlock_store.load(self.vault_path)
+            try:
+                decrypt_payload_with_key(key, self._read_envelope())
+            except Exception:
+                self.device_unlock_store.disable()
+                raise
+        return {
+            "key": base64.b64encode(key.key).decode("ascii"),
+            "salt": base64.b64encode(key.salt).decode("ascii"),
+            "iterations": key.iterations,
+        }
+
+    @_serialized_session_call
     def read_vault_envelope(self) -> str:
         if not self.vault_path.exists():
             raise FileNotFoundError("Vault does not exist")
@@ -146,6 +222,7 @@ class VaultService:
         envelope = self._validate_backup_envelope(envelope_text)
         incoming_revision = envelope_revision(envelope)
         backup_path = None
+        key_binding_changed = False
         with exclusive_file_lock(self.vault_lock_path, timeout=VAULT_LOCK_TIMEOUT_SECONDS):
             current_envelope = self._read_envelope() if self.vault_path.exists() else None
             current_revision = envelope_revision(current_envelope) if current_envelope else 0
@@ -167,6 +244,9 @@ class VaultService:
             backup_path = self._backup_current_vault() if protect_backup else None
             self.vault_path.parent.mkdir(parents=True, exist_ok=True)
             self._write_envelope_unlocked(envelope)
+            key_binding_changed = current_envelope is None or self._envelope_key_binding(current_envelope) != self._envelope_key_binding(envelope)
+        if protect_backup or key_binding_changed:
+            self.device_unlock_store.disable()
         self.lock()
         return {
             "vaultPath": str(self.vault_path),
@@ -348,6 +428,7 @@ class VaultService:
             self._write_envelope_unlocked(envelope)
         self._set_payload(payload)
         self._key = key
+        self.device_unlock_store.disable()
         self._passwordless = new_password == ""
         self._vault_file_signature = self._current_vault_file_signature()
         self._refresh_session()
@@ -380,10 +461,61 @@ class VaultService:
         }
 
     @_serialized_session_call
-    def query_matches(self, hostname: str) -> List[Dict[str, Any]]:
-        host = normalize_domain(hostname)
+    def export_portable_backup(self, target_path: Path) -> Dict[str, Any]:
+        payload = self._require_payload()
+        result = write_portable_backup(
+            Path(target_path),
+            self._read_envelope_text(),
+            self._attachment_reference_hashes(payload.get("entries") or []),
+            self.attachment_store.read,
+        )
+        self._refresh_session()
+        return result
+
+    @_serialized_session_call
+    def inspect_portable_backup(self, package_path: Path) -> Dict[str, Any]:
+        self._require_payload()
+        result = inspect_portable_backup(Path(package_path))
+        self._refresh_session()
+        return result
+
+    @_serialized_session_call
+    def import_portable_backup(self, package_path: Path, password: str) -> Dict[str, Any]:
+        current = self._require_payload()
+        expected_revision = validate_revision(current["revision"])
+        with PortableBackupArchive(Path(package_path)) as archive:
+            incoming_envelope = self._validate_backup_envelope(archive.envelope_text)
+            incoming_payload, _incoming_key = decrypt_payload(password or "", incoming_envelope)
+            normalized = self._normalize_payload(incoming_payload)
+            if current.get("version", 1) == 2 and normalized["version"] < 2:
+                raise VaultConflictError("Refusing to replace a version 2 vault with version 1")
+            referenced_hashes = self._attachment_reference_hashes(normalized.get("entries") or [])
+            packaged_hashes = {
+                record["id"]: record["sha256"]
+                for record in archive.attachment_records
+            }
+            if referenced_hashes != packaged_hashes:
+                raise ValueError("Portable backup attachment set does not match its vault")
+            archive.verify_attachment_objects()
+            for attachment_id, object_text in archive.iter_attachment_objects():
+                self.attachment_store.write(attachment_id, object_text)
+            result = self.write_vault_envelope(
+                archive.envelope_text,
+                protect_backup=True,
+                expected_revision=expected_revision,
+            )
+        return {
+            "state": self.state(),
+            "backupPath": result["backupPath"],
+            "vaultPath": result["vaultPath"],
+            "attachmentCount": len(packaged_hashes),
+        }
+
+    @_serialized_session_call
+    def query_matches(self, hostname: str, page_url: str = "") -> List[Dict[str, Any]]:
+        host = normalize_domain(hostname, strip_www=False)
         matches: List[Dict[str, Any]] = []
-        for entry in self._require_index().matching_logins(host):
+        for entry in self._require_index().matching_logins(host, page_url):
             matches.append(self._match_summary(entry))
         self._refresh_session()
         return matches
@@ -394,12 +526,12 @@ class VaultService:
         return self._fill_payload(entry)
 
     @_serialized_session_call
-    def get_fill_payload_for_host(self, entry_id: str, hostname: str) -> Dict[str, Any]:
-        host = normalize_domain(hostname)
+    def get_fill_payload_for_host(self, entry_id: str, hostname: str, page_url: str = "") -> Dict[str, Any]:
+        host = normalize_domain(hostname, strip_www=False)
         if not host:
             raise ValueError("Fill hostname is required")
         entry = self._get_login(entry_id)
-        if not any(domain_matches(host, domain) for domain in entry.get("domains") or []):
+        if not entry_matches_page(entry, host, page_url):
             raise ValueError("Entry is not authorized for this site")
         return self._fill_payload(entry)
 
@@ -512,6 +644,7 @@ class VaultService:
             if self.vault_path.exists():
                 raise FileExistsError("Vault already exists; unlock it instead")
             self._write_envelope_unlocked(envelope)
+        self.device_unlock_store.disable()
         self._set_payload(normalized)
         self._key = key
         self._passwordless = password == ""
@@ -577,6 +710,11 @@ class VaultService:
         except json.JSONDecodeError as exc:
             raise VaultCryptoError("Vault file is malformed") from exc
         return validate_envelope(envelope)
+
+    @staticmethod
+    def _envelope_key_binding(envelope: Dict[str, Any]) -> tuple:
+        kdf = envelope.get("kdf") or {}
+        return (kdf.get("name"), kdf.get("iterations"), kdf.get("salt"))
 
     def _read_envelope_text(self) -> str:
         if not self.vault_path.exists():
@@ -679,8 +817,10 @@ class VaultService:
             raise ValueError("Vault settings must be an object")
         revision = validate_revision(payload["revision"]) if "revision" in payload else 1
         passkey_state = normalize_passkey_state(payload)
+        attachment_key = self._normalize_attachment_key(payload.get("attachmentKey"))
         normalized = {
             "version": passkey_state["version"],
+            **({"attachmentKey": attachment_key} if attachment_key else {}),
             **(
                 {"passkeySchemaVersion": passkey_state["passkeySchemaVersion"]}
                 if "passkeySchemaVersion" in passkey_state
@@ -699,7 +839,56 @@ class VaultService:
             **default_payload()["settings"]["oss"],
             **(normalized["settings"].get("oss") or {}),
         }
+        if not attachment_key and self._entries_contain_attachments(normalized["entries"]):
+            raise ValueError("Vault attachment key is missing")
         return normalized
+
+    @classmethod
+    def _entries_contain_attachments(cls, entries: List[Dict[str, Any]]) -> bool:
+        return any(
+            bool(entry.get("attachments"))
+            or cls._entries_contain_attachments(entry.get("children") or [])
+            for entry in entries
+        )
+
+    @classmethod
+    def _attachment_reference_hashes(cls, entries: List[Dict[str, Any]]) -> Dict[str, str]:
+        result: Dict[str, str] = {}
+        for entry in entries:
+            for attachment in entry.get("attachments") or []:
+                attachment_id = attachment["id"]
+                digest = attachment["ciphertextSha256"]
+                if attachment_id in result and result[attachment_id] != digest:
+                    raise ValueError("Conflicting attachment references use the same ID")
+                result[attachment_id] = digest
+            result.update(cls._merge_attachment_hashes(
+                result,
+                cls._attachment_reference_hashes(entry.get("children") or []),
+            ))
+        return result
+
+    @staticmethod
+    def _merge_attachment_hashes(current: Dict[str, str], incoming: Dict[str, str]) -> Dict[str, str]:
+        merged: Dict[str, str] = {}
+        for attachment_id, digest in incoming.items():
+            if attachment_id in current and current[attachment_id] != digest:
+                raise ValueError("Conflicting attachment references use the same ID")
+            merged[attachment_id] = digest
+        return merged
+
+    @staticmethod
+    def _normalize_attachment_key(value: Any) -> str:
+        if value is None or value == "":
+            return ""
+        if not isinstance(value, str):
+            raise ValueError("Vault attachment key is invalid")
+        try:
+            raw = base64.b64decode(value.encode("ascii"), validate=True)
+        except Exception as exc:
+            raise ValueError("Vault attachment key is invalid") from exc
+        if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != value:
+            raise ValueError("Vault attachment key is invalid")
+        return value
 
     def _entry_id_sequence(self, entries: List[Dict[str, Any]]) -> List[str]:
         result: List[str] = []
@@ -744,12 +933,13 @@ class VaultService:
             entry_id = f"{original_id}-duplicate-{duplicate_index}"
             duplicate_index += 1
         seen_ids.add(entry_id)
+        autofill_match_mode = normalize_autofill_match_mode(entry.get("autofillMatchMode"))
         raw_domains = entry.get("domains") or []
         if not isinstance(raw_domains, list):
             raise ValueError("Vault entry domains must be an array")
         domains: List[str] = []
         for raw_domain in raw_domains:
-            domain = normalize_domain(str(raw_domain or ""))
+            domain = normalize_autofill_rule(str(raw_domain or ""), autofill_match_mode)
             if domain and domain not in domains:
                 domains.append(domain)
         normalized = {
@@ -761,6 +951,7 @@ class VaultService:
             "statusUpdatedAt": int(entry.get("statusUpdatedAt") or 0),
             "deletedAt": int(entry.get("deletedAt") or 0),
             "domains": domains,
+            "autofillMatchMode": autofill_match_mode,
         }
         if kind == "folder":
             children = entry.get("children") or []
@@ -784,10 +975,56 @@ class VaultService:
                     "note": str(entry.get("note") or ""),
                     "totpSecret": str(entry.get("totpSecret") or ""),
                     "customFields": self._normalize_custom_fields(entry.get("customFields")),
+                    "attachments": self._normalize_attachments(entry.get("attachments")),
                     "history": copy.deepcopy(entry.get("history")) if isinstance(entry.get("history"), list) else [],
                     "children": [],
                 }
             )
+        return normalized
+
+    def _normalize_attachments(self, value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("Vault entry attachments must be an array")
+        if len(value) > 100:
+            raise ValueError("Vault entry attachment limit exceeded")
+        normalized: List[Dict[str, Any]] = []
+        seen_ids = set()
+        for raw in value:
+            if not isinstance(raw, dict):
+                raise ValueError("Vault attachment reference is malformed")
+            attachment_id = str(raw.get("id") or "").lower()
+            name = str(raw.get("name") or "").strip()
+            mime_type = str(raw.get("mimeType") or "").lower()
+            size = raw.get("size")
+            created_at = raw.get("createdAt")
+            sha256 = str(raw.get("sha256") or "").lower()
+            ciphertext_sha256 = str(raw.get("ciphertextSha256") or "").lower()
+            if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", attachment_id):
+                raise ValueError("Vault attachment ID is invalid")
+            if attachment_id in seen_ids:
+                raise ValueError("Duplicate attachment reference")
+            if not name or len(name) > 255 or "\x00" in name or "/" in name or "\\" in name:
+                raise ValueError("Vault attachment name is invalid")
+            if not mime_type or len(mime_type) > 127 or not re.fullmatch(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*", mime_type):
+                raise ValueError("Vault attachment MIME type is invalid")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > 10 * 1024 * 1024:
+                raise ValueError("Vault attachment size is invalid")
+            if isinstance(created_at, bool) or not isinstance(created_at, int) or created_at < 1:
+                raise ValueError("Vault attachment timestamp is invalid")
+            if not re.fullmatch(r"[0-9a-f]{64}", sha256) or not re.fullmatch(r"[0-9a-f]{64}", ciphertext_sha256):
+                raise ValueError("Vault attachment hash is invalid")
+            seen_ids.add(attachment_id)
+            normalized.append({
+                "id": attachment_id,
+                "name": name,
+                "mimeType": mime_type,
+                "size": size,
+                "sha256": sha256,
+                "ciphertextSha256": ciphertext_sha256,
+                "createdAt": created_at,
+            })
         return normalized
 
     def _normalize_custom_fields(self, value: Any) -> List[Dict[str, Any]]:
@@ -996,6 +1233,7 @@ class VaultService:
             "email": entry.get("email", ""),
             "phone": entry.get("phone", ""),
             "domains": entry.get("domains", []),
+            "autofillMatchMode": normalize_autofill_match_mode(entry.get("autofillMatchMode")),
             "loginAccountSource": entry.get("loginAccountSource", "auto"),
         }
 
@@ -1008,6 +1246,7 @@ class VaultService:
             "phone": entry.get("phone", ""),
             "loginAccountSource": entry.get("loginAccountSource", "auto"),
             "domains": entry.get("domains", []),
+            "autofillMatchMode": normalize_autofill_match_mode(entry.get("autofillMatchMode")),
             "hasPassword": bool(entry.get("password")),
             "hasTotp": bool(entry.get("totpSecret")),
         }

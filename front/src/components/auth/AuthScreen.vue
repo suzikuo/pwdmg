@@ -24,6 +24,16 @@
         @update:model-value="emit('update:password', String($event))"
       />
       <van-button block type="primary" native-type="submit" :loading="busy">解锁</van-button>
+      <van-button
+        v-if="deviceUnlockEnabled"
+        block
+        plain
+        type="primary"
+        icon="shield-o"
+        native-type="button"
+        :loading="busy"
+        @click="emit('quick-unlock')"
+      >设备快速解锁</van-button>
     </van-form>
 
     <van-form v-else class="auth-card" @submit="emit('create')">
@@ -67,12 +77,14 @@ defineProps<{
   newPassword: string
   confirmPassword: string
   importLegacy: boolean
+  deviceUnlockEnabled: boolean
 }>()
 
 const emit = defineEmits<{
   retry: []
   unlock: []
   create: []
+  'quick-unlock': []
   'update:password': [value: string]
   'update:newPassword': [value: string]
   'update:confirmPassword': [value: string]

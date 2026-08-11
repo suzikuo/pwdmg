@@ -66,6 +66,11 @@ class PasskeySchemaTests(unittest.TestCase):
         sticky = normalize_passkey_state({**default_payload(), "version": 2})
         self.assertEqual(sticky["version"], 2)
 
+    def test_optional_user_label_is_normalized_without_schema_bump(self):
+        normalized = normalize_passkey_state({"passkeys": [sample_passkey(label="  Work key  ")]})
+        self.assertEqual(normalized["passkeySchemaVersion"], 1)
+        self.assertEqual(normalized["passkeys"][0]["label"], "Work key")
+
     def test_malformed_and_duplicate_credentials_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "version"):
             normalize_passkey_state({"version": 3})

@@ -23,7 +23,7 @@ final class PasskeySchema {
         "internal", "hybrid", "usb", "nfc", "ble", "smart-card"
     };
     private static final Set<String> PASSKEY_FIELDS = new HashSet<>(Arrays.asList(
-        "id", "credentialId", "rpId", "rpName", "userHandle", "userName", "userDisplayName",
+        "id", "label", "credentialId", "rpId", "rpName", "userHandle", "userName", "userDisplayName",
         "algorithm", "publicKeyCose", "privateKeyPkcs8", "discoverable", "backupEligible",
         "backupState", "transports", "entryId", "createdAt", "updatedAt"
     ));
@@ -132,6 +132,7 @@ final class PasskeySchema {
                 .put("createdAt", createdAt)
                 .put("updatedAt", updatedAt);
 
+            putOptionalText(item, raw, "label", field + ".label", MAX_DISPLAY_LENGTH);
             putOptionalText(item, raw, "rpName", field + ".rpName", MAX_DISPLAY_LENGTH);
             putOptionalText(item, raw, "userDisplayName", field + ".userDisplayName", MAX_DISPLAY_LENGTH);
             putOptionalText(item, raw, "entryId", field + ".entryId", MAX_ID_LENGTH);

@@ -52,3 +52,21 @@ test('other item filter searches only unprotected custom fields', () => {
   assert.equal(filterVaultEntries(items, 'Example Bank', 'other')[0].id, 'card-1')
   assert.deepEqual(filterVaultEntries(items, '4111111111111111', 'other'), [])
 })
+
+test('favorite filter preserves matching folder ancestors', () => {
+  const result = filterVaultEntries(entries, '', 'favorites', {
+    favoriteIds: new Set(['login-a'])
+  })
+  assert.deepEqual(result.map((entry) => entry.id), ['folder'])
+  assert.deepEqual(result[0].children.map((entry) => entry.id), ['login-a'])
+})
+
+test('recent filter orders opened entries newest first', () => {
+  const result = filterVaultEntries([
+    entries[0].children[0],
+    entries[0].children[1]
+  ], '', 'recent', {
+    recentIds: ['login-b', 'login-a']
+  })
+  assert.deepEqual(result.map((entry) => entry.id), ['login-b', 'login-a'])
+})

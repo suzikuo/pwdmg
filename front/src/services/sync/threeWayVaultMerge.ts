@@ -4,7 +4,7 @@ import { canonicalJson } from './canonicalJson.ts'
 import { mergePasskeyState, type PasskeyMergeConflict } from './passkeyRemoteGate.ts'
 
 export type VaultMergeConflict = {
-  scope: 'entry' | 'passkey' | 'order'
+  scope: 'entry' | 'passkey' | 'order' | 'attachment-key'
   id: string
   field: string
   reason: 'concurrent-update' | 'delete-update' | 'parent-missing' | 'order-cycle' | PasskeyMergeConflict['reason']
@@ -19,8 +19,8 @@ type FlatEntry = Omit<VaultEntry, 'children'> & { parentId: string }
 
 const ENTRY_FIELDS: (keyof FlatEntry)[] = [
   'kind', 'title', 'status', 'statusReason', 'statusUpdatedAt', 'deletedAt', 'domains',
-  'username', 'email', 'password', 'phone', 'loginAccountSource', 'note', 'totpSecret',
-  'customFields', 'history', 'parentId'
+  'autofillMatchMode', 'username', 'email', 'password', 'phone', 'loginAccountSource', 'note', 'totpSecret',
+  'customFields', 'attachments', 'history', 'parentId'
 ]
 
 export function mergeVaultPayloads(
@@ -55,6 +55,12 @@ export function mergeVaultPayloads(
   }
 
   const entries = rebuildEntries(merged, baseIndex.orders, localIndex.orders, remoteIndex.orders, conflicts)
+  const attachmentKey = mergeAttachmentKey(
+    ancestor.attachmentKey,
+    local.attachmentKey,
+    remote.attachmentKey,
+    conflicts
+  )
   const passkeys = mergePasskeyState(ancestor, local, remote)
   conflicts.push(...passkeys.conflicts.map((conflict) => ({
     scope: 'passkey' as const,
@@ -66,6 +72,7 @@ export function mergeVaultPayloads(
   return {
     payload: {
       ...clone(local),
+      ...(attachmentKey ? { attachmentKey } : { attachmentKey: undefined }),
       version: passkeys.version,
       ...(passkeys.version === 2 ? { passkeySchemaVersion: 1 as const } : { passkeySchemaVersion: undefined }),
       revision: local.revision,
@@ -76,6 +83,19 @@ export function mergeVaultPayloads(
     },
     conflicts
   }
+}
+
+function mergeAttachmentKey(
+  base: string | undefined,
+  local: string | undefined,
+  remote: string | undefined,
+  conflicts: VaultMergeConflict[]
+) {
+  if (local === remote) return local
+  if (local === base) return remote
+  if (remote === base) return local
+  conflicts.push({ scope: 'attachment-key', id: 'vault', field: 'attachmentKey', reason: 'concurrent-update' })
+  return local || remote
 }
 
 function mergeEntry(

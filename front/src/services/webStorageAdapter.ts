@@ -1,5 +1,5 @@
 import { emptyPluginListenerState, fail, ok } from './apiTypes'
-import { idbGet, idbSet, idbSetIfCurrentRevision, idbSetIfRevision } from './indexedDbStore'
+import { idbDelete, idbGet, idbSet, idbSetIfCurrentRevision, idbSetIfRevision } from './indexedDbStore'
 import { clearLegacyWebData, currentLegacyStorageSnapshot, hasLegacyWebData } from './legacyWeb'
 import type { VaultStorageAdapter } from './storageTypes'
 
@@ -14,6 +14,14 @@ const BACKUPS_KEY = 'importBackups'
 const MAX_IMPORT_BACKUPS = 5
 const VAULT_PATH_LABEL = 'IndexedDB:mypwdmg-web-vault/vault'
 const PACKAGED_APP_VERSION = String(import.meta.env.PACKAGE_VERSION || '0.0.0')
+const ATTACHMENT_MANIFEST_KEY = 'attachmentManifest'
+const ATTACHMENT_OBJECT_PREFIX = 'attachmentObject:'
+const ATTACHMENT_RETAINED_PREFIX = 'attachmentRetained:'
+const MAX_ATTACHMENT_FILE_BYTES = 10 * 1024 * 1024
+const MAX_ATTACHMENT_STORE_BYTES = 256 * 1024 * 1024
+
+type WebAttachmentManifestItem = { objectBytes: number; retained: boolean; deletedAt?: number }
+type WebAttachmentManifest = Record<string, WebAttachmentManifestItem>
 
 export const webStorageAdapter: VaultStorageAdapter = {
   getAppInfo: async () => ok({
@@ -47,6 +55,62 @@ export const webStorageAdapter: VaultStorageAdapter = {
     return { vaultPath: VAULT_PATH_LABEL, backupPath }
   }),
   readLegacyLocalStorage: async () => ok(JSON.stringify(currentLegacyStorageSnapshot())),
+  getAttachmentStorageState: () => guard(async () => {
+    const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
+    const active = Object.values(manifest).filter((item) => !item.retained)
+    const retained = Object.values(manifest).filter((item) => item.retained)
+    return {
+      maxFileBytes: MAX_ATTACHMENT_FILE_BYTES,
+      quotaBytes: MAX_ATTACHMENT_STORE_BYTES,
+      activeCount: active.length,
+      activeBytes: active.reduce((total, item) => total + item.objectBytes, 0),
+      retainedCount: retained.length,
+      retainedBytes: retained.reduce((total, item) => total + item.objectBytes, 0)
+    }
+  }),
+  readAttachmentObject: (attachmentId) => guard(async () => {
+    const activeKey = ATTACHMENT_OBJECT_PREFIX + attachmentId
+    let text = await idbGet<string>(activeKey)
+    if (!text) {
+      const retainedKey = ATTACHMENT_RETAINED_PREFIX + attachmentId
+      text = await idbGet<string>(retainedKey)
+      if (text) {
+        await idbSet(activeKey, text)
+        await idbDelete(retainedKey)
+        const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
+        if (manifest[attachmentId]) manifest[attachmentId] = { ...manifest[attachmentId], retained: false, deletedAt: undefined }
+        await idbSet(ATTACHMENT_MANIFEST_KEY, manifest)
+      }
+    }
+    if (!text) throw new Error('Attachment object does not exist')
+    return text
+  }),
+  writeAttachmentObject: (attachmentId, objectText) => guard(async () => {
+    const key = ATTACHMENT_OBJECT_PREFIX + attachmentId
+    const existing = await idbGet<string>(key)
+    if (existing && existing !== objectText) throw new Error('Attachment objects are immutable')
+    const objectBytes = new TextEncoder().encode(objectText).byteLength
+    const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
+    const storedBytes = Object.values(manifest).reduce((total, item) => total + item.objectBytes, 0)
+    if (!existing && storedBytes + objectBytes > MAX_ATTACHMENT_STORE_BYTES) throw new Error('Attachment storage quota exceeded')
+    await idbSet(key, objectText)
+    manifest[attachmentId] = { objectBytes, retained: false }
+    await idbSet(ATTACHMENT_MANIFEST_KEY, manifest)
+    return { attachmentId, objectBytes }
+  }),
+  retainAttachmentObject: (attachmentId) => guard(async () => {
+    const key = ATTACHMENT_OBJECT_PREFIX + attachmentId
+    const text = await idbGet<string>(key)
+    if (!text) return { attachmentId, retained: false }
+    const deletedAt = Math.floor(Date.now() / 1000)
+    await idbSet(ATTACHMENT_RETAINED_PREFIX + attachmentId, text)
+    await idbDelete(key)
+    const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
+    if (manifest[attachmentId]) manifest[attachmentId] = { ...manifest[attachmentId], retained: true, deletedAt }
+    await idbSet(ATTACHMENT_MANIFEST_KEY, manifest)
+    return { attachmentId, retained: true, deletedAt }
+  }),
+  collectAttachmentObjects: async () => ok({ retained: 0, deleted: 0 }),
   cleanupLegacyStorage: (expectedDigest) => guard(async () => {
     const current = JSON.stringify(currentLegacyStorageSnapshot())
     if (await sha256Text(current) !== expectedDigest) throw new Error('Legacy data changed during migration')

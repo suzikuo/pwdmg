@@ -1,4 +1,5 @@
-import type { EntryKind, EntryStatus, LoginAccountSource, VaultCustomField, VaultCustomFieldType, VaultEntry, VaultPayload } from '../types'
+import type { EntryKind, EntryStatus, LoginAccountSource, VaultAttachment, VaultCustomField, VaultCustomFieldType, VaultEntry, VaultPayload } from '../types'
+import { normalizeAutofillMatchMode } from './autofillRules.ts'
 import { limitEntryHistory } from './entryHistory.ts'
 import { normalizePasskeyState } from './passkeySchema.ts'
 import { secureRandomId } from './secureRandom.ts'
@@ -41,11 +42,15 @@ export function cloneVaultPayload(payload: VaultPayload): VaultPayload {
 export function normalizeVaultPayload(payload: Partial<VaultPayload>): VaultPayload {
   const defaults = defaultVaultPayload()
   const passkeyState = normalizePasskeyState(payload as unknown as Record<string, unknown>)
+  const attachmentKey = normalizeAttachmentKey(payload.attachmentKey)
+  const entries = normalizeEntries(payload.entries || [])
+  if (!attachmentKey && entriesContainAttachments(entries)) throw new Error('Vault attachment key is missing')
   return {
     version: passkeyState.version,
+    ...(attachmentKey ? { attachmentKey } : {}),
     ...(passkeyState.passkeySchemaVersion ? { passkeySchemaVersion: passkeyState.passkeySchemaVersion } : {}),
     revision: normalizeRevision(payload.revision),
-    entries: normalizeEntries(payload.entries || []),
+    entries,
     passkeys: passkeyState.passkeys,
     passkeyTombstones: passkeyState.passkeyTombstones,
     settings: {
@@ -56,6 +61,22 @@ export function normalizeVaultPayload(payload: Partial<VaultPayload>): VaultPayl
     },
     updatedAt: Number(payload.updatedAt || nowSeconds())
   }
+}
+
+function entriesContainAttachments(entries: VaultEntry[]): boolean {
+  return entries.some((entry) => Boolean(entry.attachments?.length) || entriesContainAttachments(entry.children || []))
+}
+
+function normalizeAttachmentKey(value: unknown) {
+  if (value === undefined || value === '') return ''
+  if (typeof value !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(value)) throw new Error('Vault attachment key is invalid')
+  try {
+    const binary = atob(value)
+    if (binary.length !== 32 || btoa(binary) !== value) throw new Error('invalid')
+  } catch {
+    throw new Error('Vault attachment key is invalid')
+  }
+  return value
 }
 
 function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), parentPath: number[] = []): VaultEntry[] {
@@ -78,6 +99,7 @@ function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), pa
       statusUpdatedAt: Number(entry.statusUpdatedAt || 0),
       deletedAt: Number(entry.deletedAt || 0),
       domains: Array.isArray(entry.domains) ? entry.domains.filter(Boolean) : [],
+      autofillMatchMode: normalizeAutofillMatchMode(entry.autofillMatchMode),
       username: entry.username || '',
       email: entry.email || '',
       password: entry.password || '',
@@ -86,9 +108,37 @@ function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), pa
       note: entry.note || '',
       totpSecret: entry.totpSecret || '',
       customFields: normalizeCustomFields(entry.customFields),
+      attachments: normalizeAttachments(entry.attachments),
       history: Array.isArray(entry.history) ? limitEntryHistory(entry.history) : [],
       children: entry.kind === 'folder' ? normalizeEntries(entry.children || [], seenIds, path) : []
     }
+  })
+}
+
+function normalizeAttachments(value: unknown): VaultAttachment[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('Vault entry attachments must be an array')
+  if (value.length > 100) throw new Error('Vault entry attachment limit exceeded')
+  const seen = new Set<string>()
+  return value.map((raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Vault attachment reference is malformed')
+    const attachment = raw as Partial<VaultAttachment>
+    const id = String(attachment.id || '').toLowerCase()
+    const name = String(attachment.name || '').trim()
+    const mimeType = String(attachment.mimeType || '').toLowerCase()
+    const size = Number(attachment.size)
+    const createdAt = Number(attachment.createdAt)
+    const sha256 = String(attachment.sha256 || '').toLowerCase()
+    const ciphertextSha256 = String(attachment.ciphertextSha256 || '').toLowerCase()
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) throw new Error('Vault attachment ID is invalid')
+    if (seen.has(id)) throw new Error('Duplicate attachment reference')
+    if (!name || name.length > 255 || /[\0\\/]/.test(name)) throw new Error('Vault attachment name is invalid')
+    if (!mimeType || mimeType.length > 127 || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(mimeType)) throw new Error('Vault attachment MIME type is invalid')
+    if (!Number.isSafeInteger(size) || size < 0 || size > 10 * 1024 * 1024) throw new Error('Vault attachment size is invalid')
+    if (!Number.isSafeInteger(createdAt) || createdAt < 1) throw new Error('Vault attachment timestamp is invalid')
+    if (!/^[0-9a-f]{64}$/.test(sha256) || !/^[0-9a-f]{64}$/.test(ciphertextSha256)) throw new Error('Vault attachment hash is invalid')
+    seen.add(id)
+    return { id, name, mimeType, size, sha256, ciphertextSha256, createdAt }
   })
 }
 

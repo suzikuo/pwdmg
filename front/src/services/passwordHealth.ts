@@ -1,10 +1,15 @@
-import type { VaultEntry } from '../types'
+import type { EntryKind, VaultEntry } from '../types'
 
 export type PasswordHealthIssue =
   | 'missing'
   | 'weak'
   | 'reused'
   | 'stale'
+  | 'insecure-url'
+  | 'duplicate'
+  | 'expired'
+  | 'expiring'
+  | 'missing-totp'
 
 export type PasswordWeaknessReason =
   | 'too-short'
@@ -33,11 +38,23 @@ export interface PasswordAgeAssessment {
 
 export interface PasswordHealthEntryResult {
   entryId: string
+  kind: EntryKind
   title: string
   issues: PasswordHealthIssue[]
-  strength: PasswordStrengthAssessment
+  strength?: PasswordStrengthAssessment
   reuseGroupId?: string
+  duplicateGroupId?: string
   passwordAge?: PasswordAgeAssessment
+  insecureUrlCount?: number
+  expirations?: PasswordHealthExpiration[]
+}
+
+export interface PasswordHealthExpiration {
+  fieldId: string
+  label: string
+  expiresAt: number
+  daysRemaining: number
+  status: 'expired' | 'expiring'
 }
 
 export interface PasswordReuseGroup {
@@ -49,7 +66,18 @@ export interface PasswordReuseGroup {
   }>
 }
 
+export interface PasswordDuplicateGroup {
+  id: string
+  count: number
+  entries: Array<{
+    entryId: string
+    kind: EntryKind
+    title: string
+  }>
+}
+
 export interface PasswordHealthSummary {
+  scannedEntryCount: number
   analyzedCount: number
   atRiskCount: number
   missingCount: number
@@ -57,6 +85,12 @@ export interface PasswordHealthSummary {
   reusedEntryCount: number
   reuseGroupCount: number
   staleCount: number
+  insecureUrlCount: number
+  duplicateEntryCount: number
+  duplicateGroupCount: number
+  expiredCount: number
+  expiringCount: number
+  missingTotpCount: number
   averageScore: number
 }
 
@@ -64,6 +98,7 @@ export interface PasswordHealthReport {
   summary: PasswordHealthSummary
   entries: PasswordHealthEntryResult[]
   reuseGroups: PasswordReuseGroup[]
+  duplicateGroups: PasswordDuplicateGroup[]
   truncated: boolean
   skippedDuplicateIds: number
 }
@@ -75,12 +110,15 @@ export interface PasswordHealthOptions {
   maxVisitedNodes?: number
   maxDepth?: number
   getPasswordChangedAtMs?: (entry: VaultEntry) => number | undefined
+  expiringWithinDays?: number
+  totpExpectedIds?: ReadonlySet<string>
 }
 
 interface Candidate {
   entry: VaultEntry
   password: string
   result: PasswordHealthEntryResult
+  duplicateKey: string
 }
 
 const DAY_MS = 86_400_000
@@ -88,8 +126,11 @@ const DEFAULT_STALE_AFTER_DAYS = 365
 const DEFAULT_MAX_ENTRIES = 10_000
 const DEFAULT_MAX_VISITED_NODES = 50_000
 const DEFAULT_MAX_DEPTH = 64
+const DEFAULT_EXPIRING_WITHIN_DAYS = 30
 const MAX_PASSWORD_CODE_UNITS = 8_192
 const MAX_ANALYZED_CODE_POINTS = 4_096
+const MAX_HEALTH_CUSTOM_FIELDS = 256
+const MAX_EXPIRATIONS_PER_ENTRY = 32
 
 const COMMON_PASSWORDS = new Set([
   '123456', '12345678', '123456789', '111111', '000000', 'abc123', 'admin',
@@ -107,7 +148,10 @@ const REASON_ORDER: PasswordWeaknessReason[] = [
   'low-estimated-entropy'
 ]
 
-const ISSUE_ORDER: PasswordHealthIssue[] = ['missing', 'weak', 'reused', 'stale']
+const ISSUE_ORDER: PasswordHealthIssue[] = [
+  'expired', 'missing', 'weak', 'reused', 'insecure-url', 'missing-totp',
+  'expiring', 'stale', 'duplicate'
+]
 
 export function analyzePasswordHealth(
   entries: readonly VaultEntry[],
@@ -120,6 +164,7 @@ export function analyzePasswordHealth(
   const maxEntries = clampInteger(options.maxEntries, DEFAULT_MAX_ENTRIES, 1, 100_000)
   const maxVisitedNodes = clampInteger(options.maxVisitedNodes, DEFAULT_MAX_VISITED_NODES, 1, 500_000)
   const maxDepth = clampInteger(options.maxDepth, DEFAULT_MAX_DEPTH, 1, 512)
+  const expiringWithinDays = clampInteger(options.expiringWithinDays, DEFAULT_EXPIRING_WITHIN_DAYS, 1, 3_650)
   const seenObjects = new WeakSet<object>()
   const seenIds = new Set<string>()
   const candidates: Candidate[] = []
@@ -146,30 +191,50 @@ export function analyzePasswordHealth(
       visitedNodes += 1
 
       const inactive = ancestorInactive || !isActive(rawEntry)
-      if (!inactive && rawEntry.kind === 'login') {
+      if (!inactive && rawEntry.kind !== 'folder') {
         const entryId = typeof rawEntry.id === 'string' ? rawEntry.id : ''
         if (seenIds.has(entryId)) {
           skippedDuplicateIds += 1
         } else {
           seenIds.add(entryId)
-          const password = typeof rawEntry.password === 'string' ? rawEntry.password : ''
-          const strength = estimatePasswordStrength(password, rawEntry)
+          const password = rawEntry.kind === 'login' && typeof rawEntry.password === 'string'
+            ? rawEntry.password
+            : ''
+          const strength = rawEntry.kind === 'login'
+            ? estimatePasswordStrength(password, rawEntry)
+            : undefined
           const issues: PasswordHealthIssue[] = []
-          if (!password.length) issues.push('missing')
-          else if (strength.weak) issues.push('weak')
-          const passwordAge = password.length
+          if (rawEntry.kind === 'login' && !password.length) issues.push('missing')
+          else if (strength?.weak) issues.push('weak')
+          const passwordAge = rawEntry.kind === 'login' && password.length
             ? assessPasswordAge(rawEntry, now, staleAfterDays, options.getPasswordChangedAtMs)
             : undefined
           if (passwordAge?.stale) issues.push('stale')
+          const insecureUrlCount = countInsecureUrls(rawEntry)
+          if (insecureUrlCount > 0) issues.push('insecure-url')
+          const expirations = collectExpirations(rawEntry, now, expiringWithinDays)
+          if (expirations.some((item) => item.status === 'expired')) issues.push('expired')
+          if (expirations.some((item) => item.status === 'expiring')) issues.push('expiring')
+          if (
+            rawEntry.kind === 'login'
+            && options.totpExpectedIds?.has(entryId)
+            && !String(rawEntry.totpSecret || '').trim()
+          ) {
+            issues.push('missing-totp')
+          }
           candidates.push({
             entry: rawEntry,
             password,
+            duplicateKey: exactDuplicateKey(rawEntry),
             result: {
               entryId,
+              kind: rawEntry.kind,
               title: safeTitle(rawEntry.title),
-              issues,
-              strength,
-              ...(passwordAge ? { passwordAge } : {})
+              issues: sortIssues(issues),
+              ...(strength ? { strength } : {}),
+              ...(passwordAge ? { passwordAge } : {}),
+              ...(insecureUrlCount ? { insecureUrlCount } : {}),
+              ...(expirations.length ? { expirations } : {})
             }
           })
         }
@@ -182,26 +247,36 @@ export function analyzePasswordHealth(
 
   visit(Array.isArray(entries) ? entries : [], 0, false)
   const reuseGroups = buildReuseGroups(candidates)
+  const duplicateGroups = buildDuplicateGroups(candidates)
   const entriesResult = candidates.map(({ result }) => result).sort(compareEntryResults)
   const missingCount = entriesResult.filter((item) => item.issues.includes('missing')).length
   const weakCount = entriesResult.filter((item) => item.issues.includes('weak')).length
   const reusedEntryCount = entriesResult.filter((item) => item.issues.includes('reused')).length
   const staleCount = entriesResult.filter((item) => item.issues.includes('stale')).length
-  const scoreTotal = entriesResult.reduce((sum, item) => sum + item.strength.score, 0)
+  const loginResults = entriesResult.filter((item) => item.kind === 'login' && item.strength)
+  const scoreTotal = loginResults.reduce((sum, item) => sum + (item.strength?.score || 0), 0)
 
   return {
     summary: {
-      analyzedCount: entriesResult.length,
+      scannedEntryCount: entriesResult.length,
+      analyzedCount: loginResults.length,
       atRiskCount: entriesResult.filter((item) => item.issues.length > 0).length,
       missingCount,
       weakCount,
       reusedEntryCount,
       reuseGroupCount: reuseGroups.length,
       staleCount,
-      averageScore: entriesResult.length ? round(scoreTotal / entriesResult.length, 2) : 0
+      insecureUrlCount: entriesResult.filter((item) => item.issues.includes('insecure-url')).length,
+      duplicateEntryCount: entriesResult.filter((item) => item.issues.includes('duplicate')).length,
+      duplicateGroupCount: duplicateGroups.length,
+      expiredCount: entriesResult.filter((item) => item.issues.includes('expired')).length,
+      expiringCount: entriesResult.filter((item) => item.issues.includes('expiring')).length,
+      missingTotpCount: entriesResult.filter((item) => item.issues.includes('missing-totp')).length,
+      averageScore: loginResults.length ? round(scoreTotal / loginResults.length, 2) : 0
     },
     entries: entriesResult,
     reuseGroups,
+    duplicateGroups,
     truncated,
     skippedDuplicateIds
   }
@@ -310,7 +385,7 @@ function buildReuseGroups(candidates: Candidate[]): PasswordReuseGroup[] {
     for (const candidate of group) {
       candidate.result.reuseGroupId = id
       candidate.result.issues.push('reused')
-      candidate.result.issues.sort((left, right) => ISSUE_ORDER.indexOf(left) - ISSUE_ORDER.indexOf(right))
+      candidate.result.issues = sortIssues(candidate.result.issues)
     }
     return {
       id,
@@ -318,6 +393,224 @@ function buildReuseGroups(candidates: Candidate[]): PasswordReuseGroup[] {
       entries: group.map(({ result }) => ({ entryId: result.entryId, title: result.title }))
     }
   })
+}
+
+function buildDuplicateGroups(candidates: Candidate[]): PasswordDuplicateGroup[] {
+  const byContent = new Map<string, Candidate[]>()
+  for (const candidate of candidates) {
+    const group = byContent.get(candidate.duplicateKey)
+    if (group) group.push(candidate)
+    else byContent.set(candidate.duplicateKey, [candidate])
+  }
+  const groups = [...byContent.values()]
+    .filter((group) => group.length > 1)
+    .flatMap((bucket) => partitionExactDuplicates(bucket))
+    .filter((group) => group.length > 1)
+    .map((group) => group.sort((left, right) => compareRefs(left.result, right.result)))
+    .sort((left, right) => right.length - left.length || compareRefs(left[0].result, right[0].result))
+
+  return groups.map((group, index) => {
+    const id = `duplicate-${index + 1}`
+    for (const candidate of group) {
+      candidate.result.duplicateGroupId = id
+      candidate.result.issues = sortIssues([...candidate.result.issues, 'duplicate'])
+    }
+    return {
+      id,
+      count: group.length,
+      entries: group.map(({ result }) => ({
+        entryId: result.entryId,
+        kind: result.kind,
+        title: result.title
+      }))
+    }
+  })
+}
+
+function exactDuplicateKey(entry: VaultEntry): string {
+  let left = 0x811c9dc5
+  let right = 0x9e3779b9
+  let totalLength = 0
+  const feed = (value: unknown) => {
+    const text = exactText(value)
+    totalLength += text.length
+    left = hashText(left, text, 0x01000193)
+    right = hashText(right, text, 0x85ebca6b)
+    left = hashText(left, `#${text.length};`, 0x01000193)
+    right = hashText(right, `#${text.length};`, 0x85ebca6b)
+  }
+
+  feed(entry.kind)
+  feed(entry.title)
+  for (const domain of normalizedDomains(entry)) feed(domain)
+  feed(entry.username)
+  feed(entry.email)
+  feed(entry.password)
+  feed(entry.phone)
+  feed(entry.autofillMatchMode || 'base-domain')
+  feed(entry.loginAccountSource || 'auto')
+  feed(entry.note)
+  feed(entry.totpSecret)
+  const customFields = Array.isArray(entry.customFields) ? entry.customFields : []
+  feed(customFields.length)
+  for (const field of customFields.slice(0, MAX_HEALTH_CUSTOM_FIELDS)) {
+    feed(field?.label)
+    feed(field?.value)
+    feed(field?.type)
+    feed(field?.protected ? '1' : '0')
+  }
+  if (customFields.length > MAX_HEALTH_CUSTOM_FIELDS) feed(`overflow:${entry.id}`)
+  return `${left >>> 0}:${right >>> 0}:${totalLength}`
+}
+
+function partitionExactDuplicates(bucket: Candidate[]): Candidate[][] {
+  const groups: Candidate[][] = []
+  for (const candidate of bucket) {
+    const group = groups.find((items) => exactDuplicateContentEqual(items[0].entry, candidate.entry))
+    if (group) group.push(candidate)
+    else groups.push([candidate])
+  }
+  return groups
+}
+
+function exactDuplicateContentEqual(left: VaultEntry, right: VaultEntry): boolean {
+  if (left.kind !== right.kind) return false
+  const scalarFields: Array<keyof VaultEntry> = [
+    'title', 'username', 'email', 'password', 'phone', 'note', 'totpSecret'
+  ]
+  if (scalarFields.some((field) => exactText(left[field]) !== exactText(right[field]))) return false
+  if (exactText(left.autofillMatchMode || 'base-domain') !== exactText(right.autofillMatchMode || 'base-domain')) return false
+  if (exactText(left.loginAccountSource || 'auto') !== exactText(right.loginAccountSource || 'auto')) return false
+
+  const leftDomains = normalizedDomains(left)
+  const rightDomains = normalizedDomains(right)
+  if (!sameStrings(leftDomains, rightDomains)) return false
+
+  const leftFields = Array.isArray(left.customFields) ? left.customFields : []
+  const rightFields = Array.isArray(right.customFields) ? right.customFields : []
+  if (
+    leftFields.length !== rightFields.length
+    || leftFields.length > MAX_HEALTH_CUSTOM_FIELDS
+  ) return false
+  return leftFields.every((field, index) => {
+    const other = rightFields[index]
+    return Boolean(other)
+      && exactText(field?.label) === exactText(other.label)
+      && exactText(field?.value) === exactText(other.value)
+      && exactText(field?.type) === exactText(other.type)
+      && Boolean(field?.protected) === Boolean(other.protected)
+  })
+}
+
+function normalizedDomains(entry: VaultEntry): string[] {
+  return (Array.isArray(entry.domains) ? entry.domains : [])
+    .map((value) => exactText(value).trim().toLocaleLowerCase('en-US'))
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right, 'en'))
+}
+
+function sameStrings(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function hashText(seed: number, text: string, multiplier: number): number {
+  let hash = seed
+  for (let index = 0; index < text.length; index += 1) {
+    hash = Math.imul(hash ^ text.charCodeAt(index), multiplier)
+  }
+  return hash
+}
+
+function countInsecureUrls(entry: VaultEntry): number {
+  const values = [
+    ...(Array.isArray(entry.domains) ? entry.domains : []),
+    ...(Array.isArray(entry.customFields) ? entry.customFields : [])
+      .slice(0, MAX_HEALTH_CUSTOM_FIELDS)
+      .filter((field) => field?.type === 'url')
+      .map((field) => field.value)
+  ]
+  const insecure = new Set<string>()
+  for (const value of values) {
+    const text = typeof value === 'string' ? value.trim() : ''
+    if (!/^http:\/\//i.test(text)) continue
+    try {
+      const url = new URL(text)
+      if (url.protocol === 'http:' && url.hostname) insecure.add(url.toString().toLocaleLowerCase('en-US'))
+    } catch {
+      // Invalid URL-like text is handled by entry editing, not reported as an insecure endpoint.
+    }
+  }
+  return insecure.size
+}
+
+function collectExpirations(
+  entry: VaultEntry,
+  now: number,
+  expiringWithinDays: number
+): PasswordHealthExpiration[] {
+  const upperBound = now + expiringWithinDays * DAY_MS
+  return (Array.isArray(entry.customFields) ? entry.customFields : [])
+    .slice(0, MAX_HEALTH_CUSTOM_FIELDS)
+    .filter((field) => field?.type === 'date')
+    .map((field) => {
+      const expiresAt = parseExpiryDate(field.value)
+      if (expiresAt === undefined || expiresAt > upperBound) return null
+      const expired = expiresAt < now
+      const distance = expired
+        ? -Math.max(1, Math.ceil((now - expiresAt) / DAY_MS))
+        : Math.ceil((expiresAt - now) / DAY_MS)
+      return {
+        fieldId: safeIdentifier(field.id),
+        label: safeTitle(field.label) || '到期日',
+        expiresAt,
+        daysRemaining: distance,
+        status: expired ? 'expired' as const : 'expiring' as const
+      }
+    })
+    .filter((item): item is PasswordHealthExpiration => item !== null)
+    .sort((left, right) => left.expiresAt - right.expiresAt || left.fieldId.localeCompare(right.fieldId, 'en'))
+    .slice(0, MAX_EXPIRATIONS_PER_ENTRY)
+}
+
+export function parseExpiryDate(value: unknown): number | undefined {
+  const text = typeof value === 'string' ? value.trim() : ''
+  let match = /^(\d{4})[-/](\d{2})[-/](\d{2})$/.exec(text)
+  if (match) return endOfUtcDay(Number(match[1]), Number(match[2]), Number(match[3]))
+
+  match = /^(\d{4})[-/](\d{2})$/.exec(text)
+  if (match) return endOfUtcMonth(Number(match[1]), Number(match[2]))
+
+  match = /^(\d{2})\/(\d{4})$/.exec(text)
+  if (match) return endOfUtcMonth(Number(match[2]), Number(match[1]))
+
+  match = /^(\d{2})\/(\d{2})$/.exec(text)
+  if (match) return endOfUtcMonth(2000 + Number(match[2]), Number(match[1]))
+  return undefined
+}
+
+function endOfUtcDay(year: number, month: number, day: number): number | undefined {
+  if (year < 1000 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31) return undefined
+  const start = Date.UTC(year, month - 1, day)
+  const date = new Date(start)
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return undefined
+  return start + DAY_MS - 1
+}
+
+function endOfUtcMonth(year: number, month: number): number | undefined {
+  if (year < 1000 || year > 9999 || month < 1 || month > 12) return undefined
+  return Date.UTC(year, month, 1) - 1
+}
+
+function exactText(value: unknown): string {
+  return typeof value === 'string' ? value : String(value ?? '')
+}
+
+function safeIdentifier(value: unknown): string {
+  return typeof value === 'string' ? value.slice(0, 256) : ''
+}
+
+function sortIssues(issues: PasswordHealthIssue[]): PasswordHealthIssue[] {
+  return [...new Set(issues)].sort((left, right) => ISSUE_ORDER.indexOf(left) - ISSUE_ORDER.indexOf(right))
 }
 
 function assessPasswordAge(
@@ -427,11 +720,8 @@ function compareEntryResults(left: PasswordHealthEntryResult, right: PasswordHea
 }
 
 function entryRiskRank(entry: PasswordHealthEntryResult): number {
-  if (entry.issues.includes('missing')) return 5
-  if (entry.issues.includes('weak')) return 4
-  if (entry.issues.includes('reused')) return 3
-  if (entry.issues.includes('stale')) return 2
-  return 1
+  if (!entry.issues.length) return 1
+  return Math.max(...entry.issues.map((issue) => ISSUE_ORDER.length - ISSUE_ORDER.indexOf(issue) + 1))
 }
 
 function compareRefs(

@@ -1,5 +1,8 @@
 import type {
   AndroidAutofillState,
+  AttachmentObjectRetention,
+  AttachmentObjectWrite,
+  AttachmentStorageState,
   AppUpdateApply,
   AppUpdateCheck,
   AppUpdateDownload,
@@ -32,6 +35,11 @@ export interface VaultStorageAdapter {
     expectedRevision?: number
   ) => Promise<ApiResult<WriteEnvelopeResult>>
   readLegacyLocalStorage: () => Promise<ApiResult<string>>
+  getAttachmentStorageState: () => Promise<ApiResult<AttachmentStorageState>>
+  readAttachmentObject: (attachmentId: string) => Promise<ApiResult<string>>
+  writeAttachmentObject: (attachmentId: string, objectText: string) => Promise<ApiResult<AttachmentObjectWrite>>
+  retainAttachmentObject: (attachmentId: string) => Promise<ApiResult<AttachmentObjectRetention>>
+  collectAttachmentObjects: (referencedIds: string[]) => Promise<ApiResult<{ retained: number; deleted: number }>>
   cleanupLegacyStorage?: (expectedDigest: string) => Promise<ApiResult<unknown>>
   cacheUnlockedSession?: (password: string) => Promise<ApiResult<unknown>>
   clearUnlockedSession?: () => Promise<ApiResult<unknown>>

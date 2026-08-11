@@ -15,6 +15,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,6 +43,14 @@ final class AndroidVaultStore {
     private static final String STATUS_ACTIVE = "active";
     private static final String STATUS_DISABLED = "disabled";
     private static final String STATUS_TRASHED = "trashed";
+    private static final String AUTOFILL_BASE_DOMAIN = "base-domain";
+    private static final String AUTOFILL_EXACT_HOST = "exact-host";
+    private static final String AUTOFILL_SUBDOMAIN = "subdomain";
+    private static final String AUTOFILL_URL_PREFIX = "url-prefix";
+    private static final String AUTOFILL_NEVER = "never";
+    private static final Set<String> AUTOFILL_MATCH_MODES = new HashSet<>(Arrays.asList(
+        AUTOFILL_BASE_DOMAIN, AUTOFILL_EXACT_HOST, AUTOFILL_SUBDOMAIN, AUTOFILL_URL_PREFIX, AUTOFILL_NEVER
+    ));
     private static final Set<String> ENTRY_KINDS = new HashSet<>(Arrays.asList("login", "secure-note", "card", "identity", "api-key", "folder"));
     private static final Set<String> CUSTOM_FIELD_TYPES = new HashSet<>(Arrays.asList("text", "secret", "date", "url", "email", "phone"));
     private static final int DEFAULT_ITERATIONS = 390000;
@@ -619,15 +629,16 @@ final class AndroidVaultStore {
         }
     }
 
-    JSONArray queryMatchesFromPayload(JSONObject sourcePayload, String hostname) throws JSONException {
+    static JSONArray queryMatchesFromPayload(JSONObject sourcePayload, String hostname) throws JSONException {
         return queryMatchesFromPayload(sourcePayload, hostname, false);
     }
 
-    JSONArray queryMatchesFromPayload(JSONObject sourcePayload, String hostname, boolean includeAll) throws JSONException {
+    static JSONArray queryMatchesFromPayload(JSONObject sourcePayload, String hostname, boolean includeAll) throws JSONException {
         JSONArray matches = new JSONArray();
 
         if (includeAll) {
             for (JSONObject entry : indexedLoginEntries(sourcePayload)) {
+                if (AUTOFILL_NEVER.equals(normalizeAutofillMatchMode(entry.optString("autofillMatchMode")))) continue;
                 matches.put(matchSummary(entry, entry.optJSONArray("domains")));
             }
             return matches;
@@ -639,7 +650,7 @@ final class AndroidVaultStore {
         return matches;
     }
 
-    private JSONObject matchSummary(JSONObject entry, JSONArray domains) throws JSONException {
+    private static JSONObject matchSummary(JSONObject entry, JSONArray domains) throws JSONException {
         return new JSONObject()
             .put("id", entry.optString("id"))
             .put("title", entry.optString("title"))
@@ -647,6 +658,7 @@ final class AndroidVaultStore {
             .put("email", entry.optString("email"))
             .put("phone", entry.optString("phone"))
             .put("loginAccountSource", normalizeLoginAccountSource(entry.optString("loginAccountSource")))
+            .put("autofillMatchMode", normalizeAutofillMatchMode(entry.optString("autofillMatchMode")))
             .put("domains", domains == null ? new JSONArray() : new JSONArray(domains.toString()))
             .put("hasPassword", !entry.optString("password").isEmpty())
             .put("hasTotp", !entry.optString("totpSecret").isEmpty());
@@ -810,8 +822,9 @@ final class AndroidVaultStore {
                 entry.put("domains", domains);
             }
             boolean hasDomain = false;
+            String mode = normalizeAutofillMatchMode(entry.optString("autofillMatchMode"));
             for (int index = 0; index < domains.length(); index += 1) {
-                if (domainMatches(hostname, domains.optString(index))) {
+                if (autofillRuleMatches(hostname, domains.optString(index), mode)) {
                     hasDomain = true;
                     break;
                 }
@@ -851,6 +864,7 @@ final class AndroidVaultStore {
             .put("statusUpdatedAt", 0)
             .put("deletedAt", 0)
             .put("domains", domains)
+            .put("autofillMatchMode", AUTOFILL_BASE_DOMAIN)
             .put("username", capture.optString("username"))
             .put("email", capture.optString("email"))
             .put("password", capture.optString("password"))
@@ -1201,8 +1215,44 @@ final class AndroidVaultStore {
             .put("passkeyTombstones", passkeyState.passkeyTombstones)
             .put("settings", normalizedSettings)
             .put("updatedAt", input.optLong("updatedAt", nowSeconds()));
+        String attachmentKey = normalizeAttachmentKey(input.opt("attachmentKey"));
+        if (attachmentKey.isEmpty() && entriesContainAttachments(normalized.getJSONArray("entries"))) {
+            throw new JSONException("Vault attachment key is missing");
+        }
+        if (!attachmentKey.isEmpty()) normalized.put("attachmentKey", attachmentKey);
         if (passkeyState.version == 2) normalized.put("passkeySchemaVersion", passkeyState.schemaVersion);
         return normalized;
+    }
+
+    private static boolean entriesContainAttachments(JSONArray entries) {
+        for (int index = 0; entries != null && index < entries.length(); index += 1) {
+            JSONObject entry = entries.optJSONObject(index);
+            if (entry == null) continue;
+            JSONArray attachments = entry.optJSONArray("attachments");
+            if (attachments != null && attachments.length() > 0) return true;
+            if (entriesContainAttachments(entry.optJSONArray("children"))) return true;
+        }
+        return false;
+    }
+
+    private static String normalizeAttachmentKey(Object value) throws JSONException {
+        if (value == null || value == JSONObject.NULL || "".equals(value)) return "";
+        if (!(value instanceof String)) throw new JSONException("Vault attachment key is invalid");
+        String encoded = (String) value;
+        byte[] raw;
+        try {
+            raw = Base64.getDecoder().decode(encoded);
+        } catch (IllegalArgumentException exception) {
+            throw new JSONException("Vault attachment key is invalid");
+        }
+        try {
+            if (raw.length != 32 || !Base64.getEncoder().encodeToString(raw).equals(encoded)) {
+                throw new JSONException("Vault attachment key is invalid");
+            }
+            return encoded;
+        } finally {
+            Arrays.fill(raw, (byte) 0);
+        }
     }
 
     private static void validateNativePasskeyKeyMaterial(JSONArray passkeys) throws JSONException {
@@ -1269,6 +1319,7 @@ final class AndroidVaultStore {
             duplicateIndex += 1;
         }
         seenIds.add(entryId);
+        String autofillMatchMode = normalizeAutofillMatchMode(entry.optString("autofillMatchMode"));
         JSONObject normalized = new JSONObject()
             .put("id", entryId)
             .put("kind", kind)
@@ -1277,7 +1328,8 @@ final class AndroidVaultStore {
             .put("statusReason", entry.optString("statusReason"))
             .put("statusUpdatedAt", entry.optLong("statusUpdatedAt", 0))
             .put("deletedAt", entry.optLong("deletedAt", 0))
-            .put("domains", normalizeDomains(entry.optJSONArray("domains")));
+            .put("domains", normalizeDomains(entry.optJSONArray("domains"), autofillMatchMode))
+            .put("autofillMatchMode", autofillMatchMode);
 
         if ("folder".equals(kind)) {
             normalized.put("children", normalizeEntries(entry.optJSONArray("children"), seenIds, path));
@@ -1291,8 +1343,44 @@ final class AndroidVaultStore {
                 .put("note", entry.optString("note"))
                 .put("totpSecret", entry.optString("totpSecret"))
                 .put("customFields", normalizeCustomFields(entry.optJSONArray("customFields")))
+                .put("attachments", normalizeAttachments(entry.optJSONArray("attachments")))
                 .put("history", entry.optJSONArray("history") == null ? new JSONArray() : new JSONArray(entry.optJSONArray("history").toString()))
                 .put("children", new JSONArray());
+        }
+        return normalized;
+    }
+
+    private static JSONArray normalizeAttachments(JSONArray attachments) throws JSONException {
+        if (attachments != null && attachments.length() > 100) {
+            throw new JSONException("Vault entry attachment limit exceeded");
+        }
+        JSONArray normalized = new JSONArray();
+        Set<String> seenIds = new HashSet<>();
+        for (int index = 0; attachments != null && index < attachments.length(); index += 1) {
+            JSONObject attachment = attachments.optJSONObject(index);
+            if (attachment == null) throw new JSONException("Vault attachment reference is malformed");
+            String id = attachment.optString("id").toLowerCase(Locale.ROOT);
+            String name = attachment.optString("name").trim();
+            String mimeType = attachment.optString("mimeType").toLowerCase(Locale.ROOT);
+            String sha256 = attachment.optString("sha256").toLowerCase(Locale.ROOT);
+            String ciphertextSha256 = attachment.optString("ciphertextSha256").toLowerCase(Locale.ROOT);
+            long size = attachment.optLong("size", -1);
+            long createdAt = attachment.optLong("createdAt", 0);
+            if (!id.matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) throw new JSONException("Vault attachment ID is invalid");
+            if (!seenIds.add(id)) throw new JSONException("Duplicate attachment reference");
+            if (name.isEmpty() || name.length() > 255 || name.indexOf('\0') >= 0 || name.contains("/") || name.contains("\\")) throw new JSONException("Vault attachment name is invalid");
+            if (mimeType.length() > 127 || !mimeType.matches("[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*")) throw new JSONException("Vault attachment MIME type is invalid");
+            if (size < 0 || size > 10L * 1024L * 1024L) throw new JSONException("Vault attachment size is invalid");
+            if (createdAt < 1) throw new JSONException("Vault attachment timestamp is invalid");
+            if (!sha256.matches("[0-9a-f]{64}") || !ciphertextSha256.matches("[0-9a-f]{64}")) throw new JSONException("Vault attachment hash is invalid");
+            normalized.put(new JSONObject()
+                .put("id", id)
+                .put("name", name)
+                .put("mimeType", mimeType)
+                .put("size", size)
+                .put("sha256", sha256)
+                .put("ciphertextSha256", ciphertextSha256)
+                .put("createdAt", createdAt));
         }
         return normalized;
     }
@@ -1314,10 +1402,12 @@ final class AndroidVaultStore {
         return normalized;
     }
 
-    private static JSONArray normalizeDomains(JSONArray domains) {
+    private static JSONArray normalizeDomains(JSONArray domains, String autofillMatchMode) {
         JSONArray normalized = new JSONArray();
         for (int index = 0; domains != null && index < domains.length(); index += 1) {
-            String domain = normalizeDomain(domains.optString(index));
+            String domain = AUTOFILL_URL_PREFIX.equals(autofillMatchMode)
+                ? normalizeUrlPrefix(domains.optString(index))
+                : normalizeDomain(domains.optString(index), AUTOFILL_BASE_DOMAIN.equals(autofillMatchMode));
             if (!domain.isEmpty()) normalized.put(domain);
         }
         return normalized;
@@ -1624,6 +1714,10 @@ final class AndroidVaultStore {
     }
 
     private static String normalizeDomain(String value) {
+        return normalizeDomain(value, true);
+    }
+
+    private static String normalizeDomain(String value, boolean stripWww) {
         if (value == null) return "";
         String result = value.trim().toLowerCase(Locale.ROOT);
         int schemeIndex = result.indexOf("://");
@@ -1636,7 +1730,7 @@ final class AndroidVaultStore {
         if (portIndex >= 0) result = result.substring(0, portIndex);
         while (result.startsWith(".")) result = result.substring(1);
         while (result.endsWith(".")) result = result.substring(0, result.length() - 1);
-        if (result.startsWith("www.")) result = result.substring(4);
+        if (stripWww && result.startsWith("www.")) result = result.substring(4);
         return result;
     }
 
@@ -1646,6 +1740,48 @@ final class AndroidVaultStore {
         if (host.isEmpty() || domain.isEmpty()) return false;
         if (domain.indexOf('*') >= 0) return wildcardDomainMatches(host, domain);
         return host.equals(domain) || host.endsWith("." + domain);
+    }
+
+    private static String normalizeAutofillMatchMode(String value) {
+        return AUTOFILL_MATCH_MODES.contains(value) ? value : AUTOFILL_BASE_DOMAIN;
+    }
+
+    private static String normalizeUrlPrefix(String value) {
+        try {
+            URI parsed = new URI(value == null ? "" : value.trim());
+            String scheme = parsed.getScheme() == null ? "" : parsed.getScheme().toLowerCase(Locale.ROOT);
+            String host = parsed.getHost() == null ? "" : parsed.getHost().toLowerCase(Locale.ROOT);
+            if (!("http".equals(scheme) || "https".equals(scheme)) || host.isEmpty() || parsed.getUserInfo() != null) return "";
+            int port = parsed.getPort();
+            if (("http".equals(scheme) && port == 80) || ("https".equals(scheme) && port == 443)) port = -1;
+            String path = parsed.getRawPath();
+            if (path == null || path.isEmpty()) path = "/";
+            return new URI(scheme, null, host, port, path, parsed.getRawQuery(), null).toASCIIString();
+        } catch (URISyntaxException exception) {
+            return "";
+        }
+    }
+
+    static boolean autofillRuleMatches(String hostname, String savedDomain, String mode) {
+        String normalizedMode = normalizeAutofillMatchMode(mode);
+        if (AUTOFILL_NEVER.equals(normalizedMode) || AUTOFILL_URL_PREFIX.equals(normalizedMode)) return false;
+        boolean stripWww = AUTOFILL_BASE_DOMAIN.equals(normalizedMode);
+        String host = normalizeDomain(hostname, stripWww);
+        String domain = normalizeDomain(savedDomain, stripWww);
+        if (host.isEmpty() || domain.isEmpty()) return false;
+        if (domain.indexOf('*') >= 0) return wildcardDomainMatches(host, domain);
+        if (AUTOFILL_EXACT_HOST.equals(normalizedMode)) return host.equals(domain);
+        if (AUTOFILL_SUBDOMAIN.equals(normalizedMode)) return !host.equals(domain) && host.endsWith("." + domain);
+        return host.equals(domain) || host.endsWith("." + domain);
+    }
+
+    private static boolean entryMatchesHost(JSONObject entry, String hostname) {
+        String mode = normalizeAutofillMatchMode(entry.optString("autofillMatchMode"));
+        JSONArray domains = entry.optJSONArray("domains");
+        for (int index = 0; domains != null && index < domains.length(); index += 1) {
+            if (autofillRuleMatches(hostname, domains.optString(index), mode)) return true;
+        }
+        return false;
     }
 
     private static boolean wildcardDomainMatches(String host, String domain) {
@@ -1699,17 +1835,10 @@ final class AndroidVaultStore {
     }
 
     private static List<JSONObject> matchingLoginEntriesFromPayload(JSONObject sourcePayload, String hostname) {
-        String host = normalizeDomain(hostname);
+        String host = normalizeDomain(hostname, false);
         List<JSONObject> matches = new ArrayList<>();
         for (JSONObject entry : loginEntriesFromPayload(sourcePayload)) {
-            JSONArray domains = entry.optJSONArray("domains");
-            for (int index = 0; domains != null && index < domains.length(); index += 1) {
-                String domain = domains.optString(index);
-                if (domainMatches(host, domain)) {
-                    matches.add(entry);
-                    break;
-                }
-            }
+            if (entryMatchesHost(entry, host)) matches.add(entry);
         }
         return matches;
     }
@@ -1785,7 +1914,7 @@ final class AndroidVaultStore {
         }
 
         List<JSONObject> matchingLogins(String hostname) {
-            String host = normalizeDomain(hostname);
+            String host = normalizeDomain(hostname, false);
             if (host.isEmpty()) return new ArrayList<>();
 
             Set<String> candidateIds = new HashSet<>();
@@ -1802,7 +1931,7 @@ final class AndroidVaultStore {
                 JSONArray domains = entry.optJSONArray("domains");
                 for (int index = 0; domains != null && index < domains.length(); index += 1) {
                     String domain = normalizeDomain(domains.optString(index));
-                    if (domain.indexOf('*') >= 0 && domainMatches(host, domain)) {
+                    if (domain.indexOf('*') >= 0 && entryMatchesHost(entry, host)) {
                         String id = entry.optString("id");
                         if (!id.isEmpty()) candidateIds.add(id);
                         break;
@@ -1814,7 +1943,7 @@ final class AndroidVaultStore {
             if (candidateIds.isEmpty()) return matches;
             for (JSONObject entry : loginEntries) {
                 String id = entry.optString("id");
-                if (candidateIds.contains(id) && !ambiguousIds.contains(id)) matches.add(entry);
+                if (candidateIds.contains(id) && !ambiguousIds.contains(id) && entryMatchesHost(entry, host)) matches.add(entry);
             }
             return matches;
         }
@@ -1841,8 +1970,9 @@ final class AndroidVaultStore {
                 loginEntries.add(entry);
                 boolean hasWildcard = false;
                 JSONArray domains = entry.optJSONArray("domains");
+                String mode = normalizeAutofillMatchMode(entry.optString("autofillMatchMode"));
                 for (int domainIndex = 0; domains != null && domainIndex < domains.length(); domainIndex += 1) {
-                    String domain = normalizeDomain(domains.optString(domainIndex));
+                    String domain = normalizeDomain(domains.optString(domainIndex), AUTOFILL_BASE_DOMAIN.equals(mode));
                     if (domain.isEmpty()) continue;
                     if (domain.indexOf('*') >= 0) {
                         hasWildcard = true;
@@ -1860,7 +1990,7 @@ final class AndroidVaultStore {
         }
 
         private static List<String> domainSuffixes(String hostname) {
-            String host = normalizeDomain(hostname);
+            String host = normalizeDomain(hostname, false);
             List<String> suffixes = new ArrayList<>();
             if (host.isEmpty()) return suffixes;
             String[] parts = host.split("\\.");

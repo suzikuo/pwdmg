@@ -53,6 +53,12 @@ test('legacy empty vaults remain v1 while passkey state promotes v2', () => {
   assert.equal(sticky.version, 2)
 })
 
+test('optional user labels are normalized without changing schema version', () => {
+  const normalized = normalizePasskeyState({ passkeys: [passkey({ label: '  Work key  ' })] })
+  assert.equal(normalized.passkeySchemaVersion, 1)
+  assert.equal(normalized.passkeys[0].label, 'Work key')
+})
+
 test('normalization rejects unsupported versions and lossy passkey repairs', () => {
   assert.throws(() => normalizePasskeyState({ version: 3 }), /version/i)
   assert.throws(() => normalizePasskeyState({ version: '2' }), /version/i)

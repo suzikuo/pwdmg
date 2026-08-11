@@ -11,7 +11,7 @@ RP_ID_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 PASSKEY_TRANSPORTS = {"usb", "nfc", "ble", "internal", "hybrid", "smart-card"}
 PASSKEY_TRANSPORT_ORDER = ("internal", "hybrid", "usb", "nfc", "ble", "smart-card")
 PASSKEY_FIELDS = {
-    "id", "credentialId", "rpId", "rpName", "userHandle", "userName", "userDisplayName",
+    "id", "label", "credentialId", "rpId", "rpName", "userHandle", "userName", "userDisplayName",
     "algorithm", "publicKeyCose", "privateKeyPkcs8", "discoverable", "backupEligible",
     "backupState", "transports", "entryId", "createdAt", "updatedAt",
 }
@@ -118,6 +118,7 @@ def _normalize_passkeys(values: List[Any]) -> List[Dict[str, Any]]:
             "updatedAt": updated_at,
         }
         for key, max_length in (
+            ("label", MAX_DISPLAY_LENGTH),
             ("rpName", MAX_DISPLAY_LENGTH),
             ("userDisplayName", MAX_DISPLAY_LENGTH),
             ("entryId", MAX_ID_LENGTH),

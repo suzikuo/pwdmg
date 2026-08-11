@@ -1,8 +1,9 @@
 export type EntryKind = 'login' | 'secure-note' | 'card' | 'identity' | 'api-key' | 'folder'
 export type LoginAccountSource = 'auto' | 'username' | 'email' | 'phone'
+export type AutofillMatchMode = 'base-domain' | 'exact-host' | 'subdomain' | 'url-prefix' | 'never'
 export type EntryStatus = 'active' | 'disabled' | 'trashed'
 export type EntryHistoryAction = 'created' | 'updated' | 'disabled' | 'restored' | 'trashed'
-export type EntryHistoryField = 'title' | 'domains' | 'username' | 'email' | 'password' | 'phone' | 'loginAccountSource' | 'note' | 'totpSecret' | 'customFields' | 'status'
+export type EntryHistoryField = 'title' | 'domains' | 'autofillMatchMode' | 'username' | 'email' | 'password' | 'phone' | 'loginAccountSource' | 'note' | 'totpSecret' | 'customFields' | 'attachments' | 'status'
 export type VaultPayloadVersion = 1 | 2
 export type PasskeyTransport = 'usb' | 'nfc' | 'ble' | 'internal' | 'hybrid' | 'smart-card'
 export type VaultCustomFieldType = 'text' | 'secret' | 'date' | 'url' | 'email' | 'phone'
@@ -13,6 +14,16 @@ export interface VaultCustomField {
   value: string
   type: VaultCustomFieldType
   protected: boolean
+}
+
+export interface VaultAttachment {
+  id: string
+  name: string
+  mimeType: string
+  size: number
+  sha256: string
+  ciphertextSha256: string
+  createdAt: number
 }
 
 export interface VaultEntryHistoryChange {
@@ -44,6 +55,7 @@ export interface VaultEntry {
   statusUpdatedAt?: number
   deletedAt?: number
   domains: string[]
+  autofillMatchMode?: AutofillMatchMode
   username?: string
   email?: string
   password?: string
@@ -52,6 +64,7 @@ export interface VaultEntry {
   note?: string
   totpSecret?: string
   customFields?: VaultCustomField[]
+  attachments?: VaultAttachment[]
   history?: VaultEntryHistory[]
   children?: VaultEntry[]
 }
@@ -60,6 +73,7 @@ export type VaultEntrySnapshot = Omit<VaultEntry, 'history' | 'children'>
 
 export interface VaultPasskey {
   id: string
+  label?: string
   credentialId: string
   rpId: string
   rpName?: string
@@ -86,6 +100,7 @@ export interface VaultPasskeyTombstone {
 
 export interface VaultPayload {
   version: VaultPayloadVersion
+  attachmentKey?: string
   passkeySchemaVersion?: 1
   revision: number
   entries: VaultEntry[]
@@ -112,6 +127,32 @@ export interface AppState {
   legacyAvailable: boolean
   vaultPath: string
   passwordless?: boolean
+}
+
+export interface DeviceUnlockState {
+  supported: boolean
+  enabled: boolean
+  expiresAt: number
+}
+
+export interface AttachmentStorageState {
+  maxFileBytes: number
+  quotaBytes: number
+  activeCount: number
+  activeBytes: number
+  retainedCount: number
+  retainedBytes: number
+}
+
+export interface AttachmentObjectWrite {
+  attachmentId: string
+  objectBytes: number
+}
+
+export interface AttachmentObjectRetention {
+  attachmentId: string
+  retained: boolean
+  deletedAt?: number
 }
 
 export interface AppInfo {
@@ -214,4 +255,25 @@ export interface VaultBackupImport {
   state: AppState
   backupPath: string
   vaultPath: string
+}
+
+export interface PortableBackupExport {
+  saved: boolean
+  path: string
+  createdAt?: number
+  attachmentCount?: number
+  packageBytes?: number
+}
+
+export interface PortableBackupSelection {
+  selected: boolean
+  selectionToken?: string
+  name?: string
+  createdAt?: number
+  attachmentCount?: number
+  packageBytes?: number
+}
+
+export interface PortableBackupImport extends VaultBackupImport {
+  attachmentCount: number
 }

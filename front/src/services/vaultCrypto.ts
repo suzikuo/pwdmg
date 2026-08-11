@@ -111,6 +111,29 @@ export async function decryptPayloadWithKey(vaultKey: VaultKey, envelope: VaultE
   return payload
 }
 
+export async function importVaultKeyMaterial(
+  rawKeyBase64: string,
+  saltBase64: string,
+  iterations: number
+): Promise<VaultKey> {
+  assertWebCrypto()
+  const rawKey = base64ToBytes(rawKeyBase64)
+  const salt = base64ToBytes(saltBase64)
+  if (rawKey.byteLength !== 32 || salt.byteLength !== 16) throw new Error('设备解锁密钥无效')
+  if (!Number.isSafeInteger(iterations) || iterations < 10_000 || iterations > 2_000_000) {
+    throw new Error('设备解锁参数无效')
+  }
+  const key = await crypto.subtle.importKey(
+    'raw',
+    toArrayBuffer(rawKey),
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt', 'decrypt']
+  )
+  rawKey.fill(0)
+  return { key, salt, iterations }
+}
+
 export function validateEnvelope(value: unknown): VaultEnvelope {
   const envelope = value as VaultEnvelope
   const iterations = Number(envelope?.kdf?.iterations)

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildPasskeyPresentationItems, displayPasskeyTransports } from '../src/services/passkeyPresentation.ts'
+import {
+  buildPasskeyLoginOptions,
+  buildPasskeyPresentationItems,
+  displayPasskeyTransports
+} from '../src/services/passkeyPresentation.ts'
 
 function passkey(overrides = {}) {
   return {
@@ -42,21 +46,35 @@ test('projects only safe passkey metadata and resolves nested login links', () =
 
   assert.deepEqual(items, [{
     id: 'passkey-1',
+    displayLabel: 'Example',
+    userLabel: '',
+    rpId: 'login.example.com',
     rpLabel: 'Example',
     accountLabel: 'Alice',
+    linkedEntryId: 'nested-login',
     linkedEntryTitle: 'Example login',
     transports: ['设备内置', 'USB', '混合设备'],
+    discoverable: true,
+    backupEligible: true,
+    backupState: true,
     createdAt: 100,
     updatedAt: 200
   }])
   assert.deepEqual(Object.keys(items[0]).sort(), [
     'accountLabel',
+    'backupEligible',
+    'backupState',
     'createdAt',
+    'discoverable',
+    'displayLabel',
     'id',
+    'linkedEntryId',
     'linkedEntryTitle',
+    'rpId',
     'rpLabel',
     'transports',
-    'updatedAt'
+    'updatedAt',
+    'userLabel'
   ])
   assert.doesNotMatch(JSON.stringify(items[0]), /AQIDBA|dXNlci0x|cHVibGlj|cHJpdmF0ZS/)
 })
@@ -72,9 +90,37 @@ test('uses safe display fallbacks for missing labels and links', () => {
   assert.deepEqual(item.transports, [])
 })
 
+test('prefers a user label without exposing raw credential material', () => {
+  const [item] = buildPasskeyPresentationItems([passkey({ label: 'Work key' })], [])
+  assert.equal(item.displayLabel, 'Work key')
+  assert.equal(item.userLabel, 'Work key')
+  assert.doesNotMatch(JSON.stringify(item), /AQIDBA|dXNlci0x|cHVibGlj|cHJpdmF0ZS/)
+})
+
 test('transport labels are deduplicated in a stable safe order', () => {
   assert.deepEqual(
     displayPasskeyTransports(['smart-card', 'ble', 'internal', 'usb', 'ble', 'nfc', 'hybrid']),
     ['设备内置', 'USB', 'NFC', '蓝牙', '混合设备', '智能卡']
   )
+})
+
+test('builds unambiguous link options from active login paths only', () => {
+  assert.deepEqual(buildPasskeyLoginOptions([
+    { id: 'root-login', kind: 'login', title: 'Personal', domains: [] },
+    {
+      id: 'folder', kind: 'folder', title: 'Work', domains: [], children: [
+        { id: 'nested-login', kind: 'login', title: 'Portal', domains: [] },
+        { id: 'archived-login', kind: 'login', title: 'Old', status: 'disabled', domains: [] }
+      ]
+    },
+    {
+      id: 'archived-folder', kind: 'folder', title: 'Archived', status: 'disabled', domains: [], children: [
+        { id: 'hidden-login', kind: 'login', title: 'Hidden', domains: [] }
+      ]
+    },
+    { id: 'note', kind: 'note', title: 'Not a login', domains: [] }
+  ]), [
+    { id: 'root-login', title: 'Personal' },
+    { id: 'nested-login', title: 'Work / Portal' }
+  ])
 })

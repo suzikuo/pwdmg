@@ -33,6 +33,7 @@ export type CloudSyncChangeField =
   | 'statusReason'
   | 'deletedAt'
   | 'domains'
+  | 'autofillMatchMode'
   | 'username'
   | 'email'
   | 'password'
@@ -41,6 +42,7 @@ export type CloudSyncChangeField =
   | 'note'
   | 'totpSecret'
   | 'customFields'
+  | 'attachments'
 
 export type CloudSyncEntryChangeField = Exclude<CloudSyncChangeField, 'position'>
 
@@ -85,6 +87,7 @@ export const CLOUD_SYNC_CHANGE_LABELS: Record<CloudSyncChangeField, string> = {
   statusReason: '状态说明',
   deletedAt: '删除时间',
   domains: '域名',
+  autofillMatchMode: '自动填充匹配',
   username: '账号',
   email: '邮箱',
   password: '密码',
@@ -92,7 +95,8 @@ export const CLOUD_SYNC_CHANGE_LABELS: Record<CloudSyncChangeField, string> = {
   loginAccountSource: '自动填充账号',
   note: '备注',
   totpSecret: 'TOTP',
-  customFields: '自定义字段'
+  customFields: '自定义字段',
+  attachments: '附件'
 }
 
 export const CLOUD_SYNC_ENTRY_CHANGE_FIELDS: CloudSyncEntryChangeField[] = [
@@ -102,14 +106,17 @@ export const CLOUD_SYNC_ENTRY_CHANGE_FIELDS: CloudSyncEntryChangeField[] = [
   'statusReason',
   'deletedAt',
   'domains',
+  'autofillMatchMode',
   'username',
   'email',
   'password',
   'phone',
   'loginAccountSource',
+  'autofillMatchMode',
   'note',
   'totpSecret',
-  'customFields'
+  'customFields',
+  'attachments'
 ]
 
 export const CLOUD_SYNC_MANUAL_REVIEW_FIELDS: ReadonlySet<CloudSyncChangeField> = new Set([
@@ -122,5 +129,6 @@ export const CLOUD_SYNC_MANUAL_REVIEW_FIELDS: ReadonlySet<CloudSyncChangeField> 
   'phone',
   'loginAccountSource',
   'totpSecret',
-  'customFields'
+  'customFields',
+  'attachments'
 ])

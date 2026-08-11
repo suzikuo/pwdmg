@@ -86,6 +86,18 @@
           <van-cell center is-link title="密码健康" :label="passwordHealthLabel" @click="emit('open-password-health')">
             <template #value><span class="settings-entry-value">{{ passwordHealthScore }}</span></template>
           </van-cell>
+          <van-cell center is-link title="通行密钥" :label="passkeyCount ? `${passkeyCount} 个已保存` : '暂无已保存凭据'" @click="emit('open-passkeys')">
+            <template #value><span class="settings-entry-value">{{ passkeyCount }}</span></template>
+          </van-cell>
+          <van-cell v-if="deviceUnlockSupported" center title="设备快速解锁" :label="deviceUnlockLabel">
+            <template #right-icon>
+              <van-switch
+                :model-value="deviceUnlockEnabled"
+                size="18px"
+                @update:model-value="emit('toggle-device-unlock', Boolean($event))"
+              />
+            </template>
+          </van-cell>
           <van-cell center title="自动锁定" :label="sessionTimeoutMinutes === 0 ? '已关闭，仅手动锁定' : '已开启'">
             <template #right-icon>
               <van-switch
@@ -149,6 +161,17 @@
       </section>
 
       <section v-else-if="section === 'backup'" ref="backupPanel" class="drawer-panel backup-panel">
+        <div v-if="portableBackupSupported" class="portable-backup-panel">
+          <div class="portable-backup-copy">
+            <strong>本地完整备份</strong>
+            <span>包含加密保险库与全部附件</span>
+          </div>
+          <div class="portable-backup-actions">
+            <van-button class="backup-action-button" size="small" plain type="primary" icon="down" :loading="portableBackupBusy" @click="emit('export-portable-backup')">导出包</van-button>
+            <van-button class="backup-action-button" size="small" plain type="default" icon="upgrade" :disabled="portableBackupBusy" @click="emit('import-portable-backup')">恢复包</van-button>
+          </div>
+          <p v-if="portableBackupStatus" class="settings-note compact-note">{{ portableBackupStatus }}</p>
+        </div>
         <p class="settings-note">上传/下载会先校验新增、修改、删除项；备份会直接上传一个带日期的云端文件，不在本地留存。</p>
         <van-form @submit="emit('save-settings')">
           <van-field :model-value="oss.bucketName" label="Bucket" placeholder="OSS Bucket 名称" @update:model-value="updateOss('bucketName', $event)" />
@@ -212,12 +235,62 @@
             <em>{{ group.count }}</em>
           </button>
         </div>
-        <div class="system-group-head"><span>系统分组</span><strong>{{ currentSystemGroup.title }}</strong><small>{{ currentSystemGroup.description }}</small></div>
+        <div class="system-group-head">
+          <div class="system-group-head-copy">
+            <span>系统分组</span><strong>{{ currentSystemGroup.title }}</strong><small>{{ currentSystemGroup.description }}</small>
+          </div>
+          <div v-if="systemGroupEntries.length" class="system-group-head-actions">
+            <van-button size="small" plain type="default" @click="toggleSystemSelectionMode">
+              {{ systemSelectionMode ? '取消选择' : '选择' }}
+            </van-button>
+            <van-button
+              v-if="!systemSelectionMode && systemGroupKey === 'trashed'"
+              class="system-group-purge-all"
+              size="small"
+              plain
+              type="danger"
+              @click="emit('purge-all-entries')"
+            >全部删除</van-button>
+          </div>
+        </div>
+        <div v-if="systemSelectionMode" class="system-batch-toolbar" role="toolbar" aria-label="系统分组批量操作">
+          <strong>已选 {{ systemSelectedIds.size }}</strong>
+          <button type="button" @click="toggleAllSystemEntries">{{ allSystemEntriesSelected ? '全不选' : '全选' }}</button>
+          <button type="button" :disabled="systemSelectedIds.size === 0" @click="emit('restore-entries', [...systemSelectedIds])">恢复</button>
+          <button
+            v-if="systemGroupKey === 'archived'"
+            class="is-danger"
+            type="button"
+            :disabled="systemSelectedIds.size === 0"
+            @click="emit('trash-entries', [...systemSelectedIds])"
+          >回收站</button>
+          <button
+            v-else
+            class="is-danger"
+            type="button"
+            :disabled="systemSelectedIds.size === 0"
+            @click="emit('purge-entries', [...systemSelectedIds])"
+          >彻底删除</button>
+        </div>
         <van-empty v-if="systemGroupEntries.length === 0" image="search" :description="currentSystemGroup.emptyText" />
         <div v-else class="archive-entry-list">
-          <div v-for="entry in systemGroupEntries" :key="entry.id" class="archive-entry">
-            <div><strong>{{ entry.title }}</strong><span>{{ archiveEntryMeta(entry) }}</span><small v-if="entry.statusReason">{{ entry.statusReason }}</small></div>
-            <div class="archive-entry-actions">
+          <div
+            v-for="entry in systemGroupEntries"
+            :key="entry.id"
+            class="archive-entry"
+            :class="{ 'is-batch-selected': systemSelectedIds.has(entry.id) }"
+            @click="systemSelectionMode && toggleSystemEntry(entry.id)"
+          >
+            <button
+              v-if="systemSelectionMode"
+              class="system-entry-select"
+              type="button"
+              :aria-label="systemSelectedIds.has(entry.id) ? '取消选择' : '选择'"
+              :aria-pressed="systemSelectedIds.has(entry.id)"
+              @click.stop="toggleSystemEntry(entry.id)"
+            ><van-icon :name="systemSelectedIds.has(entry.id) ? 'checked' : 'circle'" /></button>
+            <div class="archive-entry-copy"><strong>{{ entry.title }}</strong><span>{{ archiveEntryMeta(entry) }}</span><small v-if="entry.statusReason">{{ entry.statusReason }}</small></div>
+            <div v-if="!systemSelectionMode" class="archive-entry-actions">
               <van-button size="mini" plain type="primary" @click="emit('restore-entry', entry.id)">恢复</van-button>
               <van-button v-if="systemGroupKey === 'archived'" size="mini" plain type="danger" @click="emit('trash-entry', entry.id)">放入回收站</van-button>
               <van-button v-else size="mini" plain type="danger" @click="emit('purge-entry', entry.id)">彻底删除</van-button>
@@ -230,7 +303,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { AppUpdateCheck, AppUpdateProgress, AndroidAutofillState, PluginListenerState, VaultEntry, VaultPayload } from '../../types'
 
 type DrawerSection = 'settings' | 'updates' | 'backup' | 'system'
@@ -260,6 +333,10 @@ const props = defineProps<{
   sessionTimeoutDefault: number
   passwordHealthLabel: string
   passwordHealthScore: string
+  passkeyCount: number
+  deviceUnlockSupported: boolean
+  deviceUnlockEnabled: boolean
+  deviceUnlockLabel: string
   showAndroidAutofillSettings: boolean
   androidAutofillEnabled: boolean
   androidAutofillStatus: string
@@ -287,6 +364,9 @@ const props = defineProps<{
   cloudInfo: CloudInfo | null
   cloudBackups: CloudInfo[]
   backupStatus: string
+  portableBackupSupported: boolean
+  portableBackupBusy: boolean
+  portableBackupStatus: string
   cloudSyncLogLimit: number
   cloudSyncLogLimitMin: number
   cloudSyncLogLimitMax: number
@@ -305,6 +385,12 @@ const props = defineProps<{
 }>()
 
 const backupPanel = ref<HTMLElement | null>(null)
+const systemSelectionMode = ref(false)
+const systemSelectedIds = ref<Set<string>>(new Set())
+const allSystemEntriesSelected = computed(() => (
+  props.systemGroupEntries.length > 0
+  && props.systemGroupEntries.every((entry) => systemSelectedIds.value.has(entry.id))
+))
 
 watch(
   () => [props.open, props.section, props.detailOpen] as const,
@@ -312,6 +398,20 @@ watch(
     if (!open || section !== 'backup') return
     await nextTick()
     if (backupPanel.value) backupPanel.value.scrollTop = 0
+  }
+)
+
+watch(
+  () => [props.open, props.section, props.systemGroupKey] as const,
+  () => resetSystemSelection()
+)
+
+watch(
+  () => props.systemGroupEntries.map((entry) => entry.id).join('\u0000'),
+  () => {
+    const validIds = new Set(props.systemGroupEntries.map((entry) => entry.id))
+    systemSelectedIds.value = new Set([...systemSelectedIds.value].filter((id) => validIds.has(id)))
+    if (props.systemGroupEntries.length === 0) systemSelectionMode.value = false
   }
 )
 
@@ -327,6 +427,8 @@ const emit = defineEmits<{
   'update-session-timeout': [value: number | string]
   'open-password-sheet': []
   'open-password-health': []
+  'open-passkeys': []
+  'toggle-device-unlock': [enabled: boolean]
   'open-android-settings': []
   'open-plugin': []
   'update-manifest-url': [value: string]
@@ -343,12 +445,18 @@ const emit = defineEmits<{
   'download-cloud': []
   'refresh-cloud-list': []
   'select-cloud-backup': [name: string]
+  'export-portable-backup': []
+  'import-portable-backup': []
   'update-log-limit': [value: number | string]
   'clear-logs': []
   'update-system-group': [key: 'archived' | 'trashed']
   'restore-entry': [entryId: string]
   'trash-entry': [entryId: string]
   'purge-entry': [entryId: string]
+  'purge-all-entries': []
+  'restore-entries': [entryIds: string[]]
+  'trash-entries': [entryIds: string[]]
+  'purge-entries': [entryIds: string[]]
 }>()
 
 function selectSection(section: DrawerSection) {
@@ -362,6 +470,29 @@ function updateOss(field: keyof OssSettings, value: unknown) {
 
 function toggleSessionAutoLock(enabled: boolean) {
   emit('update-session-timeout', enabled ? props.sessionTimeoutDefault : 0)
+}
+
+function toggleSystemSelectionMode() {
+  if (systemSelectionMode.value) resetSystemSelection()
+  else systemSelectionMode.value = true
+}
+
+function resetSystemSelection() {
+  systemSelectionMode.value = false
+  systemSelectedIds.value = new Set()
+}
+
+function toggleSystemEntry(entryId: string) {
+  const next = new Set(systemSelectedIds.value)
+  if (next.has(entryId)) next.delete(entryId)
+  else next.add(entryId)
+  systemSelectedIds.value = next
+}
+
+function toggleAllSystemEntries() {
+  systemSelectedIds.value = allSystemEntriesSelected.value
+    ? new Set()
+    : new Set(props.systemGroupEntries.map((entry) => entry.id))
 }
 
 </script>

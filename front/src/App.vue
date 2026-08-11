@@ -10,9 +10,11 @@
       :new-password="newPassword"
       :confirm-password="confirmPassword"
       :import-legacy="importLegacy"
+      :device-unlock-enabled="deviceUnlockState.enabled"
       @retry="loadState"
       @unlock="unlockVault"
       @create="createVault"
+      @quick-unlock="unlockWithDevice"
       @update:password="password = $event"
       @update:new-password="newPassword = $event"
       @update:confirm-password="confirmPassword = $event"
@@ -25,6 +27,10 @@
         :keyword="keyword"
         :entry-filter="entryFilter"
         :drag-mode="dragMode"
+        :selection-mode="batchSelectionMode"
+        :selection-count="batchSelectedEntryIds.size"
+        :all-visible-selected="allVisibleBatchEntriesSelected"
+        :all-selected-favorite="allBatchEntriesFavorited"
         :create-menu-open="createMenuOpen"
         :more-menu-open="moreMenuOpen"
         :create-menu-actions="createMenuActions"
@@ -40,6 +46,12 @@
         @close-create-menu="createMenuOpen = false"
         @close-more-menu="moreMenuOpen = false"
         @exit-drag="toggleDragMode"
+        @exit-selection="exitBatchSelection"
+        @toggle-select-all="toggleAllVisibleBatchEntries"
+        @batch-move="openBatchMoveSheet"
+        @batch-favorite="applyBatchFavorite"
+        @batch-archive="archiveSelectedEntries"
+        @batch-trash="trashSelectedEntries"
       />
 
       <div ref="workspaceGrid" class="workspace-grid-host">
@@ -49,6 +61,9 @@
         :stats="stats"
         :auto-expand="Boolean(keyword.trim()) || entryFilter !== 'all'"
         :draggable-enabled="dragMode && !keyword.trim() && entryFilter === 'all'"
+        :favorite-ids="favoriteEntryIds"
+        :selection-mode="batchSelectionMode"
+        :selected-ids="batchSelectedEntryIds"
         :grid-style="desktopGridStyle"
         :pane-width="paneWidth"
         :pane-width-min="PANE_WIDTH_MIN"
@@ -58,13 +73,19 @@
         :totp-code="totpCode"
         :totp-remaining="totpRemaining"
         :totp-progress="totpProgress"
+        :linked-passkeys="selectedEntryPasskeys"
+        :attachment-busy="attachmentBusy"
+        :attachment-actions-supported="!isAndroidRuntime"
         @view="openView"
         @edit="openEdit"
+        @move="openMoveSheet"
         @duplicate="duplicateEntry"
         @delete="deleteEntry"
         @create="openCreateSheet"
         @move-entry="moveEntry"
         @context-menu="openEntryContextMenu"
+        @toggle-favorite="toggleEntryFavorite"
+        @toggle-selection="toggleBatchEntrySelection"
         @disable="disableEntry"
         @restore="restoreEntry"
         @purge="purgeEntry"
@@ -73,6 +94,11 @@
         @copy="copyText"
         @toggle-password="showPassword = !showPassword"
         @refresh-totp="refreshTotp()"
+        @open-passkey="openPasskeyManager"
+        @unlink-passkey="unlinkPasskeyFromEntry"
+        @add-attachment="addEntryAttachment"
+        @save-attachment="saveEntryAttachment"
+        @remove-attachment="removeEntryAttachment"
         @resize-keyboard="resizePaneWithKeyboard"
         @resize-pointer="startPaneResize"
         />
@@ -88,7 +114,11 @@
           :totp-code="totpCode"
           :totp-remaining="totpRemaining"
           :totp-progress="totpProgress"
+          :linked-passkeys="selectedEntryPasskeys"
+          :attachment-busy="attachmentBusy"
+          :attachment-actions-supported="!isAndroidRuntime"
           @edit="openEdit"
+          @move="openMoveSheet"
           @duplicate="duplicateEntry"
           @delete="deleteEntry"
           @disable="disableEntry"
@@ -99,6 +129,11 @@
           @copy="copyText"
           @toggle-password="showPassword = !showPassword"
           @refresh-totp="refreshTotp()"
+          @open-passkey="openPasskeyManager"
+          @unlink-passkey="unlinkPasskeyFromEntry"
+          @add-attachment="addEntryAttachment"
+          @save-attachment="saveEntryAttachment"
+          @remove-attachment="removeEntryAttachment"
         />
       </div>
     </van-popup>
@@ -109,6 +144,39 @@
       cancel-text="取消"
       close-on-click-action
       @select="handleCreateAction"
+    />
+
+    <van-action-sheet
+      v-model:show="moveSheetOpen"
+      class="move-destination-sheet"
+      title="移动到"
+      :actions="moveDestinationActions"
+      cancel-text="取消"
+      close-on-click-action
+      @select="selectMoveDestination"
+      @closed="moveEntryId = ''"
+    />
+
+    <van-action-sheet
+      v-model:show="batchMoveSheetOpen"
+      class="move-destination-sheet"
+      title="批量移动到"
+      :actions="batchMoveDestinationActions"
+      cancel-text="取消"
+      close-on-click-action
+      @select="selectBatchMoveDestination"
+    />
+
+    <QuickAccess
+      :open="quickAccessOpen"
+      :entries="vault?.entries || []"
+      :favorite-ids="favoriteEntryIds"
+      :recent-ids="recentEntryIds"
+      @update:open="quickAccessOpen = $event"
+      @open-entry="openQuickAccessEntry"
+      @copy="copyText"
+      @copy-totp="copyQuickAccessTotp"
+      @open-website="openQuickAccessWebsite"
     />
 
     <div
@@ -138,6 +206,7 @@
       :editing-id="editingId"
       :busy="busy"
       :totp-code="totpCode"
+      :autofill-match-mode-options="autofillMatchModeOptions"
       :login-account-source-options="loginAccountSourceOptions"
       @update:open="editorOpen = $event"
       @update-field="updateEditorField"
@@ -185,6 +254,10 @@
       :session-timeout-default="SESSION_TIMEOUT_DEFAULT_MINUTES"
       :password-health-label="passwordHealthSettingsLabel"
       :password-health-score="passwordHealthScoreLabel"
+      :passkey-count="passkeyPresentationItems.length"
+      :device-unlock-supported="deviceUnlockState.supported"
+      :device-unlock-enabled="deviceUnlockState.enabled"
+      :device-unlock-label="deviceUnlockSettingsLabel"
       :show-android-autofill-settings="showAndroidAutofillSettings"
       :android-autofill-enabled="androidAutofill?.enabled === true"
       :android-autofill-status="androidAutofillStatus"
@@ -212,6 +285,9 @@
       :cloud-info="cloudInfo"
       :cloud-backups="cloudBackups"
       :backup-status="backupStatus"
+      :portable-backup-supported="isDesktopRuntime"
+      :portable-backup-busy="portableBackupBusy"
+      :portable-backup-status="portableBackupStatus"
       :cloud-sync-log-limit="cloudSyncLogLimit"
       :cloud-sync-log-limit-min="CLOUD_SYNC_LOG_LIMIT_MIN"
       :cloud-sync-log-limit-max="CLOUD_SYNC_LOG_LIMIT_MAX"
@@ -238,6 +314,8 @@
       @update-session-timeout="updateSessionTimeout"
       @open-password-sheet="openPasswordSheet"
       @open-password-health="openPasswordHealth"
+      @open-passkeys="openPasskeyManager()"
+      @toggle-device-unlock="toggleDeviceUnlock"
       @open-android-settings="openAndroidAutofillSettings"
       @open-plugin="openPluginDetail"
       @update-manifest-url="updateManifestUrl = $event"
@@ -254,12 +332,18 @@
       @download-cloud="downloadCloudBackup"
       @refresh-cloud-list="refreshCloudBackupList"
       @select-cloud-backup="selectCloudBackup"
+      @export-portable-backup="exportPortableBackupPackage"
+      @import-portable-backup="beginPortableBackupImport"
       @update-log-limit="setCloudSyncLogLimit"
       @clear-logs="clearCloudSyncLogs"
       @update-system-group="systemGroupKey = $event"
       @restore-entry="restoreEntry"
       @trash-entry="trashEntry"
       @purge-entry="purgeEntry"
+      @purge-all-entries="purgeAllTrashedEntries"
+      @restore-entries="restoreEntries"
+      @trash-entries="trashEntries"
+      @purge-entries="purgeEntries"
     />
 
 
@@ -275,6 +359,25 @@
       </div>
     </van-popup>
 
+    <van-popup v-model:show="deviceUnlockSheetOpen" round class="password-popup" :duration="0.14" @closed="resetDeviceUnlockDraft">
+      <div class="password-popup-inner">
+        <van-nav-bar safe-area-inset-top title="启用设备快速解锁" left-arrow @click-left="deviceUnlockSheetOpen = false" />
+        <van-form class="password-popup-form" @submit="enableDeviceUnlock">
+          <p class="settings-note compact-note">使用 Windows 当前用户保护设备密钥。主密码不会保存，超过所选期限后需重新输入。</p>
+          <van-field v-model="deviceUnlockPassword" type="password" label="当前主密码" autocomplete="current-password" />
+          <label class="device-unlock-interval-field">
+            <span>重新验证</span>
+            <select v-model.number="deviceUnlockReauthSeconds" aria-label="设备快速解锁重新验证周期">
+              <option :value="86400">1 天</option>
+              <option :value="604800">7 天</option>
+              <option :value="2592000">30 天</option>
+            </select>
+          </label>
+          <van-button block type="primary" native-type="submit" :loading="busy">启用</van-button>
+        </van-form>
+      </div>
+    </van-popup>
+
     <CloudPasswordPrompt
       :open="cloudPasswordPromptOpen"
       :password="cloudPasswordPromptValue"
@@ -283,6 +386,21 @@
       @submit="submitCloudPasswordPrompt"
       @cancel="cancelCloudPasswordPrompt"
       @closed="handleCloudPasswordPromptClosed"
+    />
+
+    <CloudPasswordPrompt
+      :open="portableBackupPasswordOpen"
+      :password="portableBackupPassword"
+      :busy="portableBackupBusy"
+      title="恢复完整备份"
+      :note="portableBackupPasswordNote"
+      label="备份密码"
+      placeholder="备份未设置主密码可留空"
+      @update:open="portableBackupPasswordOpen = $event"
+      @update:password="portableBackupPassword = $event"
+      @submit="submitPortableBackupImport"
+      @cancel="cancelPortableBackupImport"
+      @closed="handlePortableBackupPromptClosed"
     />
 
     <CloudSyncReview
@@ -337,70 +455,45 @@
       </section>
     </van-popup>
 
-    <van-popup v-model:show="passwordHealthOpen" position="right" class="plugin-detail-popup password-health-popup" :duration="0.16" lazy-render>
-      <section class="plugin-detail-shell">
-        <van-nav-bar safe-area-inset-top title="密码健康" left-arrow @click-left="passwordHealthOpen = false" />
-        <div class="plugin-detail-body password-health-body">
-          <div class="password-health-summary" aria-label="密码健康汇总">
-            <div>
-              <strong>{{ passwordHealthReport.summary.atRiskCount }}</strong>
-              <span>需处理</span>
-            </div>
-            <div>
-              <strong>{{ passwordHealthReport.summary.weakCount }}</strong>
-              <span>弱密码</span>
-            </div>
-            <div>
-              <strong>{{ passwordHealthReport.summary.reusedEntryCount }}</strong>
-              <span>重复使用</span>
-            </div>
-            <div>
-              <strong>{{ passwordHealthReport.summary.missingCount }}</strong>
-              <span>未设置</span>
-            </div>
-          </div>
-
-          <div class="password-health-section-head">
-            <strong>风险条目</strong>
-            <span>{{ passwordHealthReport.summary.atRiskCount }} / {{ passwordHealthReport.summary.analyzedCount }}</span>
-          </div>
-          <div v-if="passwordHealthRiskEntries.length" class="password-health-list">
-            <button
-              v-for="item in passwordHealthRiskEntries"
-              :key="item.entryId"
-              type="button"
-              class="password-health-entry"
-              @click="openPasswordHealthEntry(item.entryId)"
-            >
-              <span class="password-health-entry-icon"><van-icon name="warning-o" /></span>
-              <span class="password-health-entry-copy">
-                <strong>{{ item.title || '未命名条目' }}</strong>
-                <small>{{ passwordHealthStrengthLabel(item) }}</small>
-                <span class="password-health-issues">
-                  <em v-for="issue in item.issues" :key="issue">{{ passwordHealthIssueLabel(item, issue) }}</em>
-                </span>
-              </span>
-              <van-icon class="password-health-entry-arrow" name="arrow" />
-            </button>
-          </div>
-          <van-empty v-else image="search" description="未发现密码风险" />
-          <p v-if="passwordHealthReport.truncated" class="password-health-warning">条目数量超过本次分析上限，结果不完整</p>
-        </div>
-      </section>
-    </van-popup>
+    <PasswordHealthCenter
+      :open="passwordHealthOpen"
+      :report="passwordHealthReport"
+      :expected-totp-ids="expectedTotpEntryIds"
+      :ignored-findings="ignoredHealthFindings"
+      @update:open="passwordHealthOpen = $event"
+      @open-entry="openPasswordHealthEntry"
+      @remediate="remediatePasswordHealthFinding"
+      @ignore-finding="handleIgnoreHealthFinding"
+      @restore-finding="handleRestoreHealthFinding"
+      @toggle-totp-expected="handleToggleExpectedTotp"
+    />
+    <PasskeyManager
+      :open="passkeyManagerOpen"
+      :items="passkeyPresentationItems"
+      :login-options="passkeyLoginOptions"
+      :busy="busy"
+      :initial-id="passkeyManagerInitialId"
+      @update:open="passkeyManagerOpen = $event"
+      @save="saveManagedPasskey"
+      @delete="deleteManagedPasskey"
+      @open-entry="openPasskeyLinkedEntry"
+    />
   </main>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { showConfirmDialog, showFailToast, showSuccessToast, showToast } from 'vant'
 import AuthScreen from './components/auth/AuthScreen.vue'
 import EntryEditor from './components/editor/EntryEditor.vue'
 import CredentialGenerator from './components/tools/CredentialGenerator.vue'
 import ImportWizard from './components/tools/ImportWizard.vue'
+import PasskeyManager from './components/tools/PasskeyManager.vue'
+import PasswordHealthCenter from './components/tools/PasswordHealthCenter.vue'
 import CloudPasswordPrompt from './components/sync/CloudPasswordPrompt.vue'
 import CloudSyncReview from './components/sync/CloudSyncReview.vue'
 import EntryDetailPane from './components/workspace/EntryDetailPane.vue'
+import QuickAccess from './components/workspace/QuickAccess.vue'
 import SettingsDrawer from './components/settings/SettingsDrawer.vue'
 import WorkspaceHeader from './components/workspace/WorkspaceHeader.vue'
 import VaultWorkspace from './components/workspace/VaultWorkspace.vue'
@@ -418,7 +511,9 @@ import { useEntryWorkspace } from './composables/useEntryWorkspace'
 import { useSettingsPanel, type DrawerSection, type SystemGroupKey } from './composables/useSettingsPanel'
 import { useVaultSession } from './composables/useVaultSession'
 import { DEFAULT_OSS_OBJECT_NAME, normalizeObjectName } from './services/aliyunOss'
+import { normalizeAutofillMatchMode, normalizeAutofillRuleValues } from './services/autofillRules.ts'
 import { api } from './services/api'
+import { MAX_ATTACHMENT_BYTES } from './services/attachmentCrypto.ts'
 import { createAliyunOssVaultStore } from './services/cloud/aliyunOssVaultStore'
 import {
   RemoteVaultStatus,
@@ -457,18 +552,50 @@ import {
 import { readSyncCheckpoint, writeSyncCheckpoint } from './services/sync/syncCheckpointStore'
 import { mergeVaultPayloads, type VaultMergeConflict } from './services/sync/threeWayVaultMerge'
 import {
+  collectAttachmentReferences,
+  ensureLocalAttachmentObjects,
+  ensureRemoteAttachmentObjects
+} from './services/sync/attachmentObjectSync.ts'
+import {
   canonicalVaultReadCandidates,
   passkeyStateFingerprint,
   versionedVaultObjectName
 } from './services/sync/passkeyRemoteGate'
 import {
   analyzePasswordHealth,
-  type PasswordHealthEntryResult,
   type PasswordHealthIssue
 } from './services/passwordHealth'
+import {
+  clearIgnoredHealthFindingsForEntry,
+  healthFindingKey,
+  ignoreHealthFinding,
+  loadExpectedTotpEntryIds,
+  loadIgnoredHealthFindings,
+  pruneHealthPreferences,
+  restoreHealthFinding,
+  setExpectedTotpEntryId
+} from './services/healthPreferences.ts'
 import { clearSensitiveClipboard, copySensitiveText } from './services/clipboardSecurity'
 import { insertDuplicateEntry } from './services/entryDuplication.ts'
+import {
+  collectEntryIds,
+  isEntryInsideAny,
+  moveSelectedEntries,
+  normalizeSelectedRootIds,
+  removeSelectedEntries
+} from './services/entryBatchOperations.ts'
 import { filterVaultEntries } from './services/entryWorkspace.ts'
+import { removeTrashedEntries } from './services/entryTrash.ts'
+import { updatePasskeyMetadata } from './services/passkeyManagement.ts'
+import { buildPasskeyLoginOptions, buildPasskeyPresentationItems } from './services/passkeyPresentation.ts'
+import {
+  loadFavoriteEntryIds,
+  loadRecentEntryIds,
+  pruneEntryPreferenceIds,
+  rememberRecentEntryId,
+  setFavoriteEntryIds,
+  toggleFavoriteEntryId
+} from './services/entryListPreferences.ts'
 import { ENTRY_KIND_OPTIONS, entryKindLabel, starterCustomFields } from './services/entryKinds.ts'
 import type { ImportedVaultRecord } from './services/vaultImport.ts'
 import { AutoSyncPasswordGate } from './services/autoSyncPasswordGate'
@@ -496,16 +623,20 @@ import {
 } from './services/uiScale'
 import type {
   AndroidAutofillState,
+  AutofillMatchMode,
   ApiResult,
   AppState,
   AppUpdateCheck,
   AppUpdateProgress,
+  DeviceUnlockState,
   EntryHistoryAction,
   EntryKind,
   EntryStatus,
   LoginAccountSource,
   PluginListenerState,
+  PortableBackupSelection,
   VaultEntry,
+  VaultAttachment,
   VaultPayload
 } from './types'
 
@@ -515,6 +646,12 @@ type MoveEntryPayload = {
   entryId: string
   targetParentId: string
   targetIndex: number
+}
+type MoveDestinationAction = {
+  name: string
+  subname?: string
+  icon?: string
+  targetParentId: string
 }
 type AndroidAutofillLaunchContext = {
   active: boolean
@@ -592,6 +729,7 @@ const state = reactive<AppState>({
 const stateLoading = ref(true)
 const stateError = ref('')
 const busy = ref(false)
+const attachmentBusy = ref(false)
 const pluginBusy = ref(false)
 const androidAutofillBusy = ref(false)
 const updateBusy = ref<'check' | 'download' | 'apply' | ''>('')
@@ -605,11 +743,26 @@ const newPassword = ref('')
 const confirmPassword = ref('')
 const cloudPasswordPromptOpen = ref(false)
 const cloudPasswordPromptValue = ref('')
+const portableBackupBusy = ref(false)
+const portableBackupStatus = ref('')
+const portableBackupSelection = ref<PortableBackupSelection | null>(null)
+const portableBackupPasswordOpen = ref(false)
+const portableBackupPassword = ref('')
 const changePasswordValue = ref('')
 const changePasswordConfirm = ref('')
 const pluginExtensionId = ref('')
 const importLegacy = ref(true)
 const vault = ref<VaultPayload | null>(null)
+const favoriteEntryIds = ref<Set<string>>(loadFavoriteEntryIds())
+const recentEntryIds = ref<string[]>(loadRecentEntryIds())
+const expectedTotpEntryIds = ref<Set<string>>(loadExpectedTotpEntryIds())
+const ignoredHealthFindings = ref(loadIgnoredHealthFindings())
+const moveSheetOpen = ref(false)
+const moveEntryId = ref('')
+const batchSelectionMode = ref(false)
+const batchSelectedEntryIds = ref<Set<string>>(new Set())
+const batchMoveSheetOpen = ref(false)
+const quickAccessOpen = ref(false)
 const entryContextMenuOpen = ref(false)
 const createParentId = ref('')
 const searchOpen = ref(false)
@@ -645,6 +798,12 @@ const generatorApplyToPassword = ref(false)
 const generatorResetKey = ref(0)
 const importOpen = ref(false)
 const importResetKey = ref(0)
+const deviceUnlockState = ref<DeviceUnlockState>({ supported: false, enabled: false, expiresAt: 0 })
+const deviceUnlockSheetOpen = ref(false)
+const deviceUnlockPassword = ref('')
+const deviceUnlockReauthSeconds = ref(7 * 24 * 60 * 60)
+const passkeyManagerOpen = ref(false)
+const passkeyManagerInitialId = ref('')
 const totpRemaining = ref(TOTP_PERIOD_SECONDS)
 const totpPeriodSeconds = ref(TOTP_PERIOD_SECONDS)
 const totpRequestId = ref(0)
@@ -685,6 +844,16 @@ const createMenuActions = ENTRY_KIND_OPTIONS.map((option) => ({
   icon: option.icon,
   kind: option.kind
 }))
+const moveDestinationActions = computed<MoveDestinationAction[]>(() => {
+  const source = findEntry(vault.value?.entries || [], moveEntryId.value)
+  if (!source || !isActiveEntry(source)) return []
+
+  const actions: MoveDestinationAction[] = [
+    { name: '根目录', subname: '顶层条目', icon: 'home-o', targetParentId: '' }
+  ]
+  appendMoveDestinationActions(activeTree(vault.value?.entries || []), [], source, actions)
+  return actions
+})
 const {
   keyword,
   entryFilter,
@@ -702,8 +871,28 @@ const {
 } = useEntryWorkspace(
   () => vault.value?.entries || [],
   activeTree,
-  filterVaultEntries
+  (entries, term, mode) => filterVaultEntries(entries, term, mode, {
+    favoriteIds: favoriteEntryIds.value,
+    recentIds: recentEntryIds.value
+  })
 )
+const visibleBatchEntryIds = computed(() => collectEntryIds(filteredEntries.value))
+const allVisibleBatchEntriesSelected = computed(() => {
+  const visibleIds = visibleBatchEntryIds.value
+  return visibleIds.length > 0 && visibleIds.every((id) => batchSelectedEntryIds.value.has(id))
+})
+const allBatchEntriesFavorited = computed(() => {
+  const selectedIds = [...batchSelectedEntryIds.value]
+  return selectedIds.length > 0 && selectedIds.every((id) => favoriteEntryIds.value.has(id))
+})
+const batchMoveDestinationActions = computed<MoveDestinationAction[]>(() => {
+  if (!vault.value || batchSelectedEntryIds.value.size === 0) return []
+  const actions: MoveDestinationAction[] = [
+    { name: '根目录', subname: '顶层条目', icon: 'home-o', targetParentId: '' }
+  ]
+  appendBatchMoveDestinationActions(activeTree(vault.value.entries), [], actions)
+  return actions
+})
 const entryContextActions = computed(() => {
   const entry = findEntry(vault.value?.entries || [], contextEntryId.value)
   if (!entry) return []
@@ -739,8 +928,14 @@ const entryContextMenuStyle = computed<CssVars>(() => ({
   top: `${entryContextMenuY.value}px`
 }))
 const moreActions = computed(() => [
+  { text: '快速访问', icon: 'search', key: 'quick-access' },
   { text: '凭据生成器', icon: 'replay', key: 'generator' },
   { text: '导入数据', icon: 'upgrade', key: 'import' },
+  {
+    text: batchSelectionMode.value ? '退出批量选择' : '批量选择',
+    icon: 'passed',
+    key: 'select'
+  },
   {
     text: dragMode.value ? '退出拖拽模式' : '拖拽模式',
     icon: 'sort',
@@ -757,19 +952,50 @@ const loginAccountSourceOptions: Array<{ label: string; value: LoginAccountSourc
   { label: '邮箱', value: 'email' },
   { label: '手机', value: 'phone' }
 ]
+const autofillMatchModeOptions: Array<{ label: string; value: AutofillMatchMode }> = [
+  { label: '根域及子域', value: 'base-domain' },
+  { label: '仅精确主机', value: 'exact-host' },
+  { label: '仅下级子域', value: 'subdomain' },
+  { label: 'URL 前缀', value: 'url-prefix' },
+  { label: '永不填充', value: 'never' }
+]
 
 const unlocked = computed(() => Boolean(vault.value) && !state.locked)
 const vaultSession = useVaultSession(() => {
   if (unlocked.value) lockVault()
 }, () => sessionTimeoutMilliseconds(sessionTimeoutMinutes.value))
 const passwordMask = computed(() => selectedEntry.value?.password ? '••••••••••••' : '未设置')
+const deviceUnlockSettingsLabel = computed(() => {
+  if (!deviceUnlockState.value.enabled) return '使用 Windows 当前用户保护'
+  const expiresAt = deviceUnlockState.value.expiresAt
+  return expiresAt > 0 ? `有效至 ${new Date(expiresAt * 1000).toLocaleDateString()}` : '已启用'
+})
+const passkeyPresentationItems = computed(() => buildPasskeyPresentationItems(
+  vault.value?.passkeys || [],
+  vault.value?.entries || []
+))
+const passkeyLoginOptions = computed(() => buildPasskeyLoginOptions(vault.value?.entries || []))
+const selectedEntryPasskeys = computed(() => {
+  const entryId = selectedEntry.value?.kind === 'login' ? selectedEntry.value.id : ''
+  return entryId
+    ? passkeyPresentationItems.value.filter((item) => item.linkedEntryId === entryId)
+    : []
+})
 const totpProgress = computed(() => Math.round((totpRemaining.value / totpPeriodSeconds.value) * 100))
-const passwordHealthReport = computed(() => analyzePasswordHealth(vault.value?.entries || []))
-const passwordHealthRiskEntries = computed(() => passwordHealthReport.value.entries.filter((item) => item.issues.length > 0))
+const passwordHealthReport = computed(() => analyzePasswordHealth(vault.value?.entries || [], {
+  totpExpectedIds: expectedTotpEntryIds.value
+}))
+const passwordHealthPendingEntryCount = computed(() => new Set(
+  passwordHealthReport.value.entries.flatMap((entry) => entry.issues
+    .filter((issue) => !ignoredHealthFindings.value.has(healthFindingKey(entry.entryId, issue)))
+    .map(() => entry.entryId))
+).size)
 const passwordHealthSettingsLabel = computed(() => {
   const summary = passwordHealthReport.value.summary
-  if (!summary.analyzedCount) return '暂无登录条目'
-  return summary.atRiskCount ? `${summary.atRiskCount} 项需处理` : `已检查 ${summary.analyzedCount} 项`
+  if (!summary.scannedEntryCount) return '暂无可检查条目'
+  return passwordHealthPendingEntryCount.value
+    ? `${passwordHealthPendingEntryCount.value} 项需处理`
+    : `已检查 ${summary.scannedEntryCount} 项`
 })
 const passwordHealthScoreLabel = computed(() => {
   const summary = passwordHealthReport.value.summary
@@ -780,6 +1006,16 @@ const drawerSectionTitle = computed(() => {
   if (drawerSection.value === 'updates') return '更新'
   if (drawerSection.value === 'system') return '系统分组'
   return '备份'
+})
+const portableBackupPasswordNote = computed(() => {
+  const selected = portableBackupSelection.value
+  if (!selected) return '请输入备份包创建时使用的主密码；未设置主密码可留空。'
+  const details = [
+    selected.name || '已选择备份包',
+    `${selected.attachmentCount || 0} 个附件`,
+    selected.packageBytes ? formatBytes(selected.packageBytes) : ''
+  ].filter(Boolean).join(' · ')
+  return `${details}。恢复会替换当前保险库，请输入该备份包的主密码；未设置可留空。`
 })
 const pluginListenerStatus = computed(() => {
   const listener = pluginListener.value
@@ -920,6 +1156,8 @@ onMounted(() => {
   window.addEventListener('focus', resetAndroidInstallBusy)
   window.addEventListener('focus', scheduleExternalVaultRefresh)
   window.addEventListener('focus', scheduleAutoCloudDownloadCheck)
+  window.addEventListener('mypwdmg:quick-access', openQuickAccess)
+  window.addEventListener('mypwdmg:lock-request', handleDesktopLockRequest)
   document.addEventListener('selectstart', suppressNonEditableSelection)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   window.__mypwdmgHandleNativeBack = handleNativeBack
@@ -958,6 +1196,8 @@ onUnmounted(() => {
   window.removeEventListener('focus', resetAndroidInstallBusy)
   window.removeEventListener('focus', scheduleExternalVaultRefresh)
   window.removeEventListener('focus', scheduleAutoCloudDownloadCheck)
+  window.removeEventListener('mypwdmg:quick-access', openQuickAccess)
+  window.removeEventListener('mypwdmg:lock-request', handleDesktopLockRequest)
   document.removeEventListener('selectstart', suppressNonEditableSelection)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (externalVaultRefreshTimer) window.clearTimeout(externalVaultRefreshTimer)
@@ -986,6 +1226,12 @@ function handleNativeBack() {
 
 function handleGlobalKeydown(event: KeyboardEvent) {
   handleSessionActivity(event)
+  if (event.ctrlKey && event.shiftKey && event.code === 'Space') {
+    event.preventDefault()
+    event.stopPropagation()
+    openQuickAccess()
+    return
+  }
   if (event.key !== 'Escape' || event.defaultPrevented) return
   if (document.querySelector('.van-dialog')) return
   if (!closeTopLayer()) return
@@ -1011,6 +1257,14 @@ function closeTopLayer() {
     hideCloudSyncReview()
     return true
   }
+  if (quickAccessOpen.value) {
+    quickAccessOpen.value = false
+    return true
+  }
+  if (passkeyManagerOpen.value) {
+    passkeyManagerOpen.value = false
+    return true
+  }
   if (pluginDetailOpen.value) {
     pluginDetailOpen.value = false
     return true
@@ -1021,6 +1275,10 @@ function closeTopLayer() {
   }
   if (passwordSheetOpen.value) {
     passwordSheetOpen.value = false
+    return true
+  }
+  if (deviceUnlockSheetOpen.value) {
+    deviceUnlockSheetOpen.value = false
     return true
   }
   if (editorOpen.value) {
@@ -1034,6 +1292,15 @@ function closeTopLayer() {
   }
   if (createSheetOpen.value) {
     createSheetOpen.value = false
+    return true
+  }
+  if (moveSheetOpen.value) {
+    moveSheetOpen.value = false
+    moveEntryId.value = ''
+    return true
+  }
+  if (batchMoveSheetOpen.value) {
+    batchMoveSheetOpen.value = false
     return true
   }
   if (detailOpen.value) {
@@ -1060,7 +1327,60 @@ function closeTopLayer() {
     dragMode.value = false
     return true
   }
+  if (batchSelectionMode.value) {
+    exitBatchSelection()
+    return true
+  }
   return false
+}
+
+function openQuickAccess() {
+  if (!unlocked.value) {
+    showToast('请先解锁保险库')
+    return
+  }
+  if (busy.value) {
+    showToast('正在处理，请稍候')
+    return
+  }
+  if (editorOpen.value) {
+    showToast('请先完成或关闭当前编辑')
+    return
+  }
+  exitBatchSelection()
+  detailOpen.value = false
+  drawerOpen.value = false
+  createSheetOpen.value = false
+  moveSheetOpen.value = false
+  entryContextMenuOpen.value = false
+  createMenuOpen.value = false
+  moreMenuOpen.value = false
+  quickAccessOpen.value = true
+}
+
+function openQuickAccessEntry(entry: VaultEntry) {
+  quickAccessOpen.value = false
+  showEntryDetail(entry)
+}
+
+async function copyQuickAccessTotp(entry: VaultEntry) {
+  if (!entry.totpSecret) return showToast('该条目没有 TOTP')
+  try {
+    const code = await generateTotp(entry.totpSecret)
+    await copyText(code)
+  } catch {
+    showFailToast('TOTP 生成失败')
+  }
+}
+
+async function openQuickAccessWebsite(domain: string) {
+  const target = /^https?:\/\//i.test(domain) ? domain : `https://${domain}`
+  const result = await api.openExternalUrl(target)
+  if (!result.ok) showFailToast(result.message || '打开网站失败')
+}
+
+function handleDesktopLockRequest() {
+  if (unlocked.value) void lockVault()
 }
 
 function blurActiveElement() {
@@ -1142,6 +1462,7 @@ async function loadState() {
     } else {
       stateError.value = result.message || '无法连接本地保险库'
     }
+    await refreshDeviceUnlockState()
   } finally {
     stateLoading.value = false
   }
@@ -1191,6 +1512,35 @@ async function createVault() {
 
 async function unlockVault() {
   await unlockWithPassword(password.value)
+}
+
+async function refreshDeviceUnlockState() {
+  const result = await api.getDeviceUnlockState()
+  deviceUnlockState.value = result.ok && result.data
+    ? result.data
+    : { supported: false, enabled: false, expiresAt: 0 }
+}
+
+async function unlockWithDevice() {
+  if (busy.value || !deviceUnlockState.value.enabled) return
+  const generation = vaultSession.capture()
+  const operationId = beginBusyOperation()
+  try {
+    const result = await api.quickUnlock()
+    if (!result.ok || !result.data) {
+      await refreshDeviceUnlockState()
+      return showFailToast(result.message || '设备快速解锁失败')
+    }
+    if (!activateVaultSession(result.data, generation)) return
+    password.value = ''
+    scheduleAutoCloudDownloadCheck(true)
+    showSuccessToast('已使用设备密钥解锁')
+  } catch {
+    await refreshDeviceUnlockState()
+    showFailToast('设备快速解锁失败，请使用主密码')
+  } finally {
+    finishBusyOperation(operationId)
+  }
 }
 
 async function unlockWithPassword(candidate: string, silent = false) {
@@ -1253,7 +1603,7 @@ function scheduleExternalVaultRefresh() {
 async function refreshVaultFromDisk() {
   if (!isExternalNativeVaultMode.value || externalVaultRefreshing || !vault.value || state.locked) return
   if (busy.value || cloudBusy.value || pluginBusy.value || updateBusy.value) return
-  if (editorOpen.value || passwordSheetOpen.value || createSheetOpen.value) return
+  if (editorOpen.value || passwordSheetOpen.value || createSheetOpen.value || passkeyManagerOpen.value) return
 
   externalVaultRefreshing = true
   const generation = vaultSession.capture()
@@ -1302,8 +1652,34 @@ async function lockVault() {
 function publishVaultPayload(next: VaultPayload) {
   if (state.locked) return false
   vault.value = next
+  pruneLocalEntryPreferences(next.entries)
+  pruneBatchEntrySelection(next.entries)
   syncSettings(next.settings)
+  void collectLocalAttachmentObjects(next).catch(() => {})
   return true
+}
+
+function pruneBatchEntrySelection(entries: VaultEntry[]) {
+  if (!batchSelectionMode.value) return
+  const validIds = new Set(collectEntryIds(activeTree(entries)))
+  batchSelectedEntryIds.value = new Set([...batchSelectedEntryIds.value].filter((id) => validIds.has(id)))
+}
+
+function pruneLocalEntryPreferences(entries: VaultEntry[]) {
+  const activeEntries = flattenEntries(activeTree(entries))
+  const validIds = new Set(activeEntries.map((entry) => entry.id))
+  const validLoginIds = new Set(activeEntries.filter((entry) => entry.kind === 'login').map((entry) => entry.id))
+  const next = pruneEntryPreferenceIds(validIds, favoriteEntryIds.value, recentEntryIds.value)
+  favoriteEntryIds.value = next.favoriteIds
+  recentEntryIds.value = next.recentIds
+  const health = pruneHealthPreferences(
+    validIds,
+    validLoginIds,
+    expectedTotpEntryIds.value,
+    ignoredHealthFindings.value
+  )
+  expectedTotpEntryIds.value = health.expectedTotpIds
+  ignoredHealthFindings.value = health.ignoredFindings
 }
 
 async function saveVaultForCurrentSession(next: VaultPayload): Promise<ApiResult<VaultPayload>> {
@@ -1327,6 +1703,7 @@ function scheduleSessionLock() {
 }
 
 function applyLockedUiState() {
+  if (vault.value) pruneLocalEntryPreferences(vault.value.entries)
   cancelCloudOperation()
   resetBusyOperation()
   autoSyncPasswordGate.clearAll()
@@ -1334,6 +1711,8 @@ function applyLockedUiState() {
   state.locked = true
   state.expiresAt = 0
   vault.value = null
+  quickAccessOpen.value = false
+  exitBatchSelection()
   selectedEntry.value = null
   stopTotpTimer()
   totpRequestId.value += 1
@@ -1344,6 +1723,8 @@ function applyLockedUiState() {
   generatorResetKey.value += 1
   importOpen.value = false
   importResetKey.value += 1
+  passkeyManagerOpen.value = false
+  passkeyManagerInitialId.value = ''
   Object.assign(form, emptyEntry('login'))
   domainText.value = ''
   editingId.value = ''
@@ -1364,15 +1745,22 @@ function applyLockedUiState() {
   selectedCloudObjectName.value = ''
   cloudSyncPreview.value = null
   backupStatus.value = ''
+  portableBackupStatus.value = ''
+  portableBackupBusy.value = false
+  clearPortableBackupSelection()
   resolveCloudPasswordPrompt(null)
   syncSettings()
   editorOpen.value = false
   detailOpen.value = false
   createSheetOpen.value = false
+  moveSheetOpen.value = false
+  moveEntryId.value = ''
   entryContextMenuOpen.value = false
   passwordSheetOpen.value = false
   pluginDetailOpen.value = false
   passwordHealthOpen.value = false
+  deviceUnlockSheetOpen.value = false
+  resetDeviceUnlockDraft()
   cloudSyncReviewOpen.value = false
   dragMode.value = false
   createMenuOpen.value = false
@@ -1401,6 +1789,7 @@ function emptyEntry(kind: EntryKind): VaultEntry {
     statusUpdatedAt: 0,
     deletedAt: 0,
     domains: [],
+    autofillMatchMode: 'base-domain',
     username: '',
     email: '',
     password: '',
@@ -1409,6 +1798,7 @@ function emptyEntry(kind: EntryKind): VaultEntry {
     note: '',
     totpSecret: '',
     customFields: starterCustomFields(kind, makeId),
+    attachments: [],
     history: [],
     children: []
   }
@@ -1421,6 +1811,7 @@ function makeId() {
 function resetForm(entry: VaultEntry) {
   Object.assign(form, emptyEntry(entry.kind), JSON.parse(JSON.stringify(entry)))
   form.status = normalizeEntryStatus(form.status)
+  form.autofillMatchMode = normalizeAutofillMatchMode(form.autofillMatchMode)
   form.loginAccountSource = normalizeLoginAccountSource(form.loginAccountSource)
   domainText.value = (entry.domains || []).join('\n')
   totpCode.value = ''
@@ -1430,6 +1821,10 @@ function updateEditorField(field: string, value: unknown) {
   const text = String(value ?? '')
   if (field === 'loginAccountSource') {
     form.loginAccountSource = normalizeLoginAccountSource(value)
+    return
+  }
+  if (field === 'autofillMatchMode') {
+    form.autofillMatchMode = normalizeAutofillMatchMode(value)
     return
   }
   if (field === 'title' || field === 'username' || field === 'email' || field === 'password' || field === 'phone' || field === 'totpSecret' || field === 'note') {
@@ -1510,12 +1905,21 @@ function clampEntryContextMenuPosition(x: number, y: number) {
 
 function handleMoreAction(action: { key?: string }) {
   moreMenuOpen.value = false
+  if (action.key === 'quick-access') {
+    openQuickAccess()
+    return
+  }
   if (action.key === 'generator') {
     openCredentialGenerator(false)
     return
   }
   if (action.key === 'import') {
     importOpen.value = true
+    return
+  }
+  if (action.key === 'select') {
+    if (batchSelectionMode.value) exitBatchSelection()
+    else enterBatchSelection()
     return
   }
   if (action.key === 'drag') {
@@ -1534,6 +1938,7 @@ function toggleDragMode() {
   dragMode.value = !dragMode.value
   moreMenuOpen.value = false
   if (dragMode.value) {
+    exitBatchSelection()
     searchOpen.value = false
     detailOpen.value = false
     showToast('拖拽模式：长按条目移动')
@@ -1548,6 +1953,209 @@ async function safeExit() {
   } catch {
     showFailToast('安全退出失败，请手动关闭应用')
   }
+}
+
+function enterBatchSelection() {
+  batchSelectionMode.value = true
+  batchSelectedEntryIds.value = new Set()
+  batchMoveSheetOpen.value = false
+  dragMode.value = false
+  detailOpen.value = false
+  entryContextMenuOpen.value = false
+  createMenuOpen.value = false
+  moreMenuOpen.value = false
+  clearSelectedEntry()
+}
+
+function exitBatchSelection() {
+  batchSelectionMode.value = false
+  batchSelectedEntryIds.value = new Set()
+  batchMoveSheetOpen.value = false
+}
+
+function toggleBatchEntrySelection(entryId: string) {
+  if (!batchSelectionMode.value) return
+  const entry = findEntry(vault.value?.entries || [], entryId)
+  if (!entry || !isActiveEntry(entry)) return
+  const next = new Set(batchSelectedEntryIds.value)
+  if (next.has(entryId)) next.delete(entryId)
+  else next.add(entryId)
+  batchSelectedEntryIds.value = next
+}
+
+function toggleAllVisibleBatchEntries() {
+  if (!batchSelectionMode.value) return
+  const next = new Set(batchSelectedEntryIds.value)
+  if (allVisibleBatchEntriesSelected.value) {
+    for (const entryId of visibleBatchEntryIds.value) next.delete(entryId)
+  } else {
+    for (const entryId of visibleBatchEntryIds.value) next.add(entryId)
+  }
+  batchSelectedEntryIds.value = next
+}
+
+function applyBatchFavorite() {
+  const selectedIds = validActiveSelectedIds(batchSelectedEntryIds.value)
+  if (selectedIds.length === 0) return showToast('请先选择条目')
+  const favorite = !selectedIds.every((id) => favoriteEntryIds.value.has(id))
+  favoriteEntryIds.value = setFavoriteEntryIds(selectedIds, favorite, favoriteEntryIds.value)
+  showSuccessToast(favorite ? `已收藏 ${selectedIds.length} 项` : `已取消收藏 ${selectedIds.length} 项`)
+}
+
+function openBatchMoveSheet() {
+  if (validActiveSelectedIds(batchSelectedEntryIds.value).length === 0) return showToast('请先选择条目')
+  batchMoveSheetOpen.value = true
+}
+
+async function selectBatchMoveDestination(action: MoveDestinationAction) {
+  if (!vault.value || !action) return
+  const payload = cloneVault()
+  const moved = moveSelectedEntries(payload.entries, batchSelectedEntryIds.value, action.targetParentId)
+  if (moved.error === 'invalid-destination') return showFailToast('不能移动到所选分组或其子分组')
+  if (moved.error || moved.movedIds.length === 0) return showFailToast('所选条目已变化，请重新选择')
+
+  batchMoveSheetOpen.value = false
+  const result = await saveVaultForCurrentSession(payload)
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '批量移动失败')
+  if (!publishVaultPayload(result.data)) return
+  scheduleAutoCloudUpload()
+  exitBatchSelection()
+  showSuccessToast(`已移动 ${moved.movedIds.length} 项`)
+}
+
+async function archiveSelectedEntries() {
+  await archiveEntries([...batchSelectedEntryIds.value], true)
+}
+
+async function trashSelectedEntries() {
+  await trashEntries([...batchSelectedEntryIds.value], true)
+}
+
+async function archiveEntries(entryIds: string[], exitSelection = false) {
+  if (!vault.value || busy.value) return
+  const roots = selectedRootsWithStatus(entryIds, new Set<EntryStatus>(['active']))
+  if (roots.length === 0) return showToast('没有可归档的条目')
+  try {
+    await showConfirmDialog({
+      title: '批量归档',
+      message: `归档所选 ${roots.length} 项？分组内的内容会一并归档，可在系统分组中恢复。`,
+      confirmButtonText: '归档',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
+  const payload = cloneVault()
+  for (const entryId of roots) {
+    updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'disabled', '已批量归档'))
+  }
+  const result = await saveVaultForCurrentSession(payload)
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '批量归档失败')
+  if (!publishVaultPayload(result.data)) return
+  scheduleAutoCloudUpload()
+  if (exitSelection) exitBatchSelection()
+  drawerSection.value = 'system'
+  systemGroupKey.value = 'archived'
+  showSuccessToast(`已归档 ${roots.length} 项`)
+}
+
+async function trashEntries(entryIds: string[], exitSelection = false) {
+  if (!vault.value || busy.value) return
+  const roots = selectedRootsWithStatus(entryIds, new Set<EntryStatus>(['active', 'disabled']))
+  if (roots.length === 0) return showToast('没有可移入回收站的条目')
+  try {
+    await showConfirmDialog({
+      title: '批量移入回收站',
+      message: `将所选 ${roots.length} 项移入回收站？分组内的内容会一并处理。`,
+      confirmButtonText: '移入回收站',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
+  const payload = cloneVault()
+  for (const entryId of roots) {
+    updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'trashed', '已批量移入回收站'))
+  }
+  const result = await saveVaultForCurrentSession(payload)
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '批量删除失败')
+  if (!publishVaultPayload(result.data)) return
+  scheduleAutoCloudUpload()
+  if (exitSelection) exitBatchSelection()
+  drawerSection.value = 'system'
+  systemGroupKey.value = 'trashed'
+  showSuccessToast(`已移入回收站 ${roots.length} 项`)
+}
+
+async function restoreEntries(entryIds: string[]) {
+  if (!vault.value || busy.value) return
+  const roots = selectedRootsWithStatus(entryIds, new Set<EntryStatus>(['disabled', 'trashed']))
+  if (roots.length === 0) return showToast('没有可恢复的条目')
+  const payload = cloneVault()
+  for (const entryId of roots) {
+    const target = findEntry(payload.entries, entryId)
+    if (!target) continue
+    const updater = target.kind === 'folder'
+      ? (entry: VaultEntry) => markEntryStatus(entry, 'active', '批量恢复为正常条目')
+      : (entry: VaultEntry) => markEntrySelfStatus(entry, 'active', '批量恢复为正常条目')
+    updateEntryAndAncestorsById(
+      payload.entries,
+      entryId,
+      updater,
+      (entry) => markEntrySelfStatus(entry, 'active', '恢复上级分组')
+    )
+  }
+  const result = await saveVaultForCurrentSession(payload)
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '批量恢复失败')
+  if (!publishVaultPayload(result.data)) return
+  scheduleAutoCloudUpload()
+  showSuccessToast(`已恢复 ${roots.length} 项`)
+}
+
+async function purgeEntries(entryIds: string[]) {
+  if (!vault.value || busy.value) return
+  const roots = selectedRootsWithStatus(entryIds, new Set<EntryStatus>(['trashed']))
+  if (roots.length === 0) return showToast('没有可永久删除的条目')
+  try {
+    await showConfirmDialog({
+      title: '批量彻底删除',
+      message: `将永久删除所选 ${roots.length} 项及其分组内容，删除后无法恢复。`,
+      confirmButtonText: '继续',
+      confirmButtonColor: '#ee0a24'
+    })
+    await showConfirmDialog({
+      title: '再次确认',
+      message: '这会从加密保险库中永久移除所选内容。',
+      confirmButtonText: '永久删除',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
+  const payload = cloneVault()
+  const removedCount = removeSelectedEntries(payload.entries, roots)
+  if (removedCount === 0) return showToast('所选条目已变化')
+  const result = await saveVaultForCurrentSession(payload)
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '批量彻底删除失败')
+  if (!publishVaultPayload(result.data)) return
+  scheduleAutoCloudUpload()
+  showSuccessToast(`已永久删除 ${removedCount} 个条目`)
+}
+
+function validActiveSelectedIds(entryIds: Iterable<string>) {
+  const selectedIds = new Set(entryIds)
+  return collectEntryIds(activeTree(vault.value?.entries || [])).filter((id) => selectedIds.has(id))
+}
+
+function selectedRootsWithStatus(entryIds: Iterable<string>, statuses: ReadonlySet<EntryStatus>) {
+  if (!vault.value) return []
+  return normalizeSelectedRootIds(vault.value.entries, entryIds).filter((entryId) => {
+    const entry = findEntry(vault.value?.entries || [], entryId)
+    return Boolean(entry && statuses.has(normalizeEntryStatus(entry.status)))
+  })
 }
 
 function openCredentialGenerator(applyToPassword: boolean) {
@@ -1577,11 +2185,18 @@ function openView(entry: VaultEntry) {
 }
 
 function showEntryDetail(entry: VaultEntry) {
+  recentEntryIds.value = rememberRecentEntryId(entry.id, recentEntryIds.value)
   selectedEntry.value = entry
   showPassword.value = false
   totpCode.value = ''
   detailOpen.value = !isWide.value
   syncSelectedTotpTimer()
+}
+
+function toggleEntryFavorite(entryId: string) {
+  const entry = findEntry(vault.value?.entries || [], entryId)
+  if (!entry || !isActiveEntry(entry)) return
+  favoriteEntryIds.value = toggleFavoriteEntryId(entryId, favoriteEntryIds.value)
 }
 
 function openEdit(entry: VaultEntry) {
@@ -1624,6 +2239,10 @@ async function saveEntry() {
     if (!result.ok || !result.data) return handleVaultWriteError(result, '保存失败')
     if (!publishVaultPayload(result.data)) return
     selectedEntry.value = findEntry(vault.value.entries, entry.id)
+    ignoredHealthFindings.value = clearIgnoredHealthFindingsForEntry(
+      entry.id,
+      ignoredHealthFindings.value
+    )
     editorOpen.value = false
     scheduleAutoCloudUpload()
     showSuccessToast('已保存')
@@ -1631,6 +2250,105 @@ async function saveEntry() {
     showFailToast('保存失败，请重试')
   } finally {
     finishBusyOperation(operationId)
+  }
+}
+
+async function addEntryAttachment(entryId: string, file: File) {
+  if (!vault.value || attachmentBusy.value) return
+  const currentEntry = findEntry(vault.value.entries, entryId)
+  if (!currentEntry || currentEntry.kind === 'folder' || currentEntry.status === 'trashed') return
+  if ((currentEntry.attachments?.length || 0) >= 100) return showFailToast('每个条目最多保存 100 个附件')
+  if (file.size > MAX_ATTACHMENT_BYTES) return showFailToast('单个附件不能超过 10 MB')
+
+  attachmentBusy.value = true
+  let bytes: Uint8Array | null = null
+  let created: VaultAttachment | null = null
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer())
+    const createResult = await api.createAttachmentObject(file.name, file.type || 'application/octet-stream', bytes)
+    if (!createResult.ok || !createResult.data) {
+      return showFailToast(createResult.message || '附件加密保存失败')
+    }
+    created = createResult.data.reference
+
+    const payload = JSON.parse(JSON.stringify(createResult.data.vault)) as VaultPayload
+    const entry = findEntry(payload.entries, entryId)
+    if (!entry || entry.status === 'trashed') throw new Error('条目已发生变化')
+    const before = JSON.parse(JSON.stringify(entry)) as VaultEntry
+    entry.attachments = [...(entry.attachments || []), created]
+    appendEntryHistory(entry, 'updated', '添加附件', before)
+    const saveResult = await saveVaultForCurrentSession(payload)
+    if (!saveResult.ok || !saveResult.data) {
+      await api.retainAttachmentObject(created.id)
+      return handleVaultWriteError(saveResult, '附件引用保存失败')
+    }
+    if (!publishVaultPayload(saveResult.data)) return
+    selectedEntry.value = findEntry(vault.value.entries, entryId)
+    scheduleAutoCloudUpload()
+    showSuccessToast('附件已添加')
+  } catch (error) {
+    if (created) await api.retainAttachmentObject(created.id)
+    showFailToast(error instanceof Error ? error.message : '附件添加失败')
+  } finally {
+    bytes?.fill(0)
+    attachmentBusy.value = false
+  }
+}
+
+async function saveEntryAttachment(entryId: string, attachmentId: string) {
+  if (!vault.value || attachmentBusy.value) return
+  const entry = findEntry(vault.value.entries, entryId)
+  const attachment = entry?.attachments?.find((item) => item.id === attachmentId)
+  if (!attachment) return showFailToast('附件引用不存在')
+
+  attachmentBusy.value = true
+  try {
+    const result = await api.saveAttachmentToFile(attachment)
+    if (!result.ok || !result.data) return showFailToast(result.message || '附件保存失败')
+    if (result.data.saved) showSuccessToast('附件已保存')
+  } finally {
+    attachmentBusy.value = false
+  }
+}
+
+async function removeEntryAttachment(entryId: string, attachmentId: string) {
+  if (!vault.value || attachmentBusy.value) return
+  const currentEntry = findEntry(vault.value.entries, entryId)
+  const attachment = currentEntry?.attachments?.find((item) => item.id === attachmentId)
+  if (!currentEntry || !attachment || currentEntry.status === 'trashed') return
+  try {
+    await showConfirmDialog({
+      title: '删除附件',
+      message: `从“${currentEntry.title}”移除 ${attachment.name}？`,
+      confirmButtonText: '删除',
+      confirmButtonColor: '#dc2626'
+    })
+  } catch {
+    return
+  }
+
+  attachmentBusy.value = true
+  try {
+    const payload = cloneVault()
+    const entry = findEntry(payload.entries, entryId)
+    if (!entry) throw new Error('条目已发生变化')
+    const before = JSON.parse(JSON.stringify(entry)) as VaultEntry
+    entry.attachments = (entry.attachments || []).filter((item) => item.id !== attachmentId)
+    appendEntryHistory(entry, 'updated', '删除附件', before)
+    const result = await saveVaultForCurrentSession(payload)
+    if (!result.ok || !result.data) return handleVaultWriteError(result, '删除附件失败')
+    if (!publishVaultPayload(result.data)) return
+    selectedEntry.value = findEntry(vault.value.entries, entryId)
+    if (!vaultReferencesAttachment(result.data.entries, attachmentId)) {
+      const retained = await api.retainAttachmentObject(attachmentId)
+      if (!retained.ok) showToast('附件引用已删除，本地密文将在后续清理')
+    }
+    scheduleAutoCloudUpload()
+    showSuccessToast('附件已删除')
+  } catch (error) {
+    showFailToast(error instanceof Error ? error.message : '删除附件失败')
+  } finally {
+    attachmentBusy.value = false
   }
 }
 
@@ -1914,6 +2632,38 @@ async function purgeEntry(entryId: string) {
   showSuccessToast('已彻底删除')
 }
 
+async function purgeAllTrashedEntries() {
+  if (!vault.value || busy.value) return
+  const payload = cloneVault()
+  const removedCount = removeTrashedEntries(payload.entries)
+  if (removedCount === 0) return showToast('回收站为空')
+
+  try {
+    await showConfirmDialog({
+      title: '全部删除',
+      message: `将永久删除回收站中的 ${removedCount} 个条目，删除后无法恢复。`,
+      confirmButtonText: '全部删除',
+      confirmButtonColor: '#ee0a24'
+    })
+    await showConfirmDialog({
+      title: '再次确认',
+      message: '这会永久清空回收站。此操作无法撤销。',
+      confirmButtonText: '永久删除全部',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
+  const selectedId = selectedEntry.value?.id || ''
+  const result = await saveVaultForCurrentSession(payload)
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '清空回收站失败')
+  if (!publishVaultPayload(result.data)) return
+  scheduleAutoCloudUpload()
+  if (selectedId && !findEntry(vault.value.entries, selectedId)) clearSelectedEntry()
+  showSuccessToast(`已永久删除 ${removedCount} 个条目`)
+}
+
 async function moveEntry(payload: MoveEntryPayload) {
   if (!vault.value || payload.entryId === payload.targetParentId) return
   const currentEntry = findEntry(vault.value.entries, payload.entryId)
@@ -1939,6 +2689,66 @@ async function moveEntry(payload: MoveEntryPayload) {
   if (!publishVaultPayload(result.data)) return
   scheduleAutoCloudUpload()
   if (selectedEntry.value) selectedEntry.value = findEntry(vault.value.entries, selectedEntry.value.id)
+}
+
+function openMoveSheet(entryId: string) {
+  const entry = findEntry(vault.value?.entries || [], entryId)
+  if (!entry || !isActiveEntry(entry)) return
+  moveEntryId.value = entryId
+  moveSheetOpen.value = true
+}
+
+function selectMoveDestination(action: MoveDestinationAction) {
+  const entryId = moveEntryId.value
+  if (!entryId || !action) return
+  moveSheetOpen.value = false
+  moveEntryId.value = ''
+  void moveEntry({
+    entryId,
+    targetParentId: action.targetParentId,
+    targetIndex: Number.MAX_SAFE_INTEGER
+  })
+}
+
+function appendMoveDestinationActions(
+  entries: VaultEntry[],
+  parentPath: string[],
+  source: VaultEntry,
+  actions: MoveDestinationAction[]
+) {
+  for (const entry of entries) {
+    if (entry.kind !== 'folder') continue
+    if (entry.id === source.id || (source.kind === 'folder' && isDescendant(source, entry.id))) continue
+    const title = entry.title.trim() || '未命名分组'
+    const path = [...parentPath, title]
+    actions.push({
+      name: title,
+      subname: path.join(' / '),
+      icon: 'cluster-o',
+      targetParentId: entry.id
+    })
+    appendMoveDestinationActions(entry.children || [], path, source, actions)
+  }
+}
+
+function appendBatchMoveDestinationActions(
+  entries: VaultEntry[],
+  parentPath: string[],
+  actions: MoveDestinationAction[]
+) {
+  for (const entry of entries) {
+    if (entry.kind !== 'folder') continue
+    if (isEntryInsideAny(vault.value?.entries || [], batchSelectedEntryIds.value, entry.id)) continue
+    const title = entry.title.trim() || '未命名分组'
+    const path = [...parentPath, title]
+    actions.push({
+      name: title,
+      subname: path.join(' / '),
+      icon: 'cluster-o',
+      targetParentId: entry.id
+    })
+    appendBatchMoveDestinationActions(entry.children || [], path, actions)
+  }
 }
 
 function resolveUpdateManifestUrl(value: string | null) {
@@ -2126,6 +2936,7 @@ async function changeMasterPassword() {
     if (!result.ok || !result.data) return showFailToast(result.message || '修改失败')
     localPasswordChanged = true
     Object.assign(state, result.data)
+    await refreshDeviceUnlockState()
     const refreshedVault = await api.getVault()
     if (!vaultSession.isCurrent(generation) || state.locked) return
     if (!refreshedVault.ok || !refreshedVault.data || !publishVaultPayload(refreshedVault.data)) {
@@ -2374,6 +3185,107 @@ async function backupCloudVault() {
   await createDatedCloudBackup()
 }
 
+async function exportPortableBackupPackage() {
+  if (!vault.value || portableBackupBusy.value || !isDesktopRuntime) return
+  portableBackupBusy.value = true
+  portableBackupStatus.value = '正在生成完整备份包'
+  try {
+    const result = await api.exportPortableBackupPackage()
+    if (!result.ok || !result.data) {
+      portableBackupStatus.value = result.message || '完整备份导出失败'
+      return showFailToast(portableBackupStatus.value)
+    }
+    if (!result.data.saved) {
+      portableBackupStatus.value = ''
+      return
+    }
+    portableBackupStatus.value = `已导出 ${result.data.attachmentCount || 0} 个附件 · ${formatBytes(result.data.packageBytes || 0)}`
+    showSuccessToast('完整备份已导出')
+  } catch (error) {
+    portableBackupStatus.value = error instanceof Error ? error.message : '完整备份导出失败'
+    showFailToast(portableBackupStatus.value)
+  } finally {
+    portableBackupBusy.value = false
+  }
+}
+
+async function beginPortableBackupImport() {
+  if (!vault.value || portableBackupBusy.value || !isDesktopRuntime) return
+  try {
+    await showConfirmDialog({
+      title: '恢复完整备份',
+      message: '恢复会替换当前保险库，并保留一份替换前的本地保险库备份。确认选择备份包吗？',
+      confirmButtonText: '选择备份包'
+    })
+  } catch {
+    return
+  }
+  portableBackupBusy.value = true
+  portableBackupStatus.value = '正在校验备份包'
+  try {
+    const result = await api.selectPortableBackupPackage()
+    if (!result.ok || !result.data) {
+      portableBackupStatus.value = result.message || '备份包校验失败'
+      return showFailToast(portableBackupStatus.value)
+    }
+    if (!result.data.selected || !result.data.selectionToken) {
+      portableBackupStatus.value = ''
+      return
+    }
+    portableBackupSelection.value = result.data
+    portableBackupPassword.value = ''
+    portableBackupPasswordOpen.value = true
+    portableBackupStatus.value = `已校验 ${result.data.attachmentCount || 0} 个附件，等待密码确认`
+  } catch (error) {
+    portableBackupStatus.value = error instanceof Error ? error.message : '备份包校验失败'
+    showFailToast(portableBackupStatus.value)
+  } finally {
+    portableBackupBusy.value = false
+  }
+}
+
+async function submitPortableBackupImport() {
+  const token = portableBackupSelection.value?.selectionToken
+  if (!token || portableBackupBusy.value) return
+  portableBackupBusy.value = true
+  portableBackupStatus.value = '正在验证并恢复完整备份'
+  try {
+    const result = await api.importPortableBackupPackage(token, portableBackupPassword.value)
+    if (!result.ok || !result.data) {
+      portableBackupStatus.value = result.message || '完整备份恢复失败'
+      return showFailToast(result.code === 'BAD_PASSWORD' ? '备份密码错误或文件已损坏' : portableBackupStatus.value)
+    }
+    portableBackupPasswordOpen.value = false
+    portableBackupSelection.value = null
+    portableBackupPassword.value = ''
+    applyLockedUiState()
+    showSuccessToast(`已恢复 ${result.data.attachmentCount} 个附件，请重新解锁`)
+  } catch (error) {
+    portableBackupStatus.value = error instanceof Error ? error.message : '完整备份恢复失败'
+    showFailToast(portableBackupStatus.value)
+  } finally {
+    portableBackupBusy.value = false
+  }
+}
+
+function cancelPortableBackupImport() {
+  portableBackupPasswordOpen.value = false
+  clearPortableBackupSelection()
+  portableBackupStatus.value = ''
+}
+
+function handlePortableBackupPromptClosed() {
+  if (portableBackupSelection.value && !portableBackupBusy.value) clearPortableBackupSelection()
+}
+
+function clearPortableBackupSelection() {
+  const token = portableBackupSelection.value?.selectionToken
+  portableBackupSelection.value = null
+  portableBackupPasswordOpen.value = false
+  portableBackupPassword.value = ''
+  if (token && isDesktopRuntime) void api.discardPortableBackupSelection(token)
+}
+
 async function checkCloudBackupInfo() {
   if (!vault.value || cloudBusy.value) return
   if (!validateOssSettings()) return
@@ -2518,6 +3430,14 @@ async function createDatedCloudBackup() {
     }
 
     markCloudOperation(cloudOperation, 'exporting', '正在导出加密保险库')
+    const currentVault = await api.getVault()
+    if (!currentVault.ok || !currentVault.data) throw new Error(currentVault.message || '读取保险库失败')
+    await ensureRemoteAttachmentObjects(
+      createRemoteVaultStore(),
+      normalizeObjectName(settings.oss.objectName),
+      currentVault.data,
+      api
+    )
     const exported = await api.exportVaultBackup()
     if (!exported.ok || !exported.data) {
       const message = exported.message || '导出保险库失败'
@@ -3394,7 +4314,15 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
 }
 
 async function applyCloudDownload(context: CloudSyncApplyContext) {
-  const { preview, selectedItems, options, nextPayload, localAlreadyApplied, previewStats, selectedStats } = context
+  const { preview, selectedItems, options, remoteClient, nextPayload, localAlreadyApplied, previewStats, selectedStats } = context
+  markCloudOperation(options.operation || null, 'applying-local', '正在校验附件对象')
+  await ensureLocalAttachmentObjects(
+    remoteClient,
+    normalizeObjectName(settings.oss.objectName),
+    nextPayload,
+    api
+  )
+  if (!isCloudSyncPreviewCurrent(preview)) return false
   let appliedVault = localAlreadyApplied
   if (!appliedVault) {
     markCloudOperation(options.operation || null, 'applying-local', '正在写入本地保险库')
@@ -3410,6 +4338,7 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
   }
 
   if (!publishVaultPayload(appliedVault)) return false
+  void collectLocalAttachmentObjects(appliedVault)
   if (!isCloudSyncPreviewCurrent(preview) || vault.value !== appliedVault) return false
 
   markCloudOperation(options.operation || null, 'recording-checkpoint', '正在记录同步检查点')
@@ -3448,6 +4377,14 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
 
 async function applyCloudUpload(context: CloudSyncApplyContext) {
   const { preview, selectedItems, options, remoteClient, nextPayload, previewStats, selectedStats } = context
+  markCloudOperation(options.operation || null, 'writing-remote', '正在校验并上传附件对象')
+  await ensureRemoteAttachmentObjects(
+    remoteClient,
+    normalizeObjectName(settings.oss.objectName),
+    nextPayload,
+    api
+  )
+  if (!isCloudSyncPreviewCurrent(preview)) return false
   markCloudOperation(options.operation || null, 'exporting', '正在生成上传内容')
   const exported = await api.exportVaultBackupForPayload(nextPayload)
   if (!isCloudSyncPreviewCurrent(preview)) return false
@@ -3512,6 +4449,11 @@ async function applyCloudUpload(context: CloudSyncApplyContext) {
   finishCloudSyncApplyPreview(preview, options)
   if (options.showSuccess) showSuccessToast('上传差异已应用')
   return true
+}
+
+async function collectLocalAttachmentObjects(payload: VaultPayload) {
+  const ids = collectAttachmentReferences(payload.entries).map((reference) => reference.id)
+  await api.collectAttachmentObjects(ids)
 }
 
 function failCloudSyncApply(
@@ -4316,6 +5258,7 @@ function normalizeForm(): VaultEntry {
   entry.username = entry.username?.trim() || ''
   entry.email = entry.email?.trim() || ''
   entry.phone = entry.phone?.trim() || ''
+  entry.autofillMatchMode = normalizeAutofillMatchMode(entry.autofillMatchMode)
   entry.loginAccountSource = normalizeLoginAccountSource(entry.loginAccountSource)
   entry.customFields = (entry.customFields || [])
     .map((field) => ({
@@ -4326,10 +5269,7 @@ function normalizeForm(): VaultEntry {
     }))
     .filter((field) => field.label || field.value)
   entry.domains = entry.kind === 'login'
-    ? domainText.value
-      .split(/[\n,，\s]+/)
-      .map((item) => item.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, ''))
-      .filter(Boolean)
+    ? normalizeAutofillRuleValues(domainText.value, entry.autofillMatchMode)
     : []
   if (entry.kind === 'folder') {
     entry.domains = []
@@ -4568,6 +5508,12 @@ function flattenEntries(entries: VaultEntry[]): VaultEntry[] {
   return entries.flatMap((entry) => [entry, ...flattenEntries(entry.children || [])])
 }
 
+function vaultReferencesAttachment(entries: VaultEntry[], attachmentId: string) {
+  return flattenEntries(entries).some((entry) =>
+    (entry.attachments || []).some((attachment) => attachment.id === attachmentId)
+  )
+}
+
 function findEntry(entries: VaultEntry[], entryId: string): VaultEntry | null {
   for (const entry of entries) {
     if (entry.id === entryId) return entry
@@ -4712,6 +5658,54 @@ function openPasswordSheet() {
   passwordSheetOpen.value = true
 }
 
+function toggleDeviceUnlock(enabled: boolean) {
+  if (enabled) {
+    if (state.passwordless) return showToast('当前保险库未设置主密码，无需设备快速解锁')
+    resetDeviceUnlockDraft()
+    deviceUnlockSheetOpen.value = true
+    return
+  }
+  void disableDeviceUnlock()
+}
+
+async function enableDeviceUnlock() {
+  if (busy.value || !deviceUnlockPassword.value) return showToast('请输入当前主密码')
+  const operationId = beginBusyOperation()
+  try {
+    const result = await api.enableDeviceUnlock(deviceUnlockPassword.value, deviceUnlockReauthSeconds.value)
+    if (!result.ok || !result.data) return showFailToast(result.message || '启用设备快速解锁失败')
+    deviceUnlockState.value = result.data
+    deviceUnlockSheetOpen.value = false
+    resetDeviceUnlockDraft()
+    showSuccessToast('设备快速解锁已启用')
+  } catch {
+    showFailToast('启用设备快速解锁失败')
+  } finally {
+    finishBusyOperation(operationId)
+  }
+}
+
+async function disableDeviceUnlock() {
+  try {
+    await showConfirmDialog({
+      title: '关闭设备快速解锁',
+      message: '关闭后，下次锁定只能使用主密码解锁。',
+      confirmButtonText: '关闭'
+    })
+  } catch {
+    return
+  }
+  const result = await api.disableDeviceUnlock()
+  if (!result.ok || !result.data) return showFailToast(result.message || '关闭失败')
+  deviceUnlockState.value = result.data
+  showSuccessToast('设备快速解锁已关闭')
+}
+
+function resetDeviceUnlockDraft() {
+  deviceUnlockPassword.value = ''
+  deviceUnlockReauthSeconds.value = 7 * 24 * 60 * 60
+}
+
 function resetPasswordDraft() {
   changePasswordValue.value = ''
   changePasswordConfirm.value = ''
@@ -4726,10 +5720,92 @@ function openPasswordHealth() {
   passwordHealthOpen.value = true
 }
 
+function openPasskeyManager(passkeyId = '') {
+  passkeyManagerInitialId.value = passkeyId
+  passkeyManagerOpen.value = true
+  drawerOpen.value = false
+}
+
+async function saveManagedPasskey(
+  update: { id: string; label: string; entryId: string },
+  successMessage = '通行密钥已更新'
+) {
+  if (!vault.value || busy.value) return
+  const operationId = beginBusyOperation()
+  try {
+    const payload = cloneVault()
+    const validLoginIds = new Set(buildPasskeyLoginOptions(payload.entries).map((option) => option.id))
+    const changed = updatePasskeyMetadata(
+      payload,
+      update.id,
+      { label: update.label, entryId: update.entryId },
+      Math.floor(Date.now() / 1000),
+      validLoginIds
+    )
+    if (!changed) return showToast('没有需要保存的更改')
+    const result = await saveVaultForCurrentSession(payload)
+    if (!result.ok || !result.data) return handleVaultWriteError(result, '更新通行密钥失败')
+    if (!publishVaultPayload(result.data)) return
+    passkeyManagerInitialId.value = update.id
+    scheduleAutoCloudUpload()
+    showSuccessToast(successMessage)
+  } catch (error) {
+    showFailToast(error instanceof Error ? error.message : '更新通行密钥失败，请重试')
+  } finally {
+    finishBusyOperation(operationId)
+  }
+}
+
+function unlinkPasskeyFromEntry(passkeyId: string) {
+  const item = passkeyPresentationItems.value.find((candidate) => candidate.id === passkeyId)
+  if (!item || !item.linkedEntryId) return showToast('关联已变化')
+  void saveManagedPasskey({ id: item.id, label: item.userLabel, entryId: '' }, '已解除通行密钥关联')
+}
+
+async function deleteManagedPasskey(passkeyId: string) {
+  if (!vault.value || busy.value) return
+  const item = passkeyPresentationItems.value.find((candidate) => candidate.id === passkeyId)
+  if (!item) return showToast('通行密钥不存在')
+  try {
+    await showConfirmDialog({
+      title: '删除通行密钥',
+      message: `将删除「${item.displayLabel}」。删除后无法再用它登录 ${item.rpId}。`,
+      confirmButtonText: '删除',
+      confirmButtonColor: '#dc2626'
+    })
+  } catch {
+    return
+  }
+
+  const operationId = beginBusyOperation()
+  try {
+    const result = await api.deletePasskey(passkeyId)
+    if (!result.ok || !result.data) return handleVaultWriteError(result, '删除通行密钥失败')
+    if (!publishVaultPayload(result.data)) return
+    if (passkeyManagerInitialId.value === passkeyId) passkeyManagerInitialId.value = ''
+    scheduleAutoCloudUpload()
+    showSuccessToast('通行密钥已删除')
+  } catch (error) {
+    showFailToast(error instanceof Error ? error.message : '删除通行密钥失败，请重试')
+  } finally {
+    finishBusyOperation(operationId)
+  }
+}
+
+function openPasskeyLinkedEntry(entryId: string) {
+  const entry = findEntry(vault.value?.entries || [], entryId)
+  if (!entry || entry.kind !== 'login' || !isActiveEntry(entry)) {
+    showFailToast('关联登录项不存在或已失效')
+    return
+  }
+  passkeyManagerOpen.value = false
+  showEntryDetail(entry)
+}
+
 function openPasswordHealthEntry(entryId: string) {
   const entry = findEntry(vault.value?.entries || [], entryId)
-  if (!entry || entry.kind !== 'login') {
-    showFailToast('登录条目不存在')
+  if (!entry || entry.kind === 'folder' || !isActiveEntry(entry)) {
+    showFailToast('条目不存在或已失效')
     return
   }
   passwordHealthOpen.value = false
@@ -4737,17 +5813,115 @@ function openPasswordHealthEntry(entryId: string) {
   showEntryDetail(entry)
 }
 
-function passwordHealthStrengthLabel(item: PasswordHealthEntryResult) {
-  if (item.issues.includes('missing')) return '未设置密码'
-  return `强度 ${item.strength.score} / 4`
+function handleIgnoreHealthFinding(entryId: string, issue: PasswordHealthIssue, reason: string) {
+  const findingExists = passwordHealthReport.value.entries.some((entry) =>
+    entry.entryId === entryId && entry.issues.includes(issue)
+  )
+  if (!findingExists) return showToast('该风险已变化')
+  ignoredHealthFindings.value = ignoreHealthFinding(
+    entryId,
+    issue,
+    reason,
+    ignoredHealthFindings.value
+  )
+  showSuccessToast('已在此设备忽略')
 }
 
-function passwordHealthIssueLabel(item: PasswordHealthEntryResult, issue: PasswordHealthIssue) {
-  if (issue === 'missing') return '未设置'
-  if (issue === 'weak') return '弱密码'
-  if (issue === 'reused') return '重复使用'
-  const ageDays = item.passwordAge?.ageDays
-  return ageDays === undefined ? '长期未更改' : `${ageDays} 天未更改`
+function handleRestoreHealthFinding(entryId: string, issue: PasswordHealthIssue) {
+  ignoredHealthFindings.value = restoreHealthFinding(
+    entryId,
+    issue,
+    ignoredHealthFindings.value
+  )
+  showSuccessToast('已恢复检查')
+}
+
+function handleToggleExpectedTotp(entryId: string, expected: boolean) {
+  const entry = findEntry(vault.value?.entries || [], entryId)
+  if (!entry || entry.kind !== 'login' || !isActiveEntry(entry)) return
+  expectedTotpEntryIds.value = setExpectedTotpEntryId(
+    entryId,
+    expected,
+    expectedTotpEntryIds.value
+  )
+}
+
+function remediatePasswordHealthFinding(entryId: string, issue: PasswordHealthIssue) {
+  const entry = findEntry(vault.value?.entries || [], entryId)
+  if (!entry || entry.kind === 'folder' || !isActiveEntry(entry)) {
+    showFailToast('条目不存在或已失效')
+    return
+  }
+  if (issue === 'duplicate') {
+    void mergePasswordHealthDuplicates(entryId)
+    return
+  }
+
+  passwordHealthOpen.value = false
+  drawerOpen.value = false
+  openEdit(entry)
+  if (issue === 'missing-totp') {
+    showToast('请填写 TOTP 密钥')
+    return
+  }
+  if (['missing', 'weak', 'reused', 'stale'].includes(issue)) {
+    void nextTick(() => openCredentialGenerator(true))
+  }
+}
+
+async function mergePasswordHealthDuplicates(keepEntryId: string) {
+  if (!vault.value || busy.value) return
+  const keepResult = passwordHealthReport.value.entries.find((entry) => entry.entryId === keepEntryId)
+  const group = keepResult?.duplicateGroupId
+    ? passwordHealthReport.value.duplicateGroups.find((item) => item.id === keepResult.duplicateGroupId)
+    : undefined
+  const keepEntry = findEntry(vault.value.entries, keepEntryId)
+  const removeIds = (group?.entries || [])
+    .map((entry) => entry.entryId)
+    .filter((entryId) => {
+      const entry = findEntry(vault.value?.entries || [], entryId)
+      return entryId !== keepEntryId && Boolean(entry && isActiveEntry(entry))
+    })
+  if (!keepEntry || removeIds.length === 0) return showToast('重复项已变化')
+
+  try {
+    await showConfirmDialog({
+      title: '合并精确重复项',
+      message: `保留“${keepEntry.title || '未命名条目'}”，并将其余 ${removeIds.length} 项移入回收站？`,
+      confirmButtonText: '合并',
+      confirmButtonColor: '#ee0a24'
+    })
+  } catch {
+    return
+  }
+
+  const currentKeepResult = passwordHealthReport.value.entries.find((entry) => entry.entryId === keepEntryId)
+  const currentGroup = currentKeepResult?.duplicateGroupId
+    ? passwordHealthReport.value.duplicateGroups.find((item) => item.id === currentKeepResult.duplicateGroupId)
+    : undefined
+  const currentRemoveIds = (currentGroup?.entries || [])
+    .map((entry) => entry.entryId)
+    .filter((entryId) => entryId !== keepEntryId)
+  if (
+    currentRemoveIds.length !== removeIds.length
+    || currentRemoveIds.some((entryId) => !removeIds.includes(entryId))
+  ) {
+    return showToast('重复项已变化，请重新检查')
+  }
+
+  const payload = cloneVault()
+  let removedCount = 0
+  for (const entryId of currentRemoveIds) {
+    if (updateEntryById(payload.entries, entryId, (entry) => markEntryStatus(entry, 'trashed', '已合并精确重复项'))) {
+      removedCount += 1
+    }
+  }
+  if (!removedCount) return showToast('重复项已变化')
+  const result = await saveVaultForCurrentSession(payload)
+  if (!result.ok || !result.data) return handleVaultWriteError(result, '合并重复项失败')
+  if (!publishVaultPayload(result.data)) return
+  scheduleAutoCloudUpload()
+  showSuccessToast(`已合并 ${removedCount} 个重复项`)
 }
 
 function selectDrawerSection(section: typeof drawerSection.value) {
