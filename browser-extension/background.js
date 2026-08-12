@@ -44,6 +44,7 @@ let passkeyProxyBinding = null
 let passkeyProxyOperationActive = false
 let passkeyProxyRecoveryTimer = null
 let passkeyProxyStartupRecovery = Promise.resolve()
+let pendingCapturePruneTimer = null
 
 function ensurePort() {
   if (port) return port
@@ -112,6 +113,26 @@ function prunePendingCaptures() {
   for (const [token, item] of fillAuthorizations) {
     if (item.expiresAt <= now) fillAuthorizations.delete(token)
   }
+  schedulePendingCapturePrune()
+}
+
+function schedulePendingCapturePrune() {
+  if (pendingCapturePruneTimer !== null) clearTimeout(pendingCapturePruneTimer)
+  pendingCapturePruneTimer = null
+  let earliest = Number.POSITIVE_INFINITY
+  for (const collection of [pendingCaptures, pendingPromptsByContext, pendingLockedCapturesByContext, fillAuthorizations]) {
+    for (const item of collection.values()) {
+      const expiresAt = Number(item?.expiresAt)
+      if (Number.isFinite(expiresAt)) earliest = Math.min(earliest, expiresAt)
+    }
+  }
+  if (!Number.isFinite(earliest)) return
+  const delay = Math.max(0, Math.min(0x7fffffff, earliest - Date.now()))
+  pendingCapturePruneTimer = setTimeout(() => {
+    pendingCapturePruneTimer = null
+    prunePendingCaptures()
+  }, delay)
+  pendingCapturePruneTimer?.unref?.()
 }
 
 function pruneQueryCache() {
@@ -780,6 +801,7 @@ async function authorizeFill(entryId, sender, acknowledgedRisks = []) {
     entryId: String(entryId),
     expiresAt: Date.now() + FILL_AUTH_TTL_MS
   })
+  schedulePendingCapturePrune()
   return { ok: true, data: { token, expiresAt: Date.now() + FILL_AUTH_TTL_MS } }
 }
 
@@ -874,6 +896,7 @@ async function prepareCapturedLogin(capture, context, placement = null) {
       placement: publicPromptPlacement(placement),
       expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
     })
+    schedulePendingCapturePrune()
     return {
       ok: false,
       code: 'LOCKED_CAPTURE_PENDING',
@@ -903,6 +926,7 @@ async function prepareCapturedLogin(capture, context, placement = null) {
     context,
     expiresAt: Date.now() + SAVE_CAPTURE_TTL_MS
   })
+  schedulePendingCapturePrune()
   notifyContextCaptureReady(context)
   return {
     ok: true,
@@ -1098,6 +1122,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (response?.ok) {
         clearQueryCache()
         fillAuthorizations.clear()
+        schedulePendingCapturePrune()
       }
       sendResponse(response)
       return

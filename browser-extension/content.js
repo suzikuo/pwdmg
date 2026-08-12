@@ -9,6 +9,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
   const SAVE_PROMPT_RESTORE_DELAY_MS = 700
   const CAPTURE_CLICK_WINDOW_MS = 800
   const RECENT_INPUT_CAPTURE_TTL_MS = 15000
+  const COMPLETED_SAVE_TOKEN_TTL_MS = 5 * 60 * 1000
+  const COMPLETED_SAVE_TOKEN_MAX = 64
   const FILL_CAPTURE_SUPPRESS_MS = 2500
   const INPUT_SELECTOR = 'input, textarea'
   const ACTION_CONTROL_SELECTOR = 'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]'
@@ -34,10 +36,15 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let panelDrag = null
   let lastSubmitCapture = null
   let lastInputCapture = null
+  let submitCaptureClearTimer = 0
+  let inputCaptureClearTimer = 0
   let savePromptTimer = 0
   let pendingSave = null
   let savePromptExpanded = false
   let extensionContextInvalidated = false
+  let pageActive = true
+  let pageGeneration = 0
+  let queryRequestGeneration = 0
   let suppressCaptureUntil = 0
   let panelManualMode = false
   let lastManualFields = null
@@ -47,11 +54,69 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let autoSaveEnabled = true
   let ignoredSites = []
   let manualPanelShortcut = parseShortcut(SHOW_PANEL_SHORTCUT)
-  const completedSaveTokens = new Set()
-  const extensionFilledPasswords = new Map()
+  const completedSaveTokens = new Map()
+  let extensionFilledPasswords = new WeakMap()
   let rootHost = null
   let rootView = null
   let entryButtonIds = new WeakMap()
+
+  function pruneCompletedSaveTokens(now = Date.now()) {
+    for (const [token, expiresAt] of completedSaveTokens) {
+      if (expiresAt <= now) completedSaveTokens.delete(token)
+    }
+    while (completedSaveTokens.size > COMPLETED_SAVE_TOKEN_MAX) {
+      const oldest = completedSaveTokens.keys().next().value
+      if (!oldest) break
+      completedSaveTokens.delete(oldest)
+    }
+  }
+
+  function rememberCompletedSaveToken(token) {
+    const value = String(token || '')
+    if (!value) return
+    pruneCompletedSaveTokens()
+    completedSaveTokens.delete(value)
+    completedSaveTokens.set(value, Date.now() + COMPLETED_SAVE_TOKEN_TTL_MS)
+    pruneCompletedSaveTokens()
+  }
+
+  function isCompletedSaveToken(token) {
+    pruneCompletedSaveTokens()
+    return completedSaveTokens.has(String(token || ''))
+  }
+
+  function clearCaptureHistory() {
+    window.clearTimeout(submitCaptureClearTimer)
+    window.clearTimeout(inputCaptureClearTimer)
+    submitCaptureClearTimer = 0
+    inputCaptureClearTimer = 0
+    lastSubmitCapture = null
+    lastInputCapture = null
+    extensionFilledPasswords = new WeakMap()
+  }
+
+  function clearPageState() {
+    window.clearTimeout(queryTimer)
+    window.clearTimeout(savePromptTimer)
+    queryTimer = 0
+    savePromptTimer = 0
+    clearCaptureHistory()
+    pendingSave = null
+    savePromptExpanded = false
+    completedSaveTokens.clear()
+    lastMatches = []
+    lastManualFields = null
+    contextMenuInput = null
+    contextMenuInputAt = 0
+    panelDrag = null
+    panelManualMode = false
+    entryButtonIds = new WeakMap()
+    removeRoot()
+  }
+
+  function isCurrentPageRequest(generation) {
+    return pageActive && generation === pageGeneration
+  }
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -487,6 +552,9 @@ if (!window.__mypwdmgContentScriptLoaded) {
     ignoredSites = normalizeIgnoredSites(settings.ignoredSites)
     manualPanelShortcut = parseShortcut(settings.manualPanelShortcut || SHOW_PANEL_SHORTCUT)
     if (isCurrentSiteIgnored() && pendingSave?.token) dismissSavePrompt()
+    if (!autoSaveEnabled && pendingSave?.token) dismissSavePrompt()
+    else if (!autoSaveEnabled && rootView?.querySelector('[data-mypwdmg-auto-save]')) removeRoot()
+    if (!autoSaveEnabled) clearCaptureHistory()
     if (!autoFillEnabled && !panelManualMode) removeRoot()
   }
 
@@ -734,34 +802,76 @@ if (!window.__mypwdmgContentScriptLoaded) {
   function positionSavePromptRoot() {
     ensureRoot()
     panelPinned = false
+    panelManualMode = false
     rootHost.style.setProperty('--mypwdmg-top', '12px')
     rootHost.style.setProperty('--mypwdmg-right', '12px')
+  }
+
+  function renderSaveTrigger(actionLabel, onActivate, state = 'pending') {
+    positionSavePromptRoot()
+    const root = ensureRoot()
+    root.innerHTML = `
+      <button
+        class="mypwdmg-save-trigger is-${escapeAttr(state)}"
+        type="button"
+        title="${escapeAttr(actionLabel)}"
+        aria-label="${escapeAttr(actionLabel)}"
+        aria-expanded="false"
+        data-mypwdmg-auto-save
+      >
+        <span class="mypwdmg-save-trigger-icon" aria-hidden="true"></span>
+      </button>
+    `
+    addTrustedClick(root.querySelector('.mypwdmg-save-trigger'), onActivate)
+  }
+
+  function renderSaveNotice(message, expanded = false) {
+    const notice = String(message || 'My Password 插件已锁定，解锁后继续保存。').trim()
+    savePromptExpanded = Boolean(expanded)
+    if (!savePromptExpanded) {
+      renderSaveTrigger(notice, () => renderSaveNotice(notice, true), 'locked')
+      return
+    }
+
+    positionSavePromptRoot()
+    const root = ensureRoot()
+    root.innerHTML = `
+      <div class="mypwdmg-panel mypwdmg-save-panel" role="alertdialog" aria-label="自动保存状态" data-mypwdmg-auto-save>
+        <div class="mypwdmg-title">
+          <div class="mypwdmg-title-text">
+            <span>等待解锁</span>
+            <small>自动保存已暂存</small>
+          </div>
+          <button class="mypwdmg-close" type="button" title="收起" aria-label="收起">−</button>
+        </div>
+        <div class="mypwdmg-save-body">
+          <div class="mypwdmg-save-note">${escapeHtml(notice)}</div>
+        </div>
+      </div>
+    `
+    addTrustedClick(root.querySelector('.mypwdmg-close'), () => renderSaveNotice(notice, false))
+    root.querySelector('.mypwdmg-title')?.addEventListener('pointerdown', startPanelDrag)
   }
 
   function renderSavePrompt(preview, expanded = false) {
     pendingSave = preview
     savePromptExpanded = Boolean(expanded)
-    positionSavePromptRoot()
-    const root = ensureRoot()
     const folders = Array.isArray(preview.folders) ? preview.folders : []
     const update = preview.updateCandidate
     if (!savePromptExpanded) {
       const actionLabel = update ? '发现密码变更，点击更新' : '发现新登录，点击保存'
-      root.innerHTML = `
-      <button class="mypwdmg-save-trigger${update ? ' is-update' : ''}" type="button" title="${actionLabel}" aria-label="${actionLabel}" aria-expanded="false">
-        <span aria-hidden="true">PM</span>
-      </button>
-    `
-      addTrustedClick(root.querySelector('.mypwdmg-save-trigger'), () => renderSavePrompt(pendingSave, true))
+      renderSaveTrigger(actionLabel, () => renderSavePrompt(pendingSave, true), update ? 'update' : 'pending')
       return
     }
 
+    positionSavePromptRoot()
+    const root = ensureRoot()
     const titleValue = update?.title || preview.title || preview.hostname || 'Untitled'
     const accountValue = preview.accountLabel || update?.username || update?.email || update?.phone || ''
     const accountKind = ['email', 'phone', 'username'].includes(preview.accountKind) ? preview.accountKind : 'username'
     const statusNotice = String(preview.notice || '').trim()
     root.innerHTML = `
-    <div class="mypwdmg-panel mypwdmg-save-panel" role="dialog" aria-label="保存到 My Password">
+    <div class="mypwdmg-panel mypwdmg-save-panel" role="dialog" aria-label="保存到 My Password" data-mypwdmg-auto-save>
       <div class="mypwdmg-title">
         <div class="mypwdmg-title-text">
           <span>${escapeHtml(update ? '更新登录项' : '保存新登录')}</span>
@@ -822,7 +932,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function dismissSavePrompt() {
     if (pendingSave?.token) {
-      completedSaveTokens.add(pendingSave.token)
+      rememberCompletedSaveToken(pendingSave.token)
       sendMessage({ type: 'MYPWDMG_DISMISS_CAPTURE', token: pendingSave.token }).catch(() => { })
     }
     pendingSave = null
@@ -832,6 +942,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   async function ignoreCurrentSaveSite() {
     if (!pendingSave?.token) return
+    const requestGeneration = pageGeneration
     const token = pendingSave.token
     const anchor = pendingSave.anchor || document.activeElement
     const hostname = normalizeHost(pendingSave.hostname || location.hostname)
@@ -844,6 +955,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
       type: 'MYPWDMG_ADD_IGNORED_SITE',
       token
     })
+    if (!isCurrentPageRequest(requestGeneration) || pendingSave?.token !== token) {
+      if (response?.ok) rememberCompletedSaveToken(token)
+      return
+    }
     if (!response?.ok) {
       renderSavePrompt({
         ...pendingSave,
@@ -854,7 +969,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     }
 
     ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
-    completedSaveTokens.add(token)
+    rememberCompletedSaveToken(token)
     pendingSave = null
     savePromptExpanded = false
     renderPanel([], `已忽略 ${hostname}，之后不会自动保存该站点。`, anchor)
@@ -863,6 +978,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   async function savePendingCapture() {
     if (!pendingSave?.token) return
+    const requestGeneration = pageGeneration
+    const currentSave = pendingSave
     const token = pendingSave.token
     const root = ensureRoot()
     const button = root.querySelector('[data-action="save"]')
@@ -877,8 +994,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
     const response = await sendMessage({
       type: 'MYPWDMG_SAVE_CAPTURE',
       token,
-      parentId: pendingSave.updateCandidate ? '' : folderSelect?.value || '',
-      updateEntryId: pendingSave.updateCandidate?.id || '',
+      parentId: currentSave.updateCandidate ? '' : folderSelect?.value || '',
+      updateEntryId: currentSave.updateCandidate?.id || '',
       overrides: {
         title,
         titleEdited: Boolean(title),
@@ -887,6 +1004,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
         accountEdited: Boolean(account)
       }
     })
+    if (!isCurrentPageRequest(requestGeneration) || pendingSave?.token !== token) {
+      if (response?.ok) rememberCompletedSaveToken(token)
+      return
+    }
     if (!response?.ok) {
       renderSavePrompt({
         ...pendingSave,
@@ -894,8 +1015,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
       }, true)
       return
     }
-    renderPanel([], response.data?.action === 'updated' ? '已更新。' : '已保存。', pendingSave.anchor || document.activeElement)
-    completedSaveTokens.add(token)
+    renderPanel([], response.data?.action === 'updated' ? '已更新。' : '已保存。', currentSave.anchor || document.activeElement)
+    rememberCompletedSaveToken(token)
     pendingSave = null
     savePromptExpanded = false
     window.setTimeout(removeRoot, 1600)
@@ -903,6 +1024,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function scheduleQuery(force = false, delay = QUERY_DEBOUNCE_MS) {
     if (extensionContextInvalidated) return
+    if (!pageActive) return
     if (!autoFillEnabled) return
     if (pendingSave?.token) return
     if (!force && panelManualMode && isRootOpen()) return
@@ -912,6 +1034,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   async function queryMatches(force = false, manualMode = false, manualSource = '') {
     if (extensionContextInvalidated) return
+    if (!pageActive) return
     if (!manualMode && !autoFillEnabled) {
       removeRoot()
       return
@@ -933,10 +1056,13 @@ if (!window.__mypwdmgContentScriptLoaded) {
     const key = [manualMode ? 'manual' : 'auto', location.hostname, fieldId(fields.usernameInput), fields.usernameKind, fieldId(fields.passwordInput), fieldId(fields.otpInput)].join('|')
     if (!force && key === lastQueryKey) return
     lastQueryKey = key
+    const requestGeneration = pageGeneration
+    const queryGeneration = ++queryRequestGeneration
 
     const response = await sendMessage({
       type: 'MYPWDMG_QUERY_MATCHES'
     })
+    if (!isCurrentPageRequest(requestGeneration) || queryGeneration !== queryRequestGeneration) return
 
     if (!response?.ok) {
       lastMatches = []
@@ -955,14 +1081,17 @@ if (!window.__mypwdmgContentScriptLoaded) {
   async function fillEntry(entryId, manualMode = false, authorizedSelection = false, acknowledgedRisks = []) {
     if (!entryId) return { ok: false, code: 'ENTRY_REQUIRED' }
     if (extensionContextInvalidated) return { ok: false, code: 'EXTENSION_CONTEXT_INVALIDATED' }
+    if (!pageActive) return { ok: false, code: 'PAGE_INACTIVE' }
     if (pendingSave?.token) return { ok: false, code: 'SAVE_PROMPT_ACTIVE' }
     if (!authorizedSelection) return { ok: false, code: 'TRUSTED_GESTURE_REQUIRED' }
 
+    const requestGeneration = pageGeneration
     const authorization = await sendMessage({
       type: 'MYPWDMG_AUTHORIZE_FILL',
       entryId,
       acknowledgedRisks
     })
+    if (!isCurrentPageRequest(requestGeneration)) return { ok: false, code: 'PAGE_INACTIVE' }
     if (authorization?.code === 'FILL_RISK_CONFIRMATION_REQUIRED') {
       const fields = detectLoginFields()
       renderRiskConfirmation(entryId, authorization.data?.risks || [], manualMode, fields?.anchor || activeInput())
@@ -980,6 +1109,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
       entryId,
       authorizationToken: authorization.data.token
     })
+    if (!isCurrentPageRequest(requestGeneration)) return { ok: false, code: 'PAGE_INACTIVE' }
     if (!response?.ok || !response.data) {
       const fields = detectLoginFields()
       if (response?.code === 'PLUGIN_DISABLED' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
@@ -1033,7 +1163,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     input.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertReplacementText' }))
     input.dispatchEvent(new Event('change', { bubbles: true }))
     if (isPasswordInput(input)) {
-      extensionFilledPasswords.set(fieldId(input), String(value))
+      extensionFilledPasswords.set(input, String(value))
     }
   }
 
@@ -1043,8 +1173,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (!fields?.passwordInput) return null
     const password = String(fields.passwordInput.value || '')
     if (!password) return null
-    const passwordFieldId = fieldId(fields.passwordInput)
-    if (extensionFilledPasswords.get(passwordFieldId) === password) return null
+    if (extensionFilledPasswords.get(fields.passwordInput) === password) return null
 
     const account = String(fields.usernameInput?.value || '').trim()
     const accountKind = fields.usernameKind || accountFieldKind(fields.usernameInput)
@@ -1086,7 +1215,13 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (!autoSaveEnabled) return
     if (isCurrentSiteIgnored()) return
     if (!captureInfo?.capture?.password) return
-    lastSubmitCapture = { ...captureInfo, at: Date.now() }
+    const remembered = { ...captureInfo, at: Date.now() }
+    lastSubmitCapture = remembered
+    window.clearTimeout(submitCaptureClearTimer)
+    submitCaptureClearTimer = window.setTimeout(() => {
+      submitCaptureClearTimer = 0
+      if (lastSubmitCapture === remembered) lastSubmitCapture = null
+    }, CAPTURE_CLICK_WINDOW_MS)
     window.clearTimeout(savePromptTimer)
     prepareSavePrompt(captureInfo, SAVE_PROMPT_CAPTURE_DELAY_MS).catch(() => { })
   }
@@ -1107,11 +1242,22 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (!isPasswordInput(input) && !isUsernameInput(input)) return
     const scope = input.closest('form') || scopeForFocusedInput(input) || document
     const captureInfo = captureLoginFromScope(scope, input)
-    if (captureInfo) lastInputCapture = { ...captureInfo, at: Date.now() }
+    if (!captureInfo) return
+    const remembered = { ...captureInfo, at: Date.now() }
+    lastInputCapture = remembered
+    window.clearTimeout(inputCaptureClearTimer)
+    inputCaptureClearTimer = window.setTimeout(() => {
+      inputCaptureClearTimer = 0
+      if (lastInputCapture === remembered) lastInputCapture = null
+    }, RECENT_INPUT_CAPTURE_TTL_MS)
   }
 
   function recentInputCaptureFor(scope, anchor) {
-    if (!lastInputCapture || Date.now() - lastInputCapture.at > RECENT_INPUT_CAPTURE_TTL_MS) return null
+    if (!lastInputCapture) return null
+    if (Date.now() - lastInputCapture.at > RECENT_INPUT_CAPTURE_TTL_MS) {
+      lastInputCapture = null
+      return null
+    }
     const fresh = captureLoginFromScope(scope, anchor)
     if (fresh) return fresh
     return lastInputCapture
@@ -1121,14 +1267,16 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (!autoSaveEnabled) return
     if (isCurrentSiteIgnored()) return
     if (!captureInfo?.capture?.password) return
+    const requestGeneration = pageGeneration
     const response = await sendMessage({
       type: 'MYPWDMG_PREPARE_CAPTURE',
       capture: captureInfo.capture,
       placement: captureInfo.placement || promptPlacementForAnchor(captureInfo.anchor)
     })
+    if (!isCurrentPageRequest(requestGeneration)) return
     if (!response?.ok) {
       if (response?.code === 'LOCKED_CAPTURE_PENDING' || response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
-        renderPanel([], response?.message || 'My Password 插件已锁定，解锁后继续保存。', captureInfo.anchor)
+        renderSaveNotice(response?.message || 'My Password 插件已锁定，解锁后继续保存。')
       }
       return
     }
@@ -1141,12 +1289,12 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (!autoSaveEnabled) return
     if (pendingSave?.token) return
     if (isCurrentSiteIgnored()) return
+    const requestGeneration = pageGeneration
     const response = await sendMessage({ type: 'MYPWDMG_TAKE_SAVE_PROMPT' })
+    if (!isCurrentPageRequest(requestGeneration)) return
     if (!response?.ok || !response.data?.token) return
-    if (completedSaveTokens.has(response.data.token) || pendingSave?.token === response.data.token) return
-    renderSavePrompt({
-      ...response.data
-    })
+    if (isCompletedSaveToken(response.data.token) || pendingSave?.token === response.data.token) return
+    renderSavePrompt({ ...response.data }, false)
   }
 
   function scheduleTakePreparedSavePrompt(delay = 0) {
@@ -1297,7 +1445,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   document.addEventListener('input', (event) => {
     const target = event.target instanceof Element ? event.target : null
     if (!target || !event.isTrusted) return
-    if (isPasswordInput(target)) extensionFilledPasswords.delete(fieldId(target))
+    if (isPasswordInput(target)) extensionFilledPasswords.delete(target)
     rememberInputCapture(target)
   }, true)
   document.addEventListener('keydown', (event) => {
@@ -1316,8 +1464,15 @@ if (!window.__mypwdmgContentScriptLoaded) {
   document.addEventListener('click', handleClickCapture, true)
   document.addEventListener('contextmenu', rememberContextMenuInput, true)
   window.addEventListener('pageshow', () => {
+    pageActive = true
     scheduleQuery(true)
     scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
+  })
+  window.addEventListener('pagehide', () => {
+    pageActive = false
+    pageGeneration += 1
+    queryRequestGeneration += 1
+    clearPageState()
   })
   window.addEventListener('resize', () => {
     if (panelPinned) clampPanelPosition()
@@ -1332,11 +1487,13 @@ if (!window.__mypwdmgContentScriptLoaded) {
   })
   sendMessage({ type: 'MYPWDMG_GET_AUTO_SETTINGS' })
     .then((response) => {
+      if (!pageActive) return
       if (response?.ok) applyAutoSettings(response.data || {})
       scheduleQuery(true)
       scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
     })
     .catch(() => {
+      if (!pageActive) return
       scheduleQuery(true)
       scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
     })

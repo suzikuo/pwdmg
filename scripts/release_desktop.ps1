@@ -459,7 +459,10 @@ function Get-NextVersion {
 
 function Get-AndroidVersionCode {
     $Text = Read-Text $AndroidGradle
-    $Match = [regex]::Match($Text, 'versionCode\s+(?<code>\d+)')
+    $Match = [regex]::Match(
+        $Text,
+        '(?m)^[ \t]*versionCode\s*(?:=\s*)?(?<code>\d+)\b'
+    )
     if (-not $Match.Success) {
         throw "Could not read Android versionCode from $AndroidGradle"
     }
@@ -738,8 +741,8 @@ function Update-VersionFiles {
         Pop-Location
     }
 
-    Update-RegexFile $AndroidGradle 'versionCode\s+\d+' "versionCode $NextVersionCode"
-    Update-RegexFile $AndroidGradle 'versionName\s+"\d+\.\d+\.\d+"' "versionName `"$NextVersion`""
+    Update-RegexFile $AndroidGradle '(?m)^(?<indent>[ \t]*)versionCode\s*(?:=\s*)?\d+\b' "`${indent}versionCode = $NextVersionCode"
+    Update-RegexFile $AndroidGradle '(?m)^(?<indent>[ \t]*)versionName\s*(?:=\s*)?"\d+\.\d+\.\d+"' "`${indent}versionName = `"$NextVersion`""
 
     if (Test-Path -LiteralPath $FrontManifest) {
         Update-RegexFile $FrontManifest '"name"\s*:\s*"\d+(?:\.\d+){1,2}"' "`"name`" : `"$NextVersion`""

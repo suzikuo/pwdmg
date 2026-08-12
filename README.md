@@ -154,6 +154,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_native_host.ps1 -Exte
 
 The extension popup unlocks the native host separately from the desktop window. This keeps the page content script from ever collecting the master password.
 
+When automatic saving is enabled, a detected login appears as a compact icon in the page's upper-right corner instead of opening the full panel. Click the icon to review/save or update the login; use the minus button or `Escape` to collapse it again. The capture state and filled-password suppression records expire automatically and are cleared when the page is left.
+
 If the extension reports `Error when communicating with the native messaging host`, first verify the local Python environment:
 
 ```powershell
@@ -165,6 +167,10 @@ Startup errors from Chrome/Edge are written to `native-host\native-host-error.lo
 ## Android
 
 Run `npm run build` in `front/`, then open `android/` in Android Studio. The WebView loads `front/dist/android/` and talks to `AndroidPasswordBridge`; Autofill reads the same encrypted `vault.json` envelope from the app private directory.
+
+On Android 14+, Passkey Provider is disabled by default. After unlocking the vault, open Settings > Android Passkey, turn on the provider switch, then choose `My Password` in the Android Credential Provider settings page. The app reports component availability separately from system selection: `待系统授权` means the component is on but Android has not selected it yet. Turning the switch off disables the provider component and clears pending in-process ceremony tickets; saved passkeys remain in the encrypted vault. The browser extension's WebAuthn proxy remains a developer-only probe and is not enabled by this setting.
+
+Android stores encrypted attachment objects in the app-private directory, supports individual attachment export through the system document picker, and exposes reference-aware cleanup in Settings. The Backup page can export the current encrypted vault JSON, explicitly without attachment objects. The desktop complete backup package remains the attachment-inclusive backup/restore format.
 
 For public releases, keep `pwdmg-release.jks` in the project root or override the path with `MYPWDMG_ANDROID_KEYSTORE`. Set the signing passwords and alias before building:
 

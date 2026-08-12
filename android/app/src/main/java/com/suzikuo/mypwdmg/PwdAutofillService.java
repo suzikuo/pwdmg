@@ -159,7 +159,11 @@ public class PwdAutofillService extends AutofillService {
 
     private FillResponse buildUnlockResponse(LoginFields fields, FillRequest request) {
         Intent intent = new Intent(this, MainActivity.class);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        intent.addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+        );
         // Pass the request so the activity knows it's an autofill auth request
         List<FillContext> contexts = request.getFillContexts();
         intent.putExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, contexts.get(contexts.size() - 1).getStructure());
@@ -194,7 +198,11 @@ public class PwdAutofillService extends AutofillService {
     private Dataset buildPickerDataset(LoginFields fields, String target, boolean includeAll) {
         if (!fields.hasFillableFields()) return null;
         Intent intent = new Intent(this, MainActivity.class);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        intent.addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP
+        );
         intent.putExtra(MainActivity.EXTRA_AUTOFILL_PICKER, true);
         fields.writeToIntent(intent);
         intent.putExtra(AutofillPickerActivity.EXTRA_TARGET, target);

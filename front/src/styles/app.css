@@ -4,6 +4,7 @@
   --panel-bg: #fffbff;
   --panel-bg-muted: #f0eef5;
   --surface-container: #f4f2f9;
+  --surface-container-low: #f9f7fe;
   --surface-container-high: #eceaf1;
   --surface-container-highest: #e6e4eb;
   --text-main: #1b1b21;
@@ -96,6 +97,7 @@
   --van-empty-description-font-size: var(--app-font-sm);
   --van-tag-default-color: var(--text-muted);
   --van-tag-plain-background: transparent;
+  color-scheme: light;
 }
 
 :root[data-theme='dark'] {
@@ -104,6 +106,7 @@
   --panel-bg: #1b1b20;
   --panel-bg-muted: #24242a;
   --surface-container: #201f25;
+  --surface-container-low: #18171d;
   --surface-container-high: #2a292f;
   --surface-container-highest: #35343a;
   --text-main: #e5e1e8;
@@ -130,37 +133,45 @@
 
 * {
   box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--text-muted), transparent 54%) transparent;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--brand), transparent 52%) var(--panel-bg);
+  }
 }
 
 *::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 2px;
+  height: 2px;
 }
 
 *::-webkit-scrollbar-track,
 *::-webkit-scrollbar-corner {
-  background: transparent;
+  background: var(--panel-bg);
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 *::-webkit-scrollbar-thumb {
   min-width: 24px;
   min-height: 24px;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--text-muted), transparent 54%);
-  background-clip: padding-box;
+  background: color-mix(in srgb, var(--brand), transparent 52%);
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--text-muted), transparent 34%);
-  background-clip: padding-box;
+  background: color-mix(in srgb, var(--brand), transparent 32%);
 }
 
 *::-webkit-scrollbar-thumb:active {
-  background: color-mix(in srgb, var(--brand), transparent 24%);
-  background-clip: padding-box;
+  background: var(--brand);
 }
 
 html,
@@ -180,6 +191,21 @@ select,
   -webkit-touch-callout: default;
   -webkit-user-select: text;
   user-select: text;
+}
+
+select,
+select option {
+  color: var(--text-main);
+  background-color: var(--surface-container-low);
+}
+
+select option:checked {
+  color: var(--on-brand-container);
+  background-color: var(--brand-container);
+}
+
+select option:disabled {
+  color: var(--text-subtle);
 }
 
 body {
@@ -1293,7 +1319,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .editor-form {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 0;
   flex: 1 1 auto;
   min-height: 0;
@@ -1302,10 +1329,13 @@ body.is-entry-pointer-drag .entry-drop-zone {
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
-  align-content: start;
   padding: 5px 0 10px;
   scroll-padding: 12px 0 18px;
+  touch-action: pan-y;
+}
+
+.editor-form > * {
+  flex: 0 0 auto;
 }
 
 .editor-field.van-cell,
@@ -1313,10 +1343,10 @@ body.is-entry-pointer-drag .entry-drop-zone {
   display: flex;
   align-items: center;
   min-height: var(--editor-row-height);
-  padding: 0 12px;
-  overflow: visible;
+  padding: 7px 12px;
+  overflow: hidden;
   font-size: var(--app-font-md);
-  line-height: 24px;
+  line-height: 1.45;
 }
 
 .editor-field.van-field::after {
@@ -1324,23 +1354,29 @@ body.is-entry-pointer-drag .entry-drop-zone {
   left: 12px;
 }
 
+.editor-field.van-field:focus-within {
+  box-shadow: none;
+}
+
 .editor-field .van-field__label {
   width: var(--editor-label-width);
   min-width: var(--editor-label-width);
-  height: var(--editor-row-height);
+  height: auto;
+  min-height: 32px;
   display: flex;
   align-items: center;
   margin-right: 9px;
-  line-height: 24px;
+  line-height: 1.4;
   color: var(--text-muted);
-  overflow: visible;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .editor-field .van-field__value,
 .editor-field .van-field__body {
   min-width: 0;
-  min-height: 28px;
-  overflow: visible;
+  min-height: 32px;
+  overflow: hidden;
 }
 
 .editor-field .van-field__body {
@@ -1348,15 +1384,19 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .editor-field .van-field__control {
-  min-height: 28px;
-  padding: 2px 0;
-  overflow: visible;
-  line-height: 24px;
+  min-width: 0;
+  min-height: 32px;
+  height: auto;
+  padding: 5px 0;
+  overflow: hidden;
+  line-height: 1.45;
   font-size: var(--app-font-md);
+  text-overflow: ellipsis;
 }
 
 .editor-field-single .van-field__control {
-  height: 28px;
+  height: auto;
+  white-space: nowrap;
 }
 
 .editor-field-area.van-field {
@@ -1390,15 +1430,6 @@ body.is-entry-pointer-drag .entry-drop-zone {
 .editor-submit-bar .van-button {
   height: 40px;
   margin: 0;
-}
-
-.editor-form::-webkit-scrollbar {
-  width: 6px;
-}
-
-.editor-form::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text-muted), transparent 58%);
 }
 
 .account-source-field {
@@ -1592,6 +1623,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
   justify-content: space-between;
   gap: calc(10px * var(--ui-scale));
   min-width: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: 76px;
 }
 
 .detail-history-head {
@@ -1820,6 +1853,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--panel-bg-muted);
+  content-visibility: auto;
+  contain-intrinsic-size: 78px;
 }
 
 .cloud-sync-log-main,
@@ -2517,6 +2552,65 @@ body.is-entry-pointer-drag .entry-drop-zone {
   font-size: var(--app-font-sm);
 }
 
+.desktop-close-setting {
+  display: grid;
+  gap: 7px;
+  padding: 3px 9px 7px;
+}
+
+.desktop-close-setting-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.desktop-close-setting-copy strong {
+  color: var(--text-main);
+  font-size: var(--app-font-md);
+  font-weight: 500;
+}
+
+.desktop-close-setting-copy small {
+  color: var(--text-muted);
+  font-size: var(--app-font-sm);
+}
+
+.desktop-close-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--panel-bg-muted);
+}
+
+.desktop-close-options button {
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: transparent;
+  font: inherit;
+  font-size: var(--app-font-sm);
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.desktop-close-options button.active {
+  color: var(--brand-strong);
+  background: color-mix(in srgb, var(--brand), transparent 86%);
+  font-weight: 700;
+}
+
+.desktop-close-options button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .drawer-panel .van-cell {
   border-radius: 8px;
   overflow: hidden;
@@ -3178,17 +3272,56 @@ body.is-entry-pointer-drag .entry-kind-mark {
     width: 30px;
     min-width: 30px;
   }
+}
 
+@media (max-width: 620px) {
   .account-source-field {
     grid-template-columns: 1fr;
-    gap: 8px;
+    align-items: stretch;
+    gap: 3px;
+    min-height: 0;
+    padding: 6px 12px 7px;
   }
 
   .autofill-rule-field {
     grid-template-columns: 1fr;
-    gap: 4px;
-    padding-top: 6px;
-    padding-bottom: 6px;
+    align-items: stretch;
+    gap: 3px;
+    min-height: 0;
+    padding: 6px 12px 7px;
+  }
+
+  .editor-field-area .van-field__control {
+    height: auto;
+    min-height: 58px;
+    max-height: 144px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+  }
+
+  .autofill-rule-field select {
+    width: 100%;
+    min-height: 34px;
+    box-sizing: border-box;
+  }
+
+  .account-source-field > span {
+    min-height: 0;
+    line-height: 1.4;
+  }
+
+  .account-source-options {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 12px;
+  }
+
+  .account-source-options .van-radio {
+    min-width: 0;
+    min-height: 28px;
   }
 }
 

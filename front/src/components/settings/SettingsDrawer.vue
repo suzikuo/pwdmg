@@ -78,6 +78,48 @@
           </div>
         </div>
 
+        <div v-if="showDesktopTraySettings" class="settings-group">
+          <div class="settings-group-title">桌面</div>
+          <van-cell
+            center
+            title="系统托盘"
+            :label="desktopTrayLabel"
+          >
+            <template #right-icon>
+              <van-switch
+                :model-value="desktopTraySettings?.trayEnabled ?? true"
+                :loading="desktopTrayBusy || !desktopTraySettings"
+                size="18px"
+                @update:model-value="emit('toggle-desktop-tray', Boolean($event))"
+              />
+            </template>
+          </van-cell>
+          <div v-if="desktopTraySettings?.trayEnabled === true" class="desktop-close-setting">
+            <div class="desktop-close-setting-copy">
+              <strong>关闭主窗口</strong>
+              <small>点击标题栏关闭按钮后</small>
+            </div>
+            <div class="desktop-close-options" role="radiogroup" aria-label="关闭主窗口行为">
+              <button
+                type="button"
+                role="radio"
+                :class="{ active: desktopCloseBehavior === 'minimize-to-tray' }"
+                :aria-checked="desktopCloseBehavior === 'minimize-to-tray'"
+                :disabled="desktopTrayBusy"
+                @click="emit('update-desktop-close-behavior', 'minimize-to-tray')"
+              >最小化到托盘</button>
+              <button
+                type="button"
+                role="radio"
+                :class="{ active: desktopCloseBehavior === 'exit' }"
+                :aria-checked="desktopCloseBehavior === 'exit'"
+                :disabled="desktopTrayBusy"
+                @click="emit('update-desktop-close-behavior', 'exit')"
+              >关闭程序</button>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-group">
           <div class="settings-group-title">安全</div>
           <van-cell center is-link title="主密码" label="修改或清空主密码" @click="emit('open-password-sheet')">
@@ -128,10 +170,68 @@
           </van-cell>
         </div>
 
+        <div v-if="showAndroidPasskeyProviderSettings" class="settings-group">
+          <div class="settings-group-title">Android 通行密钥</div>
+          <van-cell center title="通行密钥提供方" :label="androidPasskeyProviderEnabled ? (androidPasskeyProviderSystemEnabled ? '已被系统选中，可响应网站请求' : '组件已开启，请完成系统选择') : '组件未开启，不会响应系统请求'">
+            <template #value>
+              <strong :class="['plugin-status-pill', androidPasskeyProviderEnabled ? 'is-on' : 'is-off']">{{ androidPasskeyProviderStatus }}</strong>
+            </template>
+            <template #right-icon>
+              <van-switch
+                :model-value="androidPasskeyProviderEnabled"
+                size="18px"
+                :loading="androidPasskeyProviderBusy"
+                @update:model-value="emit('toggle-android-passkey-provider', Boolean($event))"
+              />
+            </template>
+          </van-cell>
+          <van-cell
+            v-if="androidPasskeyProviderEnabled"
+            center
+            is-link
+            title="系统凭据提供方"
+            label="在系统页面选择或取消 My Password"
+            @click="emit('open-android-passkey-settings')"
+          >
+            <template #value><span class="settings-entry-value">{{ androidPasskeyProviderSystemEnabled ? '已选择' : '待选择' }}</span></template>
+          </van-cell>
+        </div>
+
         <div v-if="showPluginSettings" class="settings-group">
           <div class="settings-group-title">浏览器插件</div>
           <van-cell center is-link title="插件监听" label="Chrome / Edge 自动填充" @click="emit('open-plugin')">
             <template #value><strong :class="['plugin-status-pill', pluginEnabled ? 'is-on' : 'is-off']">{{ pluginStatus }}</strong></template>
+          </van-cell>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-group-title">附件存储</div>
+          <van-cell
+            center
+            title="当前附件"
+            :label="attachmentStorageState ? `${formatBytes(attachmentStorageState.activeBytes)} · 配额 ${formatBytes(attachmentStorageState.quotaBytes)}` : '正在读取存储状态'"
+          >
+            <template #value><span class="settings-entry-value">{{ attachmentStorageState?.activeCount ?? '-' }} 个</span></template>
+          </van-cell>
+          <van-cell
+            v-if="attachmentStorageState?.retainedCount"
+            center
+            title="可恢复附件"
+            :label="formatBytes(attachmentStorageState.retainedBytes)"
+          >
+            <template #value><span class="settings-entry-value">{{ attachmentStorageState.retainedCount }} 个</span></template>
+          </van-cell>
+          <van-cell center title="整理附件存储" label="核对当前保险库引用并回收过期对象">
+            <template #right-icon>
+              <van-button
+                size="small"
+                plain
+                type="default"
+                icon="delete-o"
+                :loading="attachmentStorageBusy"
+                @click.stop="emit('collect-attachments')"
+              >整理</van-button>
+            </template>
           </van-cell>
         </div>
       </section>
@@ -169,6 +269,16 @@
           <div class="portable-backup-actions">
             <van-button class="backup-action-button" size="small" plain type="primary" icon="down" :loading="portableBackupBusy" @click="emit('export-portable-backup')">导出包</van-button>
             <van-button class="backup-action-button" size="small" plain type="default" icon="upgrade" :disabled="portableBackupBusy" @click="emit('import-portable-backup')">恢复包</van-button>
+          </div>
+          <p v-if="portableBackupStatus" class="settings-note compact-note">{{ portableBackupStatus }}</p>
+        </div>
+        <div v-if="androidVaultBackupSupported" class="portable-backup-panel">
+          <div class="portable-backup-copy">
+            <strong>本地保险库副本</strong>
+            <span>仅包含加密保险库，不含附件</span>
+          </div>
+          <div class="portable-backup-actions">
+            <van-button class="backup-action-button" size="small" plain type="primary" icon="down" :loading="portableBackupBusy" @click="emit('export-android-vault')">导出文件</van-button>
           </div>
           <p v-if="portableBackupStatus" class="settings-note compact-note">{{ portableBackupStatus }}</p>
         </div>
@@ -304,7 +414,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { AppUpdateCheck, AppUpdateProgress, AndroidAutofillState, PluginListenerState, VaultEntry, VaultPayload } from '../../types'
+import type { AppUpdateCheck, AppUpdateProgress, AttachmentStorageState, DesktopCloseBehavior, DesktopTraySettings, VaultEntry, VaultPayload } from '../../types'
 
 type DrawerSection = 'settings' | 'updates' | 'backup' | 'system'
 type ThemeMode = 'light' | 'dark'
@@ -337,12 +447,22 @@ const props = defineProps<{
   deviceUnlockSupported: boolean
   deviceUnlockEnabled: boolean
   deviceUnlockLabel: string
+  showDesktopTraySettings: boolean
+  desktopTraySettings: DesktopTraySettings | null
+  desktopTrayBusy: boolean
   showAndroidAutofillSettings: boolean
   androidAutofillEnabled: boolean
   androidAutofillStatus: string
+  showAndroidPasskeyProviderSettings: boolean
+  androidPasskeyProviderEnabled: boolean
+  androidPasskeyProviderSystemEnabled: boolean
+  androidPasskeyProviderStatus: string
+  androidPasskeyProviderBusy: boolean
   showPluginSettings: boolean
   pluginEnabled: boolean
   pluginStatus: string
+  attachmentStorageState: AttachmentStorageState | null
+  attachmentStorageBusy: boolean
   showUpdateSettings: boolean
   updateManifestUrl: string
   defaultUpdateManifestUrl: string
@@ -365,6 +485,7 @@ const props = defineProps<{
   cloudBackups: CloudInfo[]
   backupStatus: string
   portableBackupSupported: boolean
+  androidVaultBackupSupported: boolean
   portableBackupBusy: boolean
   portableBackupStatus: string
   cloudSyncLogLimit: number
@@ -391,6 +512,15 @@ const allSystemEntriesSelected = computed(() => (
   props.systemGroupEntries.length > 0
   && props.systemGroupEntries.every((entry) => systemSelectedIds.value.has(entry.id))
 ))
+const desktopCloseBehavior = computed<DesktopCloseBehavior>(() => (
+  props.desktopTraySettings?.closeBehavior || 'minimize-to-tray'
+))
+const desktopTrayLabel = computed(() => {
+  const settings = props.desktopTraySettings
+  if (!settings) return '正在读取托盘状态'
+  if (!settings.trayEnabled) return '不显示托盘图标'
+  return settings.trayAvailable ? '托盘图标已显示' : '已开启，托盘暂不可用'
+})
 
 watch(
   () => [props.open, props.section, props.detailOpen] as const,
@@ -429,8 +559,13 @@ const emit = defineEmits<{
   'open-password-health': []
   'open-passkeys': []
   'toggle-device-unlock': [enabled: boolean]
+  'toggle-desktop-tray': [enabled: boolean]
+  'update-desktop-close-behavior': [behavior: DesktopCloseBehavior]
   'open-android-settings': []
+  'toggle-android-passkey-provider': [enabled: boolean]
+  'open-android-passkey-settings': []
   'open-plugin': []
+  'collect-attachments': []
   'update-manifest-url': [value: string]
   'check-update': []
   'download-update': []
@@ -447,6 +582,7 @@ const emit = defineEmits<{
   'select-cloud-backup': [name: string]
   'export-portable-backup': []
   'import-portable-backup': []
+  'export-android-vault': []
   'update-log-limit': [value: number | string]
   'clear-logs': []
   'update-system-group': [key: 'archived' | 'trashed']

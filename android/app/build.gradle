@@ -23,42 +23,47 @@ if (requireReleaseSigning && !hasReleaseSigning) {
 }
 
 android {
-    namespace "com.suzikuo.mypwdmg"
-    compileSdk 35
+    namespace = "com.suzikuo.mypwdmg"
+    compileSdk = 35
 
     defaultConfig {
-        applicationId "com.suzikuo.mypwdmg"
-        minSdk 26
-        targetSdk 34
-        versionCode 252
-        versionName "2.0.52"
+        applicationId = "com.suzikuo.mypwdmg"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 256
+        versionName = "2.0.56"
     }
 
     buildFeatures {
-        buildConfig true
+        buildConfig = true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 
     signingConfigs {
         debug {
-            storeFile file("debug.keystore")
-            storePassword "android"
-            keyAlias "androiddebugkey"
-            keyPassword "android"
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
         }
         release {
             if (hasReleaseSigning) {
-                storeFile file(releaseStoreFile)
-                storePassword releaseStorePassword
-                keyAlias releaseKeyAlias
-                keyPassword releaseKeyPassword
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled false
-            signingConfig signingConfigs.release
+            minifyEnabled = false
+            signingConfig = signingConfigs.release
         }
     }
 
@@ -78,4 +83,8 @@ dependencies {
 
     testImplementation "junit:junit:4.13.2"
     testImplementation "org.json:json:20240303"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs.add("-Xlint:deprecation")
 }

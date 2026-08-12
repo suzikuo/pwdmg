@@ -9,6 +9,12 @@ type KvRecord<T> = {
   value: T
 }
 
+export type IndexedDbWriteTransaction = {
+  get: <T>(key: string) => Promise<T | null>
+  set: <T>(key: string, value: T) => void
+  delete: (key: string) => void
+}
+
 let dbPromise: Promise<IDBDatabase> | null = null
 
 export async function idbGet<T>(key: string): Promise<T | null> {
@@ -47,11 +53,37 @@ export async function idbDelete(key: string): Promise<void> {
   })
 }
 
+export async function idbRunReadwrite<T>(fn: (transaction: IndexedDbWriteTransaction) => Promise<T> | T): Promise<T> {
+  return withStore('readwrite', async (store) => fn({
+    get: async <V>(key: string) => {
+      const record = await requestToPromise<KvRecord<V> | undefined>(store.get(key))
+      return record?.value ?? null
+    },
+    set: <V>(key: string, value: V) => {
+      store.put({ key, value })
+    },
+    delete: (key: string) => {
+      store.delete(key)
+    }
+  }))
+}
+
 async function withStore<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => Promise<T> | T): Promise<T> {
   const db = await getDb()
   const transaction = db.transaction(KV_STORE, mode)
   const done = transactionDone(transaction)
-  const result = await fn(transaction.objectStore(KV_STORE))
+  let result: T
+  try {
+    result = await fn(transaction.objectStore(KV_STORE))
+  } catch (error) {
+    try {
+      transaction.abort()
+    } catch {
+      // The transaction may already have failed or completed.
+    }
+    await done.catch(() => {})
+    throw error
+  }
   await done
   return result
 }

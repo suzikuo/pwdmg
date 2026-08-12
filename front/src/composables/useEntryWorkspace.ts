@@ -2,7 +2,6 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import type { EntryFilterMode } from '../services/entryWorkspace.ts'
 import type { VaultEntry } from '../types'
 
-type EntryTreeTransform = (entries: VaultEntry[]) => VaultEntry[]
 type EntryFilter = (entries: VaultEntry[], term: string, mode: EntryFilterMode) => VaultEntry[]
 
 export type EntryWorkspaceState = {
@@ -23,7 +22,6 @@ export type EntryWorkspaceState = {
 
 export function useEntryWorkspace(
   getEntries: () => VaultEntry[],
-  activeTree: EntryTreeTransform,
   filterEntries: EntryFilter
 ): EntryWorkspaceState {
   const keyword = ref('')
@@ -40,7 +38,7 @@ export function useEntryWorkspace(
 
   const filteredEntries = computed(() => {
     const term = keyword.value.trim().toLowerCase()
-    return filterEntries(activeTree(getEntries()), term, entryFilter.value)
+    return filterEntries(getEntries(), term, entryFilter.value)
   })
 
   function clearSelection() {

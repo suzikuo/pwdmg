@@ -113,6 +113,7 @@ function loadBackground(nativeResponder, activeTab = { id: 7, url: 'https://logi
   }
   if (options.webAuthenticationProxy) chrome.webAuthenticationProxy = options.webAuthenticationProxy
   const context = vm.createContext({
+    Date: options.Date || Date,
     URL,
     chrome,
     clearTimeout: options.clearTimeout || clearTimeout,
@@ -717,6 +718,60 @@ test('failed capture saves remain retryable and prompts never cross origins', as
   assert.equal(saveAttempts, 2)
 })
 
+test('pending password captures expire on schedule without a follow-up message', async () => {
+  let now = 1_000_000
+  const timers = []
+  class FakeDate extends Date {
+    static now() { return now }
+  }
+  const background = loadBackground((method, params) => {
+    if (method === 'previewCapturedLogin') {
+      return {
+        ok: true,
+        data: {
+          shouldPrompt: true,
+          hostname: params.capture.hostname,
+          title: 'Example',
+          accountLabel: 'alice',
+          accountKind: 'username',
+          folders: []
+        }
+      }
+    }
+    return { ok: true, data: [] }
+  }, { id: 7, url: 'https://login.example.com/' }, {
+    Date: FakeDate,
+    setTimeout(callback, delay) {
+      const timer = { callback, delay, cancelled: false, unref() {} }
+      timers.push(timer)
+      return timer
+    },
+    clearTimeout(timer) {
+      if (timer) timer.cancelled = true
+    }
+  })
+  const sender = {
+    tab: { id: 7, url: 'https://login.example.com/' },
+    frameId: 0,
+    documentId: 'doc-expiry',
+    url: 'https://login.example.com/form'
+  }
+
+  const prepared = await background.dispatch({
+    type: 'MYPWDMG_PREPARE_CAPTURE',
+    capture: { username: 'alice', password: 'secret' }
+  }, sender)
+  assert.equal(prepared.ok, true)
+
+  const expiryTimer = timers.findLast((timer) => !timer.cancelled && timer.delay === 5 * 60 * 1000)
+  assert.ok(expiryTimer)
+  now += 5 * 60 * 1000
+  expiryTimer.callback()
+
+  const expired = await background.dispatch({ type: 'MYPWDMG_TAKE_SAVE_PROMPT' }, sender)
+  assert.equal(expired.data, null)
+})
+
 test('background passkey proxy probe is extension-page-only and explicitly detaches', async () => {
   const { proxy, calls } = passkeyProxyMock()
   const background = loadBackground(
@@ -862,4 +917,45 @@ test('manifest loads shared policy and keeps postponed passkey UI disabled', () 
   const popup = source('popup.js')
   assert.doesNotMatch(popup, /passkeyProbe|webAuthenticationProxy|MYPWDMG_PROBE_PASSKEY_PROXY/)
   assert.doesNotMatch(source('popup.html'), /通行密钥|passkeyProbe/)
+})
+
+test('automatic save prompts stay collapsed until the user opens them', () => {
+  const content = source('content.js')
+  const styles = source('content.css')
+
+  assert.match(content, /function renderSaveTrigger\(actionLabel, onActivate, state = 'pending'\)/)
+  assert.match(content, /renderSaveNotice\(response\?\.message[^\n]+\)/)
+  assert.match(content, /renderSavePrompt\(\{ \.\.\.response\.data \}, false\)/)
+  assert.doesNotMatch(content, /renderPanel\(\[\], response\?\.message \|\| 'My Password 插件已锁定/)
+  assert.match(content, /data-mypwdmg-auto-save/)
+  assert.match(styles, /\.mypwdmg-save-trigger-icon/)
+})
+
+test('browser capture state is bounded and expires without another user message', () => {
+  const content = source('content.js')
+  const background = source('background.js')
+
+  assert.match(content, /COMPLETED_SAVE_TOKEN_MAX = 64/)
+  assert.match(content, /COMPLETED_SAVE_TOKEN_TTL_MS = 5 \* 60 \* 1000/)
+  assert.match(content, /const completedSaveTokens = new Map\(\)/)
+  assert.match(content, /let extensionFilledPasswords = new WeakMap\(\)/)
+  assert.match(content, /extensionFilledPasswords\.set\(input, String\(value\)\)/)
+  assert.match(content, /window\.addEventListener\('pagehide',[\s\S]*pageGeneration \+= 1[\s\S]*clearPageState\(\)/)
+  assert.match(content, /inputCaptureClearTimer = window\.setTimeout/)
+  assert.match(background, /let pendingCapturePruneTimer = null/)
+  assert.match(background, /function schedulePendingCapturePrune\(\)/)
+  assert.match(background, /for \(const collection of \[pendingCaptures, pendingPromptsByContext, pendingLockedCapturesByContext, fillAuthorizations\]\)/)
+  assert.match(background, /pendingCapturePruneTimer = setTimeout/)
+  assert.match(background, /pendingCapturePruneTimer\?\.unref\?\.\(\)/)
+})
+
+test('late content responses cannot revive a page after pagehide', () => {
+  const content = source('content.js')
+
+  assert.match(content, /let pageGeneration = 0/)
+  assert.match(content, /function isCurrentPageRequest\(generation\)/)
+  assert.match(content, /pageGeneration \+= 1/)
+  assert.match(content, /if \(!isCurrentPageRequest\(requestGeneration\) \|\| pendingSave\?\.token !== token\)/)
+  assert.match(content, /queryGeneration !== queryRequestGeneration/)
+  assert.match(content, /if \(!isCurrentPageRequest\(requestGeneration\)\) return \{ ok: false, code: 'PAGE_INACTIVE' \}/)
 })

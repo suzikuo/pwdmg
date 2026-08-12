@@ -5,6 +5,7 @@ import android.app.assist.AssistStructure;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
 import android.service.autofill.Dataset;
@@ -20,22 +21,35 @@ import org.json.JSONObject;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public final class AndroidPasswordBridge {
     private static final String TAG = "PwdAutofillBridge";
+    static final int ATTACHMENT_EXPORT_REQUEST_CODE = 7431;
+    private static final int VAULT_EXPORT_REQUEST_CODE = 7432;
+    private static final int MAX_VAULT_EXPORT_BYTES = 24 * 1024 * 1024;
+    private static final long DOCUMENT_EXPORT_TIMEOUT_MINUTES = 5;
     private final Activity activity;
     private final AndroidVaultStore store;
+    private final AndroidAttachmentStore attachmentStore;
     private final AndroidUpdateManager updater;
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService documentIoExecutor = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService documentExportTimeoutExecutor = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, UpdateTask> updateTasks = new ConcurrentHashMap<>();
+    private final Map<String, DocumentExportTask> documentExportTasks = new ConcurrentHashMap<>();
 
     AndroidPasswordBridge(Activity activity) {
         this.activity = activity;
         this.store = new AndroidVaultStore(activity);
+        this.attachmentStore = new AndroidAttachmentStore(new java.io.File(activity.getFilesDir(), "attachments"));
         this.updater = new AndroidUpdateManager(activity);
     }
 
@@ -80,6 +94,57 @@ public final class AndroidPasswordBridge {
     @JavascriptInterface
     public String readLegacyLocalStorage() {
         return result(() -> store.readLegacyLocalStorage());
+    }
+
+    @JavascriptInterface
+    public String getAttachmentStorageState() {
+        return result(() -> attachmentStore.state());
+    }
+
+    @JavascriptInterface
+    public String readAttachmentObject(String attachmentId) {
+        return result(() -> attachmentStore.read(attachmentId));
+    }
+
+    @JavascriptInterface
+    public String writeAttachmentObject(String attachmentId, String objectText) {
+        return result(() -> attachmentStore.write(attachmentId, objectText));
+    }
+
+    @JavascriptInterface
+    public String retainAttachmentObject(String attachmentId) {
+        return result(() -> attachmentStore.retain(attachmentId));
+    }
+
+    @JavascriptInterface
+    public String collectAttachmentObjects(String referencedIdsJson) {
+        return result(() -> attachmentStore.collect(referencedIdsJson));
+    }
+
+    @JavascriptInterface
+    public String startAttachmentExport(String displayName, String mimeType, String contentBase64) {
+        return result(() -> startDocumentExportTask(
+            displayName, mimeType, contentBase64, AndroidAttachmentStore.MAX_ATTACHMENT_FILE_BYTES,
+            ATTACHMENT_EXPORT_REQUEST_CODE, "ATTACHMENT_EXPORT_FAILED"
+        ));
+    }
+
+    @JavascriptInterface
+    public String getAttachmentExportTaskState(String taskId) {
+        return result(() -> getDocumentExportTaskState(taskId));
+    }
+
+    @JavascriptInterface
+    public String startVaultExport(String displayName, String mimeType, String contentBase64) {
+        return result(() -> startDocumentExportTask(
+            displayName, mimeType, contentBase64, MAX_VAULT_EXPORT_BYTES,
+            VAULT_EXPORT_REQUEST_CODE, "VAULT_EXPORT_FAILED"
+        ));
+    }
+
+    @JavascriptInterface
+    public String getVaultExportTaskState(String taskId) {
+        return result(() -> getDocumentExportTaskState(taskId));
     }
 
     @JavascriptInterface
@@ -315,6 +380,21 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
+    public String getPasskeyProviderState() {
+        return result(() -> PasskeyProviderSettings.state(activity));
+    }
+
+    @JavascriptInterface
+    public String setPasskeyProviderEnabled(boolean enabled) {
+        return result(() -> PasskeyProviderSettings.setComponentEnabled(activity, enabled));
+    }
+
+    @JavascriptInterface
+    public String openPasskeyProviderSettings() {
+        return result(() -> PasskeyProviderSettings.openSystemSettings(activity));
+    }
+
+    @JavascriptInterface
     public String checkAppUpdate(String manifestUrl) {
         return result(() -> updater.check(manifestUrl));
     }
@@ -358,6 +438,7 @@ public final class AndroidPasswordBridge {
 
     @JavascriptInterface
     public String safeExit() {
+        store.lock();
         activity.runOnUiThread(() -> {
             if (android.os.Build.VERSION.SDK_INT >= 21) {
                 activity.finishAndRemoveTask();
@@ -366,6 +447,32 @@ public final class AndroidPasswordBridge {
             }
         });
         return ok(JSONObject.NULL);
+    }
+
+    void handleActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode != ATTACHMENT_EXPORT_REQUEST_CODE && requestCode != VAULT_EXPORT_REQUEST_CODE) return;
+        DocumentExportTask task = null;
+        for (DocumentExportTask candidate : documentExportTasks.values()) {
+            if (candidate.requestCode == requestCode && candidate.isWaiting()) {
+                task = candidate;
+                break;
+            }
+        }
+        if (task == null) return;
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+            task.complete(false, "");
+            return;
+        }
+        task.beginWriting();
+        DocumentExportTask selected = task;
+        documentIoExecutor.submit(() -> writeDocumentExport(selected, data.getData()));
+    }
+
+    void close() {
+        for (DocumentExportTask task : documentExportTasks.values()) task.fail("CANCELLED", "Document export was cancelled");
+        updateExecutor.shutdownNow();
+        documentIoExecutor.shutdownNow();
+        documentExportTimeoutExecutor.shutdownNow();
     }
 
     private JSONObject autofillState() throws Exception {
@@ -380,6 +487,113 @@ public final class AndroidPasswordBridge {
             .put("enabled", enabled)
             .put("serviceName", new ComponentName(activity, PwdAutofillService.class).flattenToString())
             .put("settingsAvailable", supported);
+    }
+
+    private JSONObject startDocumentExportTask(
+        String displayName,
+        String mimeType,
+        String contentBase64,
+        int maxBytes,
+        int requestCode,
+        String failureCode
+    ) throws Exception {
+        for (Map.Entry<String, DocumentExportTask> entry : documentExportTasks.entrySet()) {
+            DocumentExportTask task = entry.getValue();
+            if (task.isFinished()) {
+                documentExportTasks.remove(entry.getKey(), task);
+                continue;
+            }
+            throw new IllegalStateException("Another document export is already running");
+        }
+        byte[] content = decodeExportContent(contentBase64, maxBytes);
+        String name = normalizeExportName(displayName);
+        String type = normalizeExportMimeType(mimeType);
+        DocumentExportTask task = new DocumentExportTask(name, type, content, requestCode, failureCode);
+        documentExportTasks.put(task.id, task);
+        try {
+            task.setTimeoutFuture(documentExportTimeoutExecutor.schedule(
+                () -> task.fail("DOCUMENT_EXPORT_TIMEOUT", "Document export timed out"),
+                DOCUMENT_EXPORT_TIMEOUT_MINUTES,
+                TimeUnit.MINUTES
+            ));
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(type)
+                .putExtra(Intent.EXTRA_TITLE, name);
+            activity.runOnUiThread(() -> {
+                try {
+                    activity.startActivityForResult(intent, requestCode);
+                } catch (Exception error) {
+                    task.fail(failureCode, error.getMessage());
+                }
+            });
+            return task.toJson();
+        } catch (Exception error) {
+            task.fail(failureCode, error.getMessage());
+            throw error;
+        }
+    }
+
+    private JSONObject getDocumentExportTaskState(String taskId) throws Exception {
+        DocumentExportTask task = documentExportTasks.get(taskId == null ? "" : taskId);
+        if (task == null) throw new IllegalArgumentException("Document export task was not found");
+        JSONObject state = task.toJson();
+        if (task.isFinished()) documentExportTasks.remove(task.id, task);
+        return state;
+    }
+
+    private void writeDocumentExport(DocumentExportTask task, Uri uri) {
+        byte[] content = task.takeContent();
+        if (content == null) {
+            task.fail(task.failureCode, "Document content is unavailable");
+            return;
+        }
+        try (java.io.OutputStream output = activity.getContentResolver().openOutputStream(uri, "w")) {
+            if (output == null) throw new IllegalStateException("Could not open selected file");
+            output.write(content);
+            output.flush();
+            task.complete(true, uri.toString());
+        } catch (Exception error) {
+            task.fail(task.failureCode, error.getMessage());
+        } finally {
+            Arrays.fill(content, (byte) 0);
+        }
+    }
+
+    private static byte[] decodeExportContent(String contentBase64, int maxBytes) {
+        String value = contentBase64 == null ? "" : contentBase64;
+        if (value.length() > ((maxBytes + 2) / 3) * 4 + 4) {
+            throw new IllegalArgumentException("Document is too large");
+        }
+        byte[] content;
+        try {
+            content = Base64.getDecoder().decode(value);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("Document content is invalid", error);
+        }
+        if (content.length > maxBytes) {
+            Arrays.fill(content, (byte) 0);
+            throw new IllegalArgumentException("Document is too large");
+        }
+        return content;
+    }
+
+    private static String normalizeExportName(String value) {
+        String name = String.valueOf(value == null ? "" : value).replace('\\', '/');
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) name = name.substring(slash + 1);
+        name = name.replace("\u0000", "").trim();
+        if (name.isEmpty()) name = "document";
+        if (name.length() > 255 || ".".equals(name) || "..".equals(name)) throw new IllegalArgumentException("Document name is invalid");
+        return name;
+    }
+
+    private static String normalizeExportMimeType(String value) {
+        String mimeType = String.valueOf(value == null ? "" : value).trim().toLowerCase(Locale.ROOT);
+        if (mimeType.length() > 127 || !mimeType.matches("[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*")) {
+            return "application/octet-stream";
+        }
+        return mimeType;
     }
 
     private JSONObject autofillLaunchContext() throws Exception {
@@ -402,9 +616,9 @@ public final class AndroidPasswordBridge {
         PwdAutofillService.LoginFields fields = new PwdAutofillService.LoginFields();
         fields.hostname = intent.getStringExtra(AutofillPickerActivity.EXTRA_HOSTNAME);
         fields.targetPackageName = intent.getStringExtra(AutofillPickerActivity.EXTRA_TARGET_PACKAGE);
-        fields.usernameId = (AutofillId) intent.getParcelableExtra(AutofillPickerActivity.EXTRA_USERNAME_ID);
-        fields.passwordId = (AutofillId) intent.getParcelableExtra(AutofillPickerActivity.EXTRA_PASSWORD_ID);
-        fields.otpId = (AutofillId) intent.getParcelableExtra(AutofillPickerActivity.EXTRA_OTP_ID);
+        fields.usernameId = AndroidIntentCompat.getParcelableExtra(intent, AutofillPickerActivity.EXTRA_USERNAME_ID, AutofillId.class);
+        fields.passwordId = AndroidIntentCompat.getParcelableExtra(intent, AutofillPickerActivity.EXTRA_PASSWORD_ID, AutofillId.class);
+        fields.otpId = AndroidIntentCompat.getParcelableExtra(intent, AutofillPickerActivity.EXTRA_OTP_ID, AutofillId.class);
         fields.usernameKind = intent.getStringExtra(AutofillPickerActivity.EXTRA_ACCOUNT_KIND);
         if (fields.usernameKind == null || fields.usernameKind.trim().isEmpty()) {
             fields.usernameKind = PwdAutofillService.ACCOUNT_KIND_GENERIC;
@@ -464,6 +678,106 @@ public final class AndroidPasswordBridge {
 
     private interface BridgeCall {
         Object run() throws Exception;
+    }
+
+    private static final class DocumentExportTask {
+        final String id = UUID.randomUUID().toString();
+        final String name;
+        final String mimeType;
+        final int requestCode;
+        final String failureCode;
+        private byte[] content;
+        private Future<?> timeoutFuture;
+        private String status = "waiting";
+        private JSONObject result;
+        private String errorCode = "";
+        private String errorMessage = "";
+
+        DocumentExportTask(String name, String mimeType, byte[] content, int requestCode, String failureCode) {
+            this.name = name;
+            this.mimeType = mimeType;
+            this.content = content;
+            this.requestCode = requestCode;
+            this.failureCode = failureCode;
+        }
+
+        synchronized boolean isWaiting() {
+            return "waiting".equals(status);
+        }
+
+        synchronized boolean isFinished() {
+            return "done".equals(status) || "error".equals(status);
+        }
+
+        synchronized void setTimeoutFuture(Future<?> future) {
+            if (isFinished()) {
+                future.cancel(false);
+                return;
+            }
+            timeoutFuture = future;
+        }
+
+        synchronized void beginWriting() {
+            if (!"waiting".equals(status)) return;
+            status = "running";
+            cancelTimeout();
+        }
+
+        synchronized byte[] takeContent() {
+            byte[] value = content;
+            content = null;
+            return value;
+        }
+
+        synchronized void complete(boolean saved, String path) {
+            if (isFinished()) return;
+            cancelTimeout();
+            try {
+                JSONObject completed = new JSONObject()
+                    .put("saved", saved)
+                    .put("path", path == null ? "" : path);
+                status = "done";
+                result = completed;
+            } catch (Exception error) {
+                status = "error";
+                errorCode = failureCode;
+                errorMessage = error.getMessage() == null ? "" : error.getMessage();
+            }
+            if (content != null) {
+                Arrays.fill(content, (byte) 0);
+                content = null;
+            }
+        }
+
+        synchronized void fail(String code, String message) {
+            if (isFinished()) return;
+            cancelTimeout();
+            status = "error";
+            errorCode = code == null ? failureCode : code;
+            errorMessage = message == null ? "" : message;
+            if (content != null) {
+                Arrays.fill(content, (byte) 0);
+                content = null;
+            }
+        }
+
+        private void cancelTimeout() {
+            if (timeoutFuture == null) return;
+            timeoutFuture.cancel(false);
+            timeoutFuture = null;
+        }
+
+        synchronized JSONObject toJson() throws Exception {
+            JSONObject state = new JSONObject()
+                .put("id", id)
+                .put("name", name)
+                .put("mimeType", mimeType)
+                .put("status", status);
+            if (result != null) state.put("result", result);
+            if (!errorCode.isEmpty()) state.put("errorCode", errorCode);
+            if (!errorMessage.isEmpty()) state.put("errorMessage", errorMessage);
+            return state;
+        }
     }
 
     private void runUpdateTask(UpdateTask task, String value) {

@@ -17,6 +17,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_native_host.ps1 -Exte
 
 The extension only detects and fills web forms. Password data stays in the encrypted local vault and is read through the native host. If the vault has an empty master password, the popup will try an empty-password unlock automatically. If the vault has a password, click the toolbar icon and unlock it first.
 
+Automatic save notifications stay collapsed as a compact icon in the page's upper-right corner. Click the icon to open the save/update form; the minus button or `Escape` collapses it without dismissing the pending capture. Completed token state is bounded, capture/password snapshots expire automatically, and leaving the page clears content-script sensitive state.
+
 Fill payloads require a real click in extension-owned UI and a short-lived authorization bound to the current tab, frame, document, and origin. Run the extension regression tests with:
 
 ```powershell

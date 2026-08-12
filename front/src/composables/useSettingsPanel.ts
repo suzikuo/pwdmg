@@ -9,7 +9,6 @@ export type SettingsPanelState = {
   drawerSection: Ref<DrawerSection>
   systemGroupKey: Ref<SystemGroupKey>
   passwordSheetOpen: Ref<boolean>
-  pluginDetailOpen: Ref<boolean>
   passwordHealthOpen: Ref<boolean>
 }
 
@@ -20,7 +19,6 @@ export function useSettingsPanel(): SettingsPanelState {
     drawerSection: ref<DrawerSection>('settings'),
     systemGroupKey: ref<SystemGroupKey>('archived'),
     passwordSheetOpen: ref(false),
-    pluginDetailOpen: ref(false),
     passwordHealthOpen: ref(false)
   }
 }

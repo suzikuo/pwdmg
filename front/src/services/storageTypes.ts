@@ -1,5 +1,6 @@
 import type {
   AndroidAutofillState,
+  AndroidPasskeyProviderState,
   AttachmentObjectRetention,
   AttachmentObjectWrite,
   AttachmentStorageState,
@@ -48,6 +49,9 @@ export interface VaultStorageAdapter {
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
+  getAndroidPasskeyProviderState: () => Promise<ApiResult<AndroidPasskeyProviderState>>
+  setAndroidPasskeyProviderEnabled: (enabled: boolean) => Promise<ApiResult<AndroidPasskeyProviderState>>
+  openAndroidPasskeyProviderSettings: () => Promise<ApiResult<AndroidPasskeyProviderState>>
   checkAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateCheck>>
   downloadAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateDownload>>
   applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>

@@ -11,6 +11,7 @@
           <input
             :value="field.label"
             type="text"
+            autocomplete="off"
             maxlength="200"
             aria-label="字段名称"
             placeholder="字段名称"

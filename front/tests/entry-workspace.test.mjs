@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { filterVaultEntries } from '../src/services/entryWorkspace.ts'
+import { buildVaultSearchIndex } from '../src/services/searchIndex.ts'
 
 const entries = [
   {
@@ -59,6 +60,22 @@ test('favorite filter preserves matching folder ancestors', () => {
   })
   assert.deepEqual(result.map((entry) => entry.id), ['folder'])
   assert.deepEqual(result[0].children.map((entry) => entry.id), ['login-a'])
+})
+
+test('shared search index preserves filtering and excludes protected values', () => {
+  const entries = [
+    {
+      id: 'folder', kind: 'folder', title: '生产', children: [
+        { id: 'visible', kind: 'login', title: '账号', username: 'alice', password: 'hidden-password', note: '服务', customFields: [{ label: '备注', value: '公开', protected: false }] },
+        { id: 'secret-only', kind: 'login', title: '其他', password: 'needle-secret', customFields: [{ label: '令牌', value: 'secret-token', protected: true }] }
+      ]
+    }
+  ]
+  const index = buildVaultSearchIndex(entries)
+  assert.equal(index.filter('公开', 'all')[0].children[0].id, 'visible')
+  assert.deepEqual(index.filter('hidden-password', 'all'), [])
+  assert.deepEqual(index.filter('secret-token', 'all'), [])
+  assert.deepEqual(index.quickAccess('needle-secret'), [])
 })
 
 test('recent filter orders opened entries newest first', () => {

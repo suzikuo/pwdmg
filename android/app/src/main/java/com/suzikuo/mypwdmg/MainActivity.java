@@ -2,6 +2,7 @@ package com.suzikuo.mypwdmg;
 
 import android.app.Activity;
 import android.app.assist.AssistStructure;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
@@ -18,13 +19,17 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.ValueCallback;
 import android.widget.Toast;
 
 public class MainActivity extends Activity {
     private static final String TAG = "PwdMainActivity";
+    private static final int QR_IMAGE_PICKER_REQUEST_CODE = 7433;
     public static final String EXTRA_AUTOFILL_PICKER = "com.suzikuo.mypwdmg.extra.AUTOFILL_PICKER";
     private AssistStructure autofillStructure;
     private WebView webView;
+    private AndroidPasswordBridge passwordBridge;
+    private ValueCallback<Uri[]> filePathCallback;
     private long lastBackPressedAt;
     private String systemBarsTheme = "light";
 
@@ -32,7 +37,12 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        autofillStructure = getIntent().getParcelableExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        autofillStructure = AndroidIntentCompat.getParcelableExtra(
+            getIntent(),
+            AutofillManager.EXTRA_ASSIST_STRUCTURE,
+            AssistStructure.class
+        );
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         applySystemBarsTheme(systemBarsTheme);
 
@@ -42,8 +52,6 @@ public class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(false);
-        settings.setAllowFileAccessFromFileURLs(false);
-        settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
         settings.setSupportMultipleWindows(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -56,6 +64,30 @@ public class MainActivity extends Activity {
             WebView.setWebContentsDebuggingEnabled(true);
         }
         webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(
+                WebView view,
+                ValueCallback<Uri[]> callback,
+                FileChooserParams params
+            ) {
+                if (filePathCallback != null) filePathCallback.onReceiveValue(null);
+                filePathCallback = callback;
+                try {
+                    Intent picker = params.createIntent();
+                    picker.setType("image/*");
+                    picker.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
+                        "image/png", "image/jpeg", "image/webp", "image/bmp"
+                    });
+                    startActivityForResult(picker, QR_IMAGE_PICKER_REQUEST_CODE);
+                    return true;
+                } catch (ActivityNotFoundException error) {
+                    filePathCallback = null;
+                    callback.onReceiveValue(null);
+                    Toast.makeText(MainActivity.this, "系统没有可用的图片选择器", Toast.LENGTH_SHORT).show();
+                    return false;
+                }
+            }
+
             @Override
             public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
                 Log.e(
@@ -82,21 +114,39 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                Log.d(TAG, "WebView page loaded: " + url);
+                Log.d(TAG, "WebView page loaded: " + safeUriLabel(Uri.parse(url)));
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    Log.e(TAG, "WebView load error: " + error.getDescription() + " url=" + request.getUrl());
+                    Log.e(TAG, "WebView load error: " + error.getDescription() + " host=" + safeUriLabel(request.getUrl()));
                 }
             }
         });
-        webView.addJavascriptInterface(new AndroidPasswordBridge(this), "androidPasswordApi");
+        passwordBridge = new AndroidPasswordBridge(this);
+        webView.addJavascriptInterface(passwordBridge, "androidPasswordApi");
 
         setContentView(webView);
         webView.loadUrl("file:///android_asset/index.html?v=" + BuildConfig.VERSION_NAME + "-" + BuildConfig.VERSION_CODE);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        autofillStructure = AndroidIntentCompat.getParcelableExtra(
+            intent,
+            AutofillManager.EXTRA_ASSIST_STRUCTURE,
+            AssistStructure.class
+        );
+        if (webView != null) {
+            webView.evaluateJavascript(
+                "(function(){return !!(window.__mypwdmgHandleNativeAutofillIntent && window.__mypwdmgHandleNativeAutofillIntent());})()",
+                null
+            );
+        }
     }
 
     private boolean handleNavigation(Uri uri) {
@@ -111,6 +161,14 @@ public class MainActivity extends Activity {
             Log.w(TAG, "Could not open external URL", error);
         }
         return true;
+    }
+
+    private String safeUriLabel(Uri uri) {
+        if (uri == null) return "unknown";
+        String scheme = uri.getScheme();
+        String host = uri.getHost();
+        if (host == null || host.trim().isEmpty()) return scheme == null ? "unknown" : scheme;
+        return (scheme == null ? "" : scheme + "://") + host;
     }
 
     public AssistStructure getAutofillStructure() {
@@ -160,9 +218,29 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == QR_IMAGE_PICKER_REQUEST_CODE) {
+            ValueCallback<Uri[]> callback = filePathCallback;
+            filePathCallback = null;
+            if (callback != null) {
+                callback.onReceiveValue(
+                    resultCode == RESULT_OK && data != null
+                        ? WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+                        : null
+                );
+            }
+            return;
+        }
+        if (passwordBridge != null) passwordBridge.handleActivityResult(requestCode, resultCode, data);
+    }
+
+    @Override
     protected void onStop() {
         super.onStop();
-        if (isChangingConfigurations()) return;
+        // Stopping is also used for ordinary app switching and system Autofill flows.
+        // Only clear the native session when this Activity is actually finishing.
+        if (isChangingConfigurations() || !isFinishing()) return;
         new AndroidVaultStore(this).lock();
         if (webView != null) {
             webView.evaluateJavascript(
@@ -174,6 +252,14 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (filePathCallback != null) {
+            filePathCallback.onReceiveValue(null);
+            filePathCallback = null;
+        }
+        if (passwordBridge != null) {
+            passwordBridge.close();
+            passwordBridge = null;
+        }
         if (webView != null) {
             webView.removeJavascriptInterface("androidPasswordApi");
             webView.stopLoading();

@@ -2,9 +2,12 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from main import (
+    DESKTOP_CLOSE_EXIT,
+    DESKTOP_CLOSE_MINIMIZE_TO_TRAY,
     DESKTOP_MIN_HEIGHT,
     DESKTOP_MIN_WIDTH,
     DesktopWindowState,
@@ -13,6 +16,7 @@ from main import (
     get_pywebview_startup_config,
     normalize_desktop_config,
     reset_desktop_window_position,
+    set_desktop_tray_settings,
 )
 
 
@@ -25,6 +29,60 @@ class WebViewCacheTest(unittest.TestCase):
         self.assertEqual(saved["height"], DESKTOP_MIN_HEIGHT)
         self.assertEqual(startup["width"], DESKTOP_MIN_WIDTH)
         self.assertEqual(startup["height"], DESKTOP_MIN_HEIGHT)
+
+    def test_desktop_tray_defaults_preserve_existing_close_behavior(self):
+        legacy = normalize_desktop_config({"width": 520, "height": 640})
+        invalid = normalize_desktop_config(
+            {"tray_enabled": "false", "close_behavior": "hide"}
+        )
+        malformed = normalize_desktop_config({"close_behavior": ["exit"]})
+
+        self.assertTrue(legacy["tray_enabled"])
+        self.assertEqual(legacy["close_behavior"], DESKTOP_CLOSE_MINIMIZE_TO_TRAY)
+        self.assertTrue(invalid["tray_enabled"])
+        self.assertEqual(invalid["close_behavior"], DESKTOP_CLOSE_MINIMIZE_TO_TRAY)
+        self.assertEqual(malformed["close_behavior"], DESKTOP_CLOSE_MINIMIZE_TO_TRAY)
+
+    def test_desktop_tray_preferences_persist_and_control_close_behavior(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "desktop_config.json"
+            state = DesktopWindowState({})
+            with patch("main.DESKTOP_CONFIG_FILE", config_path):
+                state.update_tray_preferences(False, DESKTOP_CLOSE_EXIT)
+                self.assertFalse(state.should_minimize_on_close())
+                state.update_tray_preferences(True, DESKTOP_CLOSE_EXIT)
+                self.assertFalse(state.should_minimize_on_close())
+                state.update_tray_preferences(True, DESKTOP_CLOSE_MINIMIZE_TO_TRAY)
+
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(state.should_minimize_on_close())
+            self.assertTrue(saved["tray_enabled"])
+            self.assertEqual(saved["close_behavior"], DESKTOP_CLOSE_MINIMIZE_TO_TRAY)
+
+    def test_desktop_tray_update_changes_icon_only_when_switch_changes(self):
+        class FakeShell:
+            def __init__(self):
+                self.calls = []
+                self.status = SimpleNamespace(tray_available=True)
+
+            def set_tray_enabled(self, enabled):
+                self.calls.append(enabled)
+                self.status.tray_available = enabled
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = DesktopWindowState({})
+            shell = FakeShell()
+            config_path = Path(temp_dir) / "desktop_config.json"
+            with patch("main._desktop_state", state), \
+                patch("main._desktop_shell", shell), \
+                patch("main.DESKTOP_CONFIG_FILE", config_path):
+                exit_result = set_desktop_tray_settings(True, DESKTOP_CLOSE_EXIT)
+                disabled_result = set_desktop_tray_settings(False, DESKTOP_CLOSE_EXIT)
+
+            self.assertEqual(shell.calls, [False])
+            self.assertEqual(exit_result["closeBehavior"], DESKTOP_CLOSE_EXIT)
+            self.assertFalse(disabled_result["trayEnabled"])
+            self.assertFalse(disabled_result["trayAvailable"])
 
     def test_desktop_fill_bridge_forwards_hostname_authorization_context(self):
         class FakeApi:

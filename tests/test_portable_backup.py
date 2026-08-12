@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 import uuid
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -116,10 +117,12 @@ class PortableBackupTests(unittest.TestCase):
         with self.assertRaisesRegex(PortableBackupError, "format"):
             inspect_portable_backup(self.path)
 
-        with zipfile.ZipFile(self.path, "w", compression=zipfile.ZIP_STORED) as target:
-            for name, content in entries:
-                target.writestr(name, content)
-            target.writestr(MANIFEST_NAME, entries[-1][1])
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Duplicate name: 'manifest.json'", category=UserWarning)
+            with zipfile.ZipFile(self.path, "w", compression=zipfile.ZIP_STORED) as target:
+                for name, content in entries:
+                    target.writestr(name, content)
+                target.writestr(MANIFEST_NAME, entries[-1][1])
         with self.assertRaisesRegex(PortableBackupError, "duplicate"):
             inspect_portable_backup(self.path)
 

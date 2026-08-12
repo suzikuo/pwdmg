@@ -1,5 +1,6 @@
 import type {
   AndroidAutofillState,
+  AndroidPasskeyProviderState,
   AttachmentObjectRetention,
   AttachmentStorageState,
   AppUpdateApply,
@@ -9,6 +10,8 @@ import type {
   ApiResult,
   AppInfo,
   AppState,
+  DesktopCloseBehavior,
+  DesktopTraySettings,
   DeviceUnlockState,
   PluginListenerState,
   PortableBackupExport,
@@ -60,6 +63,7 @@ export interface PasswordManagerApiAdapter {
   deletePasskey: (passkeyId: string) => Promise<ApiResult<VaultPayload>>
   changePassword: (newPassword: string) => Promise<ApiResult<AppState>>
   exportVaultBackup: () => Promise<ApiResult<VaultBackupExport>>
+  exportAndroidVaultFile: (displayName: string, contentText: string) => Promise<ApiResult<{ saved: boolean; path: string }>>
   exportVaultBackupForPayload: (payload: VaultPayload) => Promise<ApiResult<VaultBackupExport>>
   previewVaultBackup: (envelopeText: string) => Promise<ApiResult<VaultPayload>>
   previewVaultBackupWithPassword: (envelopeText: string, password: string) => Promise<ApiResult<VaultPayload>>
@@ -71,8 +75,13 @@ export interface PasswordManagerApiAdapter {
   getPluginListenerState: () => Promise<ApiResult<PluginListenerState>>
   enablePluginListener: (extensionId: string, browsers: string[]) => Promise<ApiResult<PluginListenerState>>
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
+  getDesktopTraySettings: () => Promise<ApiResult<DesktopTraySettings>>
+  setDesktopTraySettings: (trayEnabled: boolean, closeBehavior: DesktopCloseBehavior) => Promise<ApiResult<DesktopTraySettings>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
+  getAndroidPasskeyProviderState: () => Promise<ApiResult<AndroidPasskeyProviderState>>
+  setAndroidPasskeyProviderEnabled: (enabled: boolean) => Promise<ApiResult<AndroidPasskeyProviderState>>
+  openAndroidPasskeyProviderSettings: () => Promise<ApiResult<AndroidPasskeyProviderState>>
   checkAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateCheck>>
   downloadAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateDownload>>
   applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
@@ -106,5 +115,15 @@ export function emptyPluginListenerState(mode: string): PluginListenerState {
     edgeRegistered: false,
     chromeManifestPath: '',
     edgeManifestPath: ''
+  }
+}
+
+export function emptyAndroidPasskeyProviderState(): AndroidPasskeyProviderState {
+  return {
+    supported: false,
+    componentEnabled: false,
+    systemEnabled: false,
+    serviceName: '',
+    settingsAvailable: false
   }
 }

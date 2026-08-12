@@ -369,7 +369,7 @@ public class AutofillPickerActivity extends Activity {
         window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         window.setDimAmount(0.18f);
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND | WindowManager.LayoutParams.FLAG_SECURE);
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 
         WindowManager.LayoutParams attrs = window.getAttributes();
@@ -397,9 +397,9 @@ public class AutofillPickerActivity extends Activity {
         PwdAutofillService.LoginFields next = new PwdAutofillService.LoginFields();
         next.hostname = intent.getStringExtra(EXTRA_HOSTNAME);
         next.targetPackageName = intent.getStringExtra(EXTRA_TARGET_PACKAGE);
-        next.usernameId = (AutofillId) intent.getParcelableExtra(EXTRA_USERNAME_ID);
-        next.passwordId = (AutofillId) intent.getParcelableExtra(EXTRA_PASSWORD_ID);
-        next.otpId = (AutofillId) intent.getParcelableExtra(EXTRA_OTP_ID);
+        next.usernameId = AndroidIntentCompat.getParcelableExtra(intent, EXTRA_USERNAME_ID, AutofillId.class);
+        next.passwordId = AndroidIntentCompat.getParcelableExtra(intent, EXTRA_PASSWORD_ID, AutofillId.class);
+        next.otpId = AndroidIntentCompat.getParcelableExtra(intent, EXTRA_OTP_ID, AutofillId.class);
         next.usernameKind = intent.getStringExtra(EXTRA_ACCOUNT_KIND);
         if (next.usernameKind == null || next.usernameKind.trim().isEmpty()) {
             next.usernameKind = PwdAutofillService.ACCOUNT_KIND_GENERIC;

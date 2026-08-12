@@ -17,6 +17,10 @@ SHOW_MAIN_COMMAND = "show-main"
 RESET_POSITION_COMMAND = "reset-position"
 LOCK_COMMAND = "lock"
 EXIT_COMMAND = "exit"
+DESKTOP_INSTANCE_MUTEX_NAME = "Local\\MyPasswordManager.Desktop.SingleInstance.v1"
+SHOW_MAIN_MESSAGE_NAME = "MyPasswordManager.Desktop.ShowMain.v1"
+ERROR_ALREADY_EXISTS = 183
+HWND_BROADCAST = 0xFFFF
 
 
 @dataclass(frozen=True)
@@ -49,15 +53,83 @@ class DesktopShellActions:
         return True
 
 
+class WindowsSingleInstance:
+    def __init__(self, mutex_name: str = DESKTOP_INSTANCE_MUTEX_NAME) -> None:
+        self.mutex_name = mutex_name
+        self._handle = 0
+
+    def acquire(self) -> bool:
+        if os.name != "nt":
+            return True
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        ]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        ctypes.set_last_error(0)
+        handle = kernel32.CreateMutexW(None, False, self.mutex_name)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        self._handle = int(handle)
+        return True
+
+    def notify_existing(self) -> bool:
+        if os.name != "nt":
+            return False
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+        user32.RegisterWindowMessageW.restype = wintypes.UINT
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+        message = int(user32.RegisterWindowMessageW(SHOW_MAIN_MESSAGE_NAME))
+        return bool(
+            message
+            and user32.PostMessageW(HWND_BROADCAST, message, 0, 0)
+        )
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = 0
+        if not handle or os.name != "nt":
+            return
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(handle)
+
+
 class WindowsDesktopShell:
-    def __init__(self, actions: DesktopShellActions, icon_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        actions: DesktopShellActions,
+        icon_path: Path | None = None,
+        tray_enabled: bool = True,
+    ) -> None:
         self.actions = actions
         self.icon_path = icon_path
+        self._tray_enabled = bool(tray_enabled)
         self.status = DesktopShellStatus(supported=os.name == "nt")
         self._ready = threading.Event()
+        self._tray_updated = threading.Event()
         self._thread: threading.Thread | None = None
         self._hwnd = 0
         self._wnd_proc = None
+
+    @property
+    def tray_enabled(self) -> bool:
+        return self._tray_enabled
 
     def start(self, timeout: float = 4.0) -> DesktopShellStatus:
         if os.name != "nt":
@@ -81,6 +153,38 @@ class WindowsDesktopShell:
         thread = self._thread
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout)
+
+    def set_tray_enabled(
+        self, enabled: bool, timeout: float = 2.0
+    ) -> DesktopShellStatus:
+        self._tray_enabled = bool(enabled)
+        hwnd = self._hwnd
+        if not hwnd or os.name != "nt":
+            return self.status
+        self._tray_updated.clear()
+        try:
+            posted = bool(
+                ctypes.windll.user32.PostMessageW(hwnd, 0x0801, int(enabled), 0)
+            )
+        except Exception as exc:
+            self.status = DesktopShellStatus(
+                supported=True,
+                tray_available=self.status.tray_available,
+                hotkey_registered=self.status.hotkey_registered,
+                error=str(exc),
+            )
+            return self.status
+        if not posted:
+            self.status = DesktopShellStatus(
+                supported=True,
+                tray_available=self.status.tray_available,
+                hotkey_registered=self.status.hotkey_registered,
+                error="Could not update tray icon",
+            )
+            return self.status
+        if self._thread is not threading.current_thread():
+            self._tray_updated.wait(timeout)
+        return self.status
 
     def _run(self) -> None:
         try:
@@ -162,6 +266,7 @@ class WindowsDesktopShell:
         nin_select = 0x0400
         nin_keyselect = 0x0401
         tray_message = 0x0800
+        tray_control_message = 0x0801
         hotkey_id = 0x504D
         mod_control = 0x0002
         mod_shift = 0x0004
@@ -264,10 +369,12 @@ class WindowsDesktopShell:
         hinstance = kernel32.GetModuleHandleW(None)
         class_name = f"MyPasswordDesktopShell-{os.getpid()}-{id(self)}"
         taskbar_created_message = int(user32.RegisterWindowMessageW("TaskbarCreated"))
+        show_main_message = int(user32.RegisterWindowMessageW(SHOW_MAIN_MESSAGE_NAME))
         state: dict[str, object] = {
             "notify": None,
             "cleaned": False,
             "icon": 0,
+            "tray_available": False,
             "hotkey_registered": False,
         }
 
@@ -321,11 +428,13 @@ class WindowsDesktopShell:
             state["cleaned"] = True
             user32.UnregisterHotKey(hwnd, hotkey_id)
             notify = state["notify"]
-            if notify is not None:
+            if notify is not None and state["tray_available"]:
                 shell32.Shell_NotifyIconW(nim_delete, ctypes.byref(notify))
+                state["tray_available"] = False
             icon = int(state["icon"] or 0)
             if icon:
                 user32.DestroyIcon(icon)
+            self._tray_updated.set()
 
         def add_tray_icon() -> tuple[bool, int]:
             notify = state["notify"]
@@ -343,24 +452,50 @@ class WindowsDesktopShell:
             if added:
                 notify.uVersion = notify_icon_version_4
                 shell32.Shell_NotifyIconW(nim_setversion, ctypes.byref(notify))
+            state["tray_available"] = added
             return added, error
 
+        def remove_tray_icon() -> None:
+            notify = state["notify"]
+            if notify is not None and state["tray_available"]:
+                shell32.Shell_NotifyIconW(nim_delete, ctypes.byref(notify))
+            state["tray_available"] = False
+
+        def update_status(tray_available: bool, tray_error: int = 0) -> None:
+            self.status = DesktopShellStatus(
+                supported=True,
+                tray_available=tray_available,
+                hotkey_registered=bool(state["hotkey_registered"]),
+                error=(
+                    ""
+                    if tray_available or not self._tray_enabled
+                    else f"Tray icon unavailable (winerror={tray_error})"
+                ),
+            )
+
         def window_proc(hwnd, message, wparam, lparam):
+            if show_main_message and message == show_main_message:
+                dispatch(SHOW_MAIN_COMMAND)
+                return 0
             if message == wm_hotkey and int(wparam) == hotkey_id:
                 dispatch(QUICK_ACCESS_COMMAND)
                 return 0
             if taskbar_created_message and message == taskbar_created_message:
-                tray_available, tray_error = add_tray_icon()
-                self.status = DesktopShellStatus(
-                    supported=True,
-                    tray_available=tray_available,
-                    hotkey_registered=bool(state["hotkey_registered"]),
-                    error=(
-                        ""
-                        if tray_available
-                        else f"Tray icon unavailable after taskbar restart (winerror={tray_error})"
-                    ),
-                )
+                if self._tray_enabled:
+                    tray_available, tray_error = add_tray_icon()
+                    update_status(tray_available, tray_error)
+                else:
+                    remove_tray_icon()
+                    update_status(False)
+                return 0
+            if message == tray_control_message:
+                if bool(wparam):
+                    tray_available, tray_error = add_tray_icon()
+                    update_status(tray_available, tray_error)
+                else:
+                    remove_tray_icon()
+                    update_status(False)
+                self._tray_updated.set()
                 return 0
             if message == tray_message:
                 mouse_message = int(lparam) & 0xFFFF
@@ -431,7 +566,10 @@ class WindowsDesktopShell:
         notify.hIcon = icon
         notify.szTip = "My Password"
         state["notify"] = notify
-        tray_available, tray_error = add_tray_icon()
+        tray_available = False
+        tray_error = 0
+        if self._tray_enabled:
+            tray_available, tray_error = add_tray_icon()
         hotkey_registered = bool(
             user32.RegisterHotKey(
                 hwnd,
@@ -441,20 +579,8 @@ class WindowsDesktopShell:
             )
         )
         state["hotkey_registered"] = hotkey_registered
-        self.status = DesktopShellStatus(
-            supported=True,
-            tray_available=tray_available,
-            hotkey_registered=hotkey_registered,
-            error=(
-                ""
-                if tray_available
-                else f"Tray icon unavailable (winerror={tray_error}, icon={bool(icon)})"
-            ),
-        )
+        update_status(tray_available, tray_error)
         self._ready.set()
-
-        if not tray_available and not hotkey_registered:
-            user32.PostMessageW(hwnd, wm_close, 0, 0)
 
         message = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:

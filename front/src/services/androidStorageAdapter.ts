@@ -22,11 +22,11 @@ export const androidStorageAdapter: VaultStorageAdapter = {
     expectedRevision ?? -1
   ),
   readLegacyLocalStorage: () => call<string>('readLegacyLocalStorage'),
-  getAttachmentStorageState: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
-  readAttachmentObject: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
-  writeAttachmentObject: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
-  retainAttachmentObject: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
-  collectAttachmentObjects: async () => fail('UNSUPPORTED', 'Attachments are not supported on Android yet.'),
+  getAttachmentStorageState: () => call('getAttachmentStorageState'),
+  readAttachmentObject: (attachmentId) => call('readAttachmentObject', attachmentId),
+  writeAttachmentObject: (attachmentId, objectText) => call('writeAttachmentObject', attachmentId, objectText),
+  retainAttachmentObject: (attachmentId) => call('retainAttachmentObject', attachmentId),
+  collectAttachmentObjects: (referencedIds) => call('collectAttachmentObjects', JSON.stringify(referencedIds)),
   cacheUnlockedSession: (password) => call('unlock', password),
   clearUnlockedSession: () => call('lock'),
   getPluginListenerState: async () => ok(emptyPluginListenerState('android')),
@@ -34,6 +34,9 @@ export const androidStorageAdapter: VaultStorageAdapter = {
   disablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
   getAndroidAutofillState: () => call('getAutofillState'),
   openAndroidAutofillSettings: () => call('openAutofillSettings'),
+  getAndroidPasskeyProviderState: () => call('getPasskeyProviderState'),
+  setAndroidPasskeyProviderEnabled: (enabled) => call('setPasskeyProviderEnabled', enabled),
+  openAndroidPasskeyProviderSettings: () => call('openPasskeyProviderSettings'),
   checkAppUpdate: (manifestUrl, onProgress) => runUpdateTask<AppUpdateCheck>('check', manifestUrl, onProgress, () => call<AppUpdateCheck>('checkAppUpdate', manifestUrl)),
   downloadAppUpdate: (manifestUrl, onProgress) => runUpdateTask<AppUpdateDownload>('download', manifestUrl, onProgress, () => call<AppUpdateDownload>('downloadAppUpdate', manifestUrl)),
   applyAppUpdate: (packagePath) => call<AppUpdateApply>('applyAppUpdate', packagePath),
@@ -42,6 +45,98 @@ export const androidStorageAdapter: VaultStorageAdapter = {
 
 export function hasAndroidBridge() {
   return Boolean(window.androidPasswordApi)
+}
+
+type AndroidDocumentExportTask = {
+  id: string
+  status: 'waiting' | 'running' | 'done' | 'error'
+  result?: { saved: boolean; path: string }
+  errorCode?: string
+  errorMessage?: string
+}
+
+export async function exportAndroidAttachmentFile(
+  displayName: string,
+  mimeType: string,
+  contentBase64: string
+): Promise<ApiResult<{ saved: boolean; path: string }>> {
+  return exportAndroidDocumentFile(
+    'startAttachmentExport',
+    'getAttachmentExportTaskState',
+    displayName,
+    mimeType,
+    contentBase64,
+    'ATTACHMENT_EXPORT_FAILED',
+    '附件'
+  )
+}
+
+export async function exportAndroidVaultFile(
+  displayName: string,
+  contentText: string
+): Promise<ApiResult<{ saved: boolean; path: string }>> {
+  const bytes = new TextEncoder().encode(contentText)
+  try {
+    return await exportAndroidDocumentFile(
+      'startVaultExport',
+      'getVaultExportTaskState',
+      displayName,
+      'application/json',
+      bytesToBase64(bytes),
+      'VAULT_EXPORT_FAILED',
+      '保险库'
+    )
+  } finally {
+    bytes.fill(0)
+  }
+}
+
+async function exportAndroidDocumentFile(
+  startMethod: 'startAttachmentExport' | 'startVaultExport',
+  stateMethod: 'getAttachmentExportTaskState' | 'getVaultExportTaskState',
+  displayName: string,
+  mimeType: string,
+  contentBase64: string,
+  failureCode: string,
+  label: string
+): Promise<ApiResult<{ saved: boolean; path: string }>> {
+  const nativeApi = window.androidPasswordApi
+  if (!nativeApi?.[startMethod] || !nativeApi?.[stateMethod]) {
+    return fail('ANDROID_API_NOT_READY', `Android ${label}导出接口未就绪。`)
+  }
+  const started = await call<AndroidDocumentExportTask>(startMethod, displayName, mimeType, contentBase64)
+  if (!started.ok) return fail(started.code || failureCode, started.message || `${label}导出失败`)
+  if (!started.data) return fail(failureCode, `Android ${label}导出任务未创建。`)
+  return pollDocumentExport(started.data, stateMethod, failureCode, label)
+}
+
+async function pollDocumentExport(
+  initial: AndroidDocumentExportTask,
+  stateMethod: 'getAttachmentExportTaskState' | 'getVaultExportTaskState',
+  failureCode: string,
+  label: string
+): Promise<ApiResult<{ saved: boolean; path: string }>> {
+  let state = initial
+  while (true) {
+    if (state.status === 'done') return ok(state.result || { saved: false, path: '' })
+    if (state.status === 'error') {
+      return fail(state.errorCode || failureCode, state.errorMessage || `${label}导出失败`)
+    }
+    await delay(250)
+    const next = await call<AndroidDocumentExportTask>(stateMethod, state.id)
+    if (!next.ok) return fail(next.code || failureCode, next.message || `${label}导出失败`)
+    if (!next.data) return fail(failureCode, `Android ${label}导出状态缺失。`)
+    state = next.data
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
+  }
+  return btoa(binary)
 }
 
 function call<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {

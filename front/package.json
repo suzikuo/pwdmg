@@ -1,6 +1,6 @@
 {
   "name": "mypwdmg-front",
-  "version": "2.0.52",
+  "version": "2.0.56",
   "private": true,
   "type": "module",
   "scripts": {
@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^6.0.7",
+    "jsqr": "^1.4.0",
     "typescript": "^6.0.3",
     "vant": "^4.10.0",
     "vite": "^8.1.3",

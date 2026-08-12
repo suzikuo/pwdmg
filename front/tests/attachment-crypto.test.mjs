@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { decryptAttachmentObject, encryptAttachmentObject, generateAttachmentKey, importAttachmentKey, MAX_ATTACHMENT_BYTES } from '../src/services/attachmentCrypto.ts'
+import { decryptAttachmentObject, encryptAttachmentObject, generateAttachmentKey, importAttachmentKey, MAX_ATTACHMENT_BYTES, validateEncryptedAttachmentObject } from '../src/services/attachmentCrypto.ts'
 import { decryptPayload, encryptPayload } from '../src/services/vaultCrypto.ts'
 import { defaultVaultPayload, normalizeVaultPayload } from '../src/services/vaultDefaults.ts'
 
@@ -55,6 +55,21 @@ test('attachment input and references are bounded and strictly normalized', asyn
     ...defaultVaultPayload(),
     entries: [{ id: 'entry-1', kind: 'secure-note', title: 'Bad', domains: [], attachments: [{ id: 'bad' }] }]
   }), /attachment/i)
+})
+
+test('attachment object validation rejects malformed base64 before storage', async () => {
+  const { key: attachmentKey } = await key()
+  const encrypted = await encryptAttachmentObject(
+    attachmentKey,
+    attachmentId,
+    new TextEncoder().encode('bounded object'),
+    'object.txt',
+    'text/plain',
+    100
+  )
+  const object = JSON.parse(encrypted.objectText)
+  object.nonce = 'not-base64!'
+  assert.throws(() => validateEncryptedAttachmentObject(JSON.stringify(object), attachmentId), /malformed/i)
 })
 
 test('attachment data key survives master-password rotation inside the encrypted vault', async () => {

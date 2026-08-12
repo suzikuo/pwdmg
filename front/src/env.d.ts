@@ -8,6 +8,7 @@ declare global {
     androidPasswordApi?: Record<string, (...args: any[]) => string>
     __mypwdmgHandleNativeBack?: () => boolean
     __mypwdmgHandleNativeLock?: () => boolean
+    __mypwdmgHandleNativeAutofillIntent?: () => boolean
   }
 }
 

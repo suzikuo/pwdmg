@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { searchQuickAccessEntries } from '../src/services/quickAccess.ts'
+import { buildVaultSearchIndex } from '../src/services/searchIndex.ts'
 
 const entries = [
   {
@@ -50,4 +51,15 @@ test('text relevance wins before preference ranking for explicit searches', () =
     { id: 'favorite', kind: 'login', title: 'Work Mail', children: [] }
   ], 'mail', { favoriteIds: new Set(['favorite']) })
   assert.deepEqual(result.map((entry) => entry.id), ['exact', 'favorite'])
+})
+
+test('shared search index keeps quick access ranking stable', () => {
+  const entries = [
+    { id: 'folder', kind: 'folder', title: 'Folder', children: [
+      { id: 'beta', kind: 'login', title: 'Beta', username: 'same' },
+      { id: 'alpha', kind: 'login', title: 'Alpha', username: 'same' }
+    ] }
+  ]
+  const index = buildVaultSearchIndex(entries)
+  assert.deepEqual(index.quickAccess('same').map((entry) => entry.id), ['alpha', 'beta'])
 })

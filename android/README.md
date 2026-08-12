@@ -6,7 +6,15 @@ This folder is a native Android shell for the shared Vue UI.
 - `AndroidPasswordBridge` exposes the same vault API used by the desktop shell to the Vue WebView.
 - `AndroidVaultStore` reads/writes the same encrypted `mypwdmg-vault` envelope format as the Python core.
 - `PwdAutofillService` is the Android Autofill entry point. It detects username/password/TOTP fields, matches the current web domain or app package, and offers matching accounts.
+- The entry editor can choose a QR image or screenshot from the Android system picker and import validated `otpauth://totp` settings. `FIDO:/` cross-device passkey codes are recognized but not executed because they require the complete FIDO hybrid transport.
 - Build with Android Studio after running `npm run build` in `front`.
+
+Passkey Provider behavior:
+
+- `PasskeyCredentialProviderService` is disabled in the manifest by default and is available on Android 14+.
+- In the unlocked app, use Settings > Android Passkey to enable or disable the provider component.
+- After enabling it, select `My Password` in the Android Credential Provider settings page. The app keeps component state and system selection state separate.
+- Disabling the component clears pending ceremony tickets but does not delete saved passkeys.
 
 Autofill behavior:
 
@@ -15,7 +23,21 @@ Autofill behavior:
 - The Android vault file is stored in the app private directory as `vault.json`.
 - Download/import keeps a small local protection backup before replacing the current vault.
 
-The current workspace may not have Java or Gradle installed, so APK compilation can be done in Android Studio or in Gitee.
+Attachments and local backup behavior:
+
+- Encrypted attachment objects are stored under the app-private `attachments` directory with a 10 MiB per-file limit and a 256 MiB total quota.
+- Individual attachments are decrypted only for an explicit export through Android's system document picker; pending export bytes are wiped on completion, cancellation, error, Activity destruction, or a five-minute picker timeout.
+- Settings shows active/retained attachment storage and provides reference-aware cleanup.
+- The Backup page can export the current encrypted vault JSON, but that file does not include attachment objects. Attachment-inclusive complete packages remain desktop-only.
+
+For a local command-line build, point `JAVA_HOME` to Android Studio's JBR and run from this directory:
+
+```powershell
+$env:JAVA_HOME = '<Android Studio>\jbr'
+.\gradlew.bat :app:test :app:assembleDebug
+```
+
+Android Studio or Gitee can also build the APK.
 
 ## Gitee build notes
 

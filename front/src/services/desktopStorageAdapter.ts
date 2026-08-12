@@ -1,5 +1,5 @@
 import type { ApiResult, AppInfo, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, AttachmentObjectRetention, AttachmentObjectWrite, AttachmentStorageState, PluginListenerState } from '../types'
-import { fail, ok } from './apiTypes'
+import { emptyAndroidPasskeyProviderState, fail, ok } from './apiTypes'
 import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
 
 const pywebviewWaitMs = import.meta.env.DEV ? 600 : 15000
@@ -33,6 +33,9 @@ export const desktopStorageAdapter: VaultStorageAdapter = {
   checkAppUpdate: (manifestUrl) => call<AppUpdateCheck>('checkDesktopUpdate', manifestUrl),
   downloadAppUpdate: (manifestUrl) => call<AppUpdateDownload>('downloadDesktopUpdate', manifestUrl),
   applyAppUpdate: (packagePath) => call<AppUpdateApply>('applyDesktopUpdate', packagePath),
+  getAndroidPasskeyProviderState: async () => ok(emptyAndroidPasskeyProviderState()),
+  setAndroidPasskeyProviderEnabled: async () => fail('ANDROID_ONLY', 'Android only.'),
+  openAndroidPasskeyProviderSettings: async () => fail('ANDROID_ONLY', 'Android only.'),
   safeExit: () => call<null>('safeExit')
 }
 

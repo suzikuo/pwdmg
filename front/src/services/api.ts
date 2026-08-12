@@ -1,5 +1,5 @@
-import type { ApiResult, AppState, AttachmentObjectRetention, AttachmentStorageState, DeviceUnlockState, PluginListenerState, PortableBackupExport, PortableBackupImport, PortableBackupSelection, VaultAttachment, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types'
-import { androidStorageAdapter } from './androidStorageAdapter'
+import type { ApiResult, AppState, AttachmentObjectRetention, AttachmentStorageState, DesktopTraySettings, DeviceUnlockState, PluginListenerState, PortableBackupExport, PortableBackupImport, PortableBackupSelection, VaultAttachment, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types'
+import { androidStorageAdapter, exportAndroidAttachmentFile, exportAndroidVaultFile } from './androidStorageAdapter'
 import { fail, ok, type AttachmentCreateResult, type CreateVaultResult, type PasswordManagerApiAdapter, type StartupData } from './apiTypes'
 import { callDesktopApi, desktopStorageAdapter } from './desktopStorageAdapter'
 import { decryptAttachmentObject, encryptAttachmentObject, generateAttachmentKey, importAttachmentKey, verifyAttachmentCiphertext } from './attachmentCrypto'
@@ -46,6 +46,7 @@ export const api: PasswordManagerApiAdapter = {
   deletePasskey: (passkeyId) => nativeVaultCall('deletePasskey', () => guard(() => deletePasskey(passkeyId)), passkeyId),
   changePassword: (newPassword) => nativeVaultCall('changePassword', () => guard(() => changePassword(newPassword)), newPassword),
   exportVaultBackup: () => nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
+  exportAndroidVaultFile: (displayName, contentText) => exportAndroidVaultFile(displayName, contentText),
   exportVaultBackupForPayload: (nextPayload) => nativeVaultCall('exportVaultBackupForPayload', () => guard(() => exportVaultBackupForPayload(nextPayload)), nextPayload),
   previewVaultBackup: (envelopeText) => nativeVaultCall('previewVaultBackup', () => guard(() => previewVaultBackup(envelopeText)), envelopeText),
   previewVaultBackupWithPassword: (envelopeText, password) => nativeVaultCall('previewVaultBackupWithPassword', () => guard(() => previewVaultBackupWithPassword(envelopeText, password)), envelopeText, password),
@@ -57,8 +58,17 @@ export const api: PasswordManagerApiAdapter = {
   getPluginListenerState: () => selectedStorage().getPluginListenerState(),
   enablePluginListener: (extensionId, browsers) => selectedStorage().enablePluginListener(extensionId, browsers),
   disablePluginListener: () => selectedStorage().disablePluginListener(),
+  getDesktopTraySettings: async () => useDesktopStorage()
+    ? callDesktopApi<DesktopTraySettings>('getDesktopTraySettings')
+    : fail('DESKTOP_ONLY', '托盘设置仅在桌面端可用。'),
+  setDesktopTraySettings: async (trayEnabled, closeBehavior) => useDesktopStorage()
+    ? callDesktopApi<DesktopTraySettings>('setDesktopTraySettings', trayEnabled, closeBehavior)
+    : fail('DESKTOP_ONLY', '托盘设置仅在桌面端可用。'),
   getAndroidAutofillState: () => selectedStorage().getAndroidAutofillState(),
   openAndroidAutofillSettings: () => selectedStorage().openAndroidAutofillSettings(),
+  getAndroidPasskeyProviderState: () => selectedStorage().getAndroidPasskeyProviderState(),
+  setAndroidPasskeyProviderEnabled: (enabled) => selectedStorage().setAndroidPasskeyProviderEnabled(enabled),
+  openAndroidPasskeyProviderSettings: () => selectedStorage().openAndroidPasskeyProviderSettings(),
   checkAppUpdate: (manifestUrl, onProgress) => selectedStorage().checkAppUpdate(manifestUrl, onProgress),
   downloadAppUpdate: (manifestUrl, onProgress) => selectedStorage().downloadAppUpdate(manifestUrl, onProgress),
   applyAppUpdate: (packagePath) => selectedStorage().applyAppUpdate(packagePath),
@@ -105,6 +115,9 @@ async function saveAttachmentToFile(reference: VaultAttachment): Promise<ApiResu
   try {
     if (useDesktopStorage()) {
       return callDesktopApi<{ saved: boolean; path: string }>('saveAttachmentFile', reference.name, bytesToBase64(bytes))
+    }
+    if (useAndroidNativeApi()) {
+      return exportAndroidAttachmentFile(reference.name, reference.mimeType, bytesToBase64(bytes))
     }
     if (!useWebStorage()) return fail('UNSUPPORTED', 'Attachments are not supported on this platform yet.')
     const blob = new Blob([toOwnedArrayBuffer(bytes)], { type: reference.mimeType })

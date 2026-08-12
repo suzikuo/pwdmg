@@ -23,7 +23,11 @@ from pwdmg_core.paths import (
     ensure_app_dir,
 )
 from pwdmg_core.version import APP_VERSION
-from pwdmg_core.desktop_shell import DesktopShellActions, WindowsDesktopShell
+from pwdmg_core.desktop_shell import (
+    DesktopShellActions,
+    WindowsDesktopShell,
+    WindowsSingleInstance,
+)
 
 _desktop_window: webview.Window | None = None
 _desktop_state: "DesktopWindowState | None" = None
@@ -45,6 +49,12 @@ WEBVIEW_CACHE_DIR_NAMES = {
 }
 DESKTOP_MIN_WIDTH = 360
 DESKTOP_MIN_HEIGHT = 480
+DESKTOP_CLOSE_MINIMIZE_TO_TRAY = "minimize-to-tray"
+DESKTOP_CLOSE_EXIT = "exit"
+DESKTOP_CLOSE_BEHAVIORS = {
+    DESKTOP_CLOSE_MINIMIZE_TO_TRAY,
+    DESKTOP_CLOSE_EXIT,
+}
 MAX_ATTACHMENT_EXPORT_BYTES = 10 * 1024 * 1024
 
 
@@ -359,6 +369,17 @@ class DesktopPasswordManagerApi:
         except Exception as exc:
             return {"ok": False, "code": "PLUGIN_LISTENER_ERROR", "message": str(exc)}
 
+    def getDesktopTraySettings(self) -> dict[str, Any]:
+        return self._call_result(get_desktop_tray_settings, "DESKTOP_TRAY_SETTINGS_FAILED")
+
+    def setDesktopTraySettings(
+        self, trayEnabled: bool, closeBehavior: str
+    ) -> dict[str, Any]:
+        return self._call_result(
+            lambda: set_desktop_tray_settings(trayEnabled, closeBehavior),
+            "DESKTOP_TRAY_SETTINGS_FAILED",
+        )
+
     def checkDesktopUpdate(self, manifestUrl: str) -> dict[str, Any]:
         return self._call_result(
             lambda: self.updater.check(manifestUrl), "UPDATE_FAILED"
@@ -422,6 +443,10 @@ def to_int(value: Any, default: int) -> int:
         return default
 
 
+def to_bool(value: Any, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
 def normalize_desktop_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(DEFAULT_DESKTOP_CONFIG)
     normalized.update(config)
@@ -440,6 +465,15 @@ def normalize_desktop_config(config: dict[str, Any]) -> dict[str, Any]:
     y_position = to_int(
         normalized.get("y_position"), DEFAULT_DESKTOP_CONFIG["y_position"]
     )
+    tray_enabled = to_bool(
+        normalized.get("tray_enabled"), DEFAULT_DESKTOP_CONFIG["tray_enabled"]
+    )
+    close_behavior = normalized.get("close_behavior")
+    if (
+        not isinstance(close_behavior, str)
+        or close_behavior not in DESKTOP_CLOSE_BEHAVIORS
+    ):
+        close_behavior = DEFAULT_DESKTOP_CONFIG["close_behavior"]
 
     return {
         "appname": DEFAULT_DESKTOP_CONFIG["appname"],
@@ -447,6 +481,8 @@ def normalize_desktop_config(config: dict[str, Any]) -> dict[str, Any]:
         "height": int(height),
         "x_position": int(x_position),
         "y_position": int(y_position),
+        "tray_enabled": tray_enabled,
+        "close_behavior": close_behavior,
     }
 
 
@@ -561,6 +597,41 @@ class DesktopWindowState:
             })
             self._write_locked()
 
+    def get_tray_preferences(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "tray_enabled": bool(self._config["tray_enabled"]),
+                "close_behavior": str(self._config["close_behavior"]),
+            }
+
+    def update_tray_preferences(
+        self, tray_enabled: bool, close_behavior: str
+    ) -> dict[str, Any]:
+        with self._lock:
+            if self._save_timer:
+                self._save_timer.cancel()
+                self._save_timer = None
+            if self._pending_config:
+                self._config.update(self._pending_config)
+                self._pending_config.clear()
+            self._config.update(
+                {
+                    "tray_enabled": tray_enabled,
+                    "close_behavior": close_behavior,
+                }
+            )
+            self._write_locked()
+            return {
+                "tray_enabled": bool(self._config["tray_enabled"]),
+                "close_behavior": str(self._config["close_behavior"]),
+            }
+
+    def should_minimize_on_close(self) -> bool:
+        with self._lock:
+            return bool(self._config["tray_enabled"]) and (
+                self._config["close_behavior"] == DESKTOP_CLOSE_MINIMIZE_TO_TRAY
+            )
+
     def _write_locked(self) -> None:
         self._config = normalize_desktop_config(self._config)
         write_desktop_config(self._config)
@@ -589,6 +660,7 @@ def bind_desktop_config_events(
         if (
             shell is not None
             and shell.status.tray_available
+            and state.should_minimize_on_close()
             and not _desktop_exit_requested
         ):
             timer = threading.Timer(0.01, window.hide)
@@ -600,6 +672,49 @@ def bind_desktop_config_events(
     window.events.resized += on_resize
     window.events.moved += on_move
     window.events.closing += on_closing
+
+
+def get_desktop_tray_settings() -> dict[str, Any]:
+    state = _desktop_state
+    preferences = (
+        state.get_tray_preferences()
+        if state is not None
+        else {
+            "tray_enabled": DEFAULT_DESKTOP_CONFIG["tray_enabled"],
+            "close_behavior": DEFAULT_DESKTOP_CONFIG["close_behavior"],
+        }
+    )
+    shell = _desktop_shell
+    return {
+        "supported": os.name == "nt",
+        "trayEnabled": bool(preferences["tray_enabled"]),
+        "closeBehavior": str(preferences["close_behavior"]),
+        "trayAvailable": bool(shell and shell.status.tray_available),
+    }
+
+
+def set_desktop_tray_settings(
+    tray_enabled: bool, close_behavior: str
+) -> dict[str, Any]:
+    if not isinstance(tray_enabled, bool):
+        raise ValueError("Tray enabled must be a boolean")
+    if (
+        not isinstance(close_behavior, str)
+        or close_behavior not in DESKTOP_CLOSE_BEHAVIORS
+    ):
+        raise ValueError("Desktop close behavior is invalid")
+    state = _desktop_state
+    if state is None:
+        raise RuntimeError("Desktop state is unavailable")
+    previous_preferences = state.get_tray_preferences()
+    state.update_tray_preferences(tray_enabled, close_behavior)
+    shell = _desktop_shell
+    if (
+        shell is not None
+        and previous_preferences["tray_enabled"] != tray_enabled
+    ):
+        shell.set_tray_enabled(tray_enabled)
+    return get_desktop_tray_settings()
 
 
 def resolve_desktop_icon_path() -> Path | None:
@@ -799,7 +914,7 @@ def refresh_webview_cache_if_frontend_changed(webview_storage_dir: Path, fronten
         pass
 
 
-def main() -> None:
+def run_desktop_app() -> None:
     global _desktop_window, _desktop_state, _desktop_shell, _desktop_exit_requested
 
     _desktop_exit_requested = False
@@ -834,6 +949,7 @@ def main() -> None:
             exit=request_desktop_exit,
         ),
         resolve_desktop_icon_path(),
+        tray_enabled=bool(config["tray_enabled"]),
     )
     _desktop_shell = desktop_shell
     desktop_shell.start()
@@ -849,6 +965,17 @@ def main() -> None:
         _desktop_exit_requested = True
         desktop_shell.stop()
         _desktop_shell = None
+
+
+def main() -> None:
+    instance = WindowsSingleInstance()
+    if not instance.acquire():
+        instance.notify_existing()
+        return
+    try:
+        run_desktop_app()
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":

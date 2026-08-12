@@ -75,7 +75,7 @@
         :totp-progress="totpProgress"
         :linked-passkeys="selectedEntryPasskeys"
         :attachment-busy="attachmentBusy"
-        :attachment-actions-supported="!isAndroidRuntime"
+        :attachment-actions-supported="true"
         @view="openView"
         @edit="openEdit"
         @move="openMoveSheet"
@@ -116,7 +116,7 @@
           :totp-progress="totpProgress"
           :linked-passkeys="selectedEntryPasskeys"
           :attachment-busy="attachmentBusy"
-          :attachment-actions-supported="!isAndroidRuntime"
+          :attachment-actions-supported="true"
           @edit="openEdit"
           @move="openMoveSheet"
           @duplicate="duplicateEntry"
@@ -170,6 +170,7 @@
     <QuickAccess
       :open="quickAccessOpen"
       :entries="vault?.entries || []"
+      :search-index="vaultSearchIndex"
       :favorite-ids="favoriteEntryIds"
       :recent-ids="recentEntryIds"
       @update:open="quickAccessOpen = $event"
@@ -200,6 +201,7 @@
     </div>
 
     <EntryEditor
+      v-if="editorOpen"
       :open="editorOpen"
       :form="form"
       :domain-text="domainText"
@@ -208,17 +210,21 @@
       :totp-code="totpCode"
       :autofill-match-mode-options="autofillMatchModeOptions"
       :login-account-source-options="loginAccountSourceOptions"
+      :show-qr-image-picker="isDesktopRuntime || isAndroidRuntime"
+      :qr-image-busy="qrImageBusy"
       @update:open="editorOpen = $event"
       @update-field="updateEditorField"
       @update-domain="domainText = $event"
       @submit="saveEntry"
       @focus-field="scrollFocusedEditorFieldIntoView"
       @refresh-totp="refreshTotp()"
+      @import-totp-qr-image="importTotpQrImage"
       @open-generator="openCredentialGenerator(true)"
       @update-custom-fields="form.customFields = $event"
     />
 
     <CredentialGenerator
+      v-if="generatorOpen"
       :open="generatorOpen"
       :allow-apply="generatorApplyToPassword"
       :reset-key="generatorResetKey"
@@ -228,6 +234,7 @@
     />
 
     <ImportWizard
+      v-if="importOpen"
       :open="importOpen"
       :entries="vault?.entries || []"
       :busy="busy"
@@ -237,6 +244,7 @@
     />
 
     <SettingsDrawer
+      v-if="drawerOpen"
       :open="drawerOpen"
       :detail-open="drawerDetailOpen"
       :section="drawerSection"
@@ -258,12 +266,22 @@
       :device-unlock-supported="deviceUnlockState.supported"
       :device-unlock-enabled="deviceUnlockState.enabled"
       :device-unlock-label="deviceUnlockSettingsLabel"
+      :show-desktop-tray-settings="showDesktopTraySettings"
+      :desktop-tray-settings="desktopTraySettings"
+      :desktop-tray-busy="desktopTrayBusy"
       :show-android-autofill-settings="showAndroidAutofillSettings"
       :android-autofill-enabled="androidAutofill?.enabled === true"
       :android-autofill-status="androidAutofillStatus"
+      :show-android-passkey-provider-settings="showAndroidPasskeyProviderSettings"
+      :android-passkey-provider-enabled="androidPasskeyProvider?.componentEnabled === true"
+      :android-passkey-provider-system-enabled="androidPasskeyProvider?.systemEnabled === true"
+      :android-passkey-provider-status="androidPasskeyProviderStatus"
+      :android-passkey-provider-busy="androidPasskeyProviderBusy"
       :show-plugin-settings="showPluginSettings"
       :plugin-enabled="pluginListener?.enabled === true"
       :plugin-status="pluginListenerStatus"
+      :attachment-storage-state="attachmentStorageState"
+      :attachment-storage-busy="attachmentStorageBusy"
       :show-update-settings="showUpdateSettings"
       :update-manifest-url="updateManifestUrl"
       :default-update-manifest-url="DEFAULT_UPDATE_MANIFEST_URL"
@@ -286,6 +304,7 @@
       :cloud-backups="cloudBackups"
       :backup-status="backupStatus"
       :portable-backup-supported="isDesktopRuntime"
+      :android-vault-backup-supported="isAndroidRuntime"
       :portable-backup-busy="portableBackupBusy"
       :portable-backup-status="portableBackupStatus"
       :cloud-sync-log-limit="cloudSyncLogLimit"
@@ -316,8 +335,13 @@
       @open-password-health="openPasswordHealth"
       @open-passkeys="openPasskeyManager()"
       @toggle-device-unlock="toggleDeviceUnlock"
+      @toggle-desktop-tray="toggleDesktopTray"
+      @update-desktop-close-behavior="setDesktopCloseBehavior"
       @open-android-settings="openAndroidAutofillSettings"
+      @toggle-android-passkey-provider="toggleAndroidPasskeyProvider"
+      @open-android-passkey-settings="openAndroidPasskeyProviderSettings"
       @open-plugin="openPluginDetail"
+      @collect-attachments="collectAttachmentStorage"
       @update-manifest-url="updateManifestUrl = $event"
       @check-update="checkAppUpdate"
       @download-update="downloadAppUpdate"
@@ -334,6 +358,7 @@
       @select-cloud-backup="selectCloudBackup"
       @export-portable-backup="exportPortableBackupPackage"
       @import-portable-backup="beginPortableBackupImport"
+      @export-android-vault="exportAndroidVaultBackup"
       @update-log-limit="setCloudSyncLogLimit"
       @clear-logs="clearCloudSyncLogs"
       @update-system-group="systemGroupKey = $event"
@@ -379,6 +404,7 @@
     </van-popup>
 
     <CloudPasswordPrompt
+      v-if="cloudPasswordPromptOpen"
       :open="cloudPasswordPromptOpen"
       :password="cloudPasswordPromptValue"
       @update:open="cloudPasswordPromptOpen = $event"
@@ -404,6 +430,7 @@
     />
 
     <CloudSyncReview
+      v-if="cloudSyncReviewOpen"
       :open="cloudSyncReviewOpen"
       :preview="cloudSyncPreview"
       :title="cloudSyncReviewTitle"
@@ -456,6 +483,7 @@
     </van-popup>
 
     <PasswordHealthCenter
+      v-if="passwordHealthOpen"
       :open="passwordHealthOpen"
       :report="passwordHealthReport"
       :expected-totp-ids="expectedTotpEntryIds"
@@ -468,6 +496,7 @@
       @toggle-totp-expected="handleToggleExpectedTotp"
     />
     <PasskeyManager
+      v-if="passkeyManagerOpen"
       :open="passkeyManagerOpen"
       :items="passkeyPresentationItems"
       :login-options="passkeyLoginOptions"
@@ -482,19 +511,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { showConfirmDialog, showFailToast, showSuccessToast, showToast } from 'vant'
 import AuthScreen from './components/auth/AuthScreen.vue'
-import EntryEditor from './components/editor/EntryEditor.vue'
-import CredentialGenerator from './components/tools/CredentialGenerator.vue'
-import ImportWizard from './components/tools/ImportWizard.vue'
-import PasskeyManager from './components/tools/PasskeyManager.vue'
-import PasswordHealthCenter from './components/tools/PasswordHealthCenter.vue'
-import CloudPasswordPrompt from './components/sync/CloudPasswordPrompt.vue'
-import CloudSyncReview from './components/sync/CloudSyncReview.vue'
+const EntryEditor = defineAsyncComponent(() => import('./components/editor/EntryEditor.vue'))
+const CredentialGenerator = defineAsyncComponent(() => import('./components/tools/CredentialGenerator.vue'))
+const ImportWizard = defineAsyncComponent(() => import('./components/tools/ImportWizard.vue'))
+const PasskeyManager = defineAsyncComponent(() => import('./components/tools/PasskeyManager.vue'))
+const PasswordHealthCenter = defineAsyncComponent(() => import('./components/tools/PasswordHealthCenter.vue'))
+const CloudPasswordPrompt = defineAsyncComponent(() => import('./components/sync/CloudPasswordPrompt.vue'))
+const CloudSyncReview = defineAsyncComponent(() => import('./components/sync/CloudSyncReview.vue'))
 import EntryDetailPane from './components/workspace/EntryDetailPane.vue'
 import QuickAccess from './components/workspace/QuickAccess.vue'
-import SettingsDrawer from './components/settings/SettingsDrawer.vue'
+const SettingsDrawer = defineAsyncComponent(() => import('./components/settings/SettingsDrawer.vue'))
 import WorkspaceHeader from './components/workspace/WorkspaceHeader.vue'
 import VaultWorkspace from './components/workspace/VaultWorkspace.vue'
 import {
@@ -508,12 +537,17 @@ import {
   type CloudSyncLogStatus
 } from './composables/useCloudSync'
 import { useEntryWorkspace } from './composables/useEntryWorkspace'
+import { useAndroidAutofillSettings } from './composables/useAndroidAutofillSettings'
+import { useAndroidPasskeyProviderSettings } from './composables/useAndroidPasskeyProviderSettings'
+import { usePluginListenerSettings } from './composables/usePluginListenerSettings'
+import { useDesktopTraySettings } from './composables/useDesktopTraySettings'
 import { useSettingsPanel, type DrawerSection, type SystemGroupKey } from './composables/useSettingsPanel'
 import { useVaultSession } from './composables/useVaultSession'
 import { DEFAULT_OSS_OBJECT_NAME, normalizeObjectName } from './services/aliyunOss'
 import { normalizeAutofillMatchMode, normalizeAutofillRuleValues } from './services/autofillRules.ts'
 import { api } from './services/api'
 import { MAX_ATTACHMENT_BYTES } from './services/attachmentCrypto.ts'
+import { parseQrPayload } from './services/qrPayload.ts'
 import { createAliyunOssVaultStore } from './services/cloud/aliyunOssVaultStore'
 import {
   RemoteVaultStatus,
@@ -585,6 +619,7 @@ import {
   removeSelectedEntries
 } from './services/entryBatchOperations.ts'
 import { filterVaultEntries } from './services/entryWorkspace.ts'
+import { buildVaultSearchIndex, type VaultSearchIndex } from './services/searchIndex.ts'
 import { removeTrashedEntries } from './services/entryTrash.ts'
 import { updatePasskeyMetadata } from './services/passkeyManagement.ts'
 import { buildPasskeyLoginOptions, buildPasskeyPresentationItems } from './services/passkeyPresentation.ts'
@@ -622,18 +657,17 @@ import {
   loadUiScalePercent
 } from './services/uiScale'
 import type {
-  AndroidAutofillState,
   AutofillMatchMode,
   ApiResult,
   AppState,
   AppUpdateCheck,
   AppUpdateProgress,
+  AttachmentStorageState,
   DeviceUnlockState,
   EntryHistoryAction,
   EntryKind,
   EntryStatus,
   LoginAccountSource,
-  PluginListenerState,
   PortableBackupSelection,
   VaultEntry,
   VaultAttachment,
@@ -730,8 +764,8 @@ const stateLoading = ref(true)
 const stateError = ref('')
 const busy = ref(false)
 const attachmentBusy = ref(false)
-const pluginBusy = ref(false)
-const androidAutofillBusy = ref(false)
+const attachmentStorageBusy = ref(false)
+const attachmentStorageState = ref<AttachmentStorageState | null>(null)
 const updateBusy = ref<'check' | 'download' | 'apply' | ''>('')
 const updateStatus = ref('')
 const updateManifestUrl = ref(resolveUpdateManifestUrl(localStorage.getItem(UPDATE_MANIFEST_URL_KEY)))
@@ -750,9 +784,9 @@ const portableBackupPasswordOpen = ref(false)
 const portableBackupPassword = ref('')
 const changePasswordValue = ref('')
 const changePasswordConfirm = ref('')
-const pluginExtensionId = ref('')
 const importLegacy = ref(true)
 const vault = ref<VaultPayload | null>(null)
+const vaultSearchIndex = shallowRef<VaultSearchIndex | null>(null)
 const favoriteEntryIds = ref<Set<string>>(loadFavoriteEntryIds())
 const recentEntryIds = ref<string[]>(loadRecentEntryIds())
 const expectedTotpEntryIds = ref<Set<string>>(loadExpectedTotpEntryIds())
@@ -774,9 +808,44 @@ const entryContextMenuX = ref(0)
 const entryContextMenuY = ref(0)
 const domainText = ref('')
 const totpCode = ref('')
-const pluginListener = ref<PluginListenerState | null>(null)
-const androidAutofill = ref<AndroidAutofillState | null>(null)
 const androidAutofillLaunch = ref<AndroidAutofillLaunchContext | null>(null)
+const {
+  state: androidAutofill,
+  showSettings: showAndroidAutofillSettings,
+  status: androidAutofillStatus,
+  load: loadAndroidAutofillState,
+  openSettings: openAndroidAutofillSettings
+} = useAndroidAutofillSettings()
+const {
+  state: androidPasskeyProvider,
+  busy: androidPasskeyProviderBusy,
+  showSettings: showAndroidPasskeyProviderSettings,
+  status: androidPasskeyProviderStatus,
+  load: loadAndroidPasskeyProviderState,
+  openSettings: openAndroidPasskeyProviderSettings,
+  toggle: toggleAndroidPasskeyProvider
+} = useAndroidPasskeyProviderSettings()
+const {
+  state: pluginListener,
+  busy: pluginBusy,
+  extensionId: pluginExtensionId,
+  detailOpen: pluginDetailOpen,
+  showSettings: showPluginSettings,
+  status: pluginListenerStatus,
+  load: loadPluginListenerState,
+  open: openPluginDetail,
+  enable: enablePluginListener,
+  disable: disablePluginListener,
+  reset: resetPluginListenerSettings
+} = usePluginListenerSettings(isDesktopRuntime)
+const {
+  state: desktopTraySettings,
+  busy: desktopTrayBusy,
+  showSettings: showDesktopTraySettings,
+  load: loadDesktopTraySettings,
+  toggle: toggleDesktopTray,
+  setCloseBehavior: setDesktopCloseBehavior
+} = useDesktopTraySettings(isDesktopRuntime)
 const cloudSyncRuntime = useCloudSync({
   initialLogs: loadCloudSyncLogs(),
   initialLogLimit: loadCloudSyncLogLimit()
@@ -807,6 +876,7 @@ const passkeyManagerInitialId = ref('')
 const totpRemaining = ref(TOTP_PERIOD_SECONDS)
 const totpPeriodSeconds = ref(TOTP_PERIOD_SECONDS)
 const totpRequestId = ref(0)
+const qrImageBusy = ref(false)
 const isWide = ref(false)
 const isDrawerWide = ref(false)
 const paneWidth = ref(loadPaneWidth())
@@ -830,7 +900,6 @@ const {
   drawerSection,
   systemGroupKey,
   passwordSheetOpen,
-  pluginDetailOpen,
   passwordHealthOpen
 } = useSettingsPanel()
 let cloudPasswordPromptResolve: ((value: string | null) => void) | null = null
@@ -870,8 +939,10 @@ const {
   clearSelection: clearWorkspaceSelection
 } = useEntryWorkspace(
   () => vault.value?.entries || [],
-  activeTree,
-  (entries, term, mode) => filterVaultEntries(entries, term, mode, {
+  (entries, term, mode) => vaultSearchIndex.value?.filter(term, mode, {
+    favoriteIds: favoriteEntryIds.value,
+    recentIds: recentEntryIds.value
+  }) || filterVaultEntries(entries, term, mode, {
     favoriteIds: favoriteEntryIds.value,
     recentIds: recentEntryIds.value
   })
@@ -1017,30 +1088,9 @@ const portableBackupPasswordNote = computed(() => {
   ].filter(Boolean).join(' · ')
   return `${details}。恢复会替换当前保险库，请输入该备份包的主密码；未设置可留空。`
 })
-const pluginListenerStatus = computed(() => {
-  const listener = pluginListener.value
-  if (!listener) return '未检测'
-  if (!listener.supported) return '仅 Windows 支持'
-  if (!listener.enabled) return '未开启'
-  if (listener.mode === 'packaged' && !listener.hostExecutableExists) return '缺少 Host'
-  const browsers = [
-    listener.chromeRegistered ? 'Chrome' : '',
-    listener.edgeRegistered ? 'Edge' : ''
-  ].filter(Boolean)
-  return browsers.length ? `${browsers.join('/')} 已开启` : '未开启'
-})
-const isDesktopMode = computed(() => isDesktopRuntime)
 const isAndroidMode = computed(() => isAndroidRuntime)
 const isExternalNativeVaultMode = computed(() => isExternalNativeRuntime)
 const showUpdateSettings = computed(() => isExternalNativeRuntime)
-const showPluginSettings = computed(() => isDesktopMode.value && pluginListener.value?.supported !== false)
-const showAndroidAutofillSettings = computed(() => androidAutofill.value?.supported === true)
-const androidAutofillStatus = computed(() => {
-  const state = androidAutofill.value
-  if (!state) return '未检测'
-  if (!state.supported) return '不支持'
-  return state.enabled ? '已开启' : '去设置'
-})
 const updatePlatform = computed(() => updateInfo.value?.platform || (isAndroidMode.value ? 'android' : 'desktop'))
 const updateInstallButtonText = computed(() => updatePlatform.value === 'android' ? '打开安装器' : '安装并重启')
 const updateInstallModeText = computed(() => {
@@ -1153,6 +1203,7 @@ onMounted(() => {
   window.addEventListener('scroll', closeEntryContextMenu, true)
   window.addEventListener('resize', closeEntryContextMenu)
   window.addEventListener('focus', loadAndroidAutofillState)
+  window.addEventListener('focus', loadAndroidPasskeyProviderState)
   window.addEventListener('focus', resetAndroidInstallBusy)
   window.addEventListener('focus', scheduleExternalVaultRefresh)
   window.addEventListener('focus', scheduleAutoCloudDownloadCheck)
@@ -1165,10 +1216,16 @@ onMounted(() => {
     applyLockedUiState()
     return true
   }
+  window.__mypwdmgHandleNativeAutofillIntent = () => {
+    void loadAndroidAutofillLaunchContext()
+    return true
+  }
   loadAppInfo()
+  loadDesktopTraySettings()
   loadAndroidAutofillLaunchContext()
   loadState()
   loadAndroidAutofillState()
+  loadAndroidPasskeyProviderState()
 })
 
 watch(drawerOpen, (open) => {
@@ -1193,6 +1250,7 @@ onUnmounted(() => {
   window.removeEventListener('scroll', closeEntryContextMenu, true)
   window.removeEventListener('resize', closeEntryContextMenu)
   window.removeEventListener('focus', loadAndroidAutofillState)
+  window.removeEventListener('focus', loadAndroidPasskeyProviderState)
   window.removeEventListener('focus', resetAndroidInstallBusy)
   window.removeEventListener('focus', scheduleExternalVaultRefresh)
   window.removeEventListener('focus', scheduleAutoCloudDownloadCheck)
@@ -1206,6 +1264,7 @@ onUnmounted(() => {
   vaultSession.cancel()
   delete window.__mypwdmgHandleNativeBack
   delete window.__mypwdmgHandleNativeLock
+  delete window.__mypwdmgHandleNativeAutofillIntent
   stopPaneResize()
   stopTotpTimer()
 })
@@ -1651,6 +1710,7 @@ async function lockVault() {
 
 function publishVaultPayload(next: VaultPayload) {
   if (state.locked) return false
+  vaultSearchIndex.value = buildVaultSearchIndex(next.entries)
   vault.value = next
   pruneLocalEntryPreferences(next.entries)
   pruneBatchEntrySelection(next.entries)
@@ -1711,6 +1771,7 @@ function applyLockedUiState() {
   state.locked = true
   state.expiresAt = 0
   vault.value = null
+  vaultSearchIndex.value = null
   quickAccessOpen.value = false
   exitBatchSelection()
   selectedEntry.value = null
@@ -1738,7 +1799,8 @@ function applyLockedUiState() {
   confirmPassword.value = ''
   changePasswordValue.value = ''
   changePasswordConfirm.value = ''
-  pluginExtensionId.value = ''
+  resetPluginListenerSettings()
+  attachmentStorageState.value = null
   androidAutofillLaunch.value = null
   cloudInfo.value = null
   cloudBackups.value = []
@@ -1757,7 +1819,6 @@ function applyLockedUiState() {
   moveEntryId.value = ''
   entryContextMenuOpen.value = false
   passwordSheetOpen.value = false
-  pluginDetailOpen.value = false
   passwordHealthOpen.value = false
   deviceUnlockSheetOpen.value = false
   resetDeviceUnlockDraft()
@@ -1830,6 +1891,37 @@ function updateEditorField(field: string, value: unknown) {
   if (field === 'title' || field === 'username' || field === 'email' || field === 'password' || field === 'phone' || field === 'totpSecret' || field === 'note') {
     form[field] = text
   }
+}
+
+async function importTotpQrImage(file: File, targetEditingId: string, targetFormId: string) {
+  if ((!isDesktopRuntime && !isAndroidRuntime) || qrImageBusy.value) return
+  qrImageBusy.value = true
+  try {
+    if (!isDesktopRuntime && !isAndroidRuntime) throw new Error('当前环境不支持二维码图片识别')
+    const { decodeQrImageFile } = await import('./services/desktopQrImage.ts')
+    const value = await decodeQrImageFile(file)
+    await applyTotpQrValue(value, targetEditingId, targetFormId)
+  } catch (error) {
+    showFailToast(error instanceof Error ? error.message : '二维码图片识别失败')
+  } finally {
+    qrImageBusy.value = false
+  }
+}
+
+async function applyTotpQrValue(value: string, targetEditingId: string, targetFormId: string) {
+  if (!editorOpen.value || editingId.value !== targetEditingId || form.id !== targetFormId) {
+    showToast('编辑页面已变化，未应用二维码结果')
+    return
+  }
+  const payload = parseQrPayload(value)
+  if (payload.kind === 'passkey-hybrid') {
+    showFailToast('已识别跨设备通行密钥二维码，但当前尚未接入 FIDO hybrid 协议')
+    return
+  }
+  updateEditorField('totpSecret', payload.uri)
+  if (editingId.value) await refreshTotp()
+  const account = payload.label || payload.issuer
+  showSuccessToast(account ? `已导入 ${account} 的 TOTP` : '已导入 TOTP')
 }
 
 function openCreate(kind: EntryKind, parentId = '') {
@@ -3026,22 +3118,12 @@ async function prepareCloudRewriteForPasswordChange() {
   }
 }
 
-async function loadPluginListenerState() {
-  const result = await api.getPluginListenerState()
-  if (!result.ok || !result.data) return
-  pluginListener.value = result.data
-  if (!result.data.supported) pluginDetailOpen.value = false
-  if (!pluginExtensionId.value) pluginExtensionId.value = result.data.extensionId || ''
-}
-
-async function loadAndroidAutofillState() {
-  const result = await api.getAndroidAutofillState()
-  if (result.ok && result.data) androidAutofill.value = result.data
-}
-
 async function loadAndroidAutofillLaunchContext() {
   const result = await androidBridgeCall<AndroidAutofillLaunchContext>('getAutofillLaunchContext')
-  if (!result.ok || !result.data?.active) return
+  if (!result.ok || !result.data?.active) {
+    androidAutofillLaunch.value = null
+    return
+  }
   androidAutofillLaunch.value = result.data
   applyAndroidAutofillSearch()
 }
@@ -3080,81 +3162,6 @@ async function androidBridgeCall<T>(method: string, ...args: unknown[]): Promise
       code: 'ANDROID_API_ERROR',
       message: error instanceof Error ? error.message : String(error)
     }
-  }
-}
-
-async function openAndroidAutofillSettings() {
-  if (androidAutofillBusy.value) return
-  androidAutofillBusy.value = true
-  try {
-    const result = await api.openAndroidAutofillSettings()
-    if (!result.ok || !result.data) {
-      showFailToast(result.message || '无法打开自动填充设置')
-      return
-    }
-    androidAutofill.value = result.data
-    showToast('请在系统页面选择 My Password')
-    window.setTimeout(loadAndroidAutofillState, 1000)
-  } catch {
-    showFailToast('无法打开自动填充设置')
-  } finally {
-    androidAutofillBusy.value = false
-  }
-}
-
-async function enablePluginListener() {
-  const extensionId = pluginExtensionId.value.trim()
-  if (!extensionId) {
-    showFailToast('请先填写插件 ID')
-    return
-  }
-
-  try {
-    await showConfirmDialog({
-      title: '开启插件监听',
-      message: '将为当前用户注册 Chrome/Edge Native Host。之后浏览器会自动启动后台 Host，不需要手动运行脚本。',
-      confirmButtonText: '开启'
-    })
-  } catch {
-    return
-  }
-
-  pluginBusy.value = true
-  try {
-    const result = await api.enablePluginListener(extensionId, ['chrome', 'edge'])
-    if (!result.ok || !result.data) return showFailToast(result.message || '开启失败')
-    pluginListener.value = result.data
-    pluginExtensionId.value = result.data.extensionId || extensionId
-    showSuccessToast('插件监听已开启，重载扩展或浏览器后生效')
-  } catch {
-    showFailToast('开启插件监听失败')
-  } finally {
-    pluginBusy.value = false
-  }
-}
-
-async function disablePluginListener() {
-  try {
-    await showConfirmDialog({
-      title: '关闭插件监听',
-      message: '将移除当前用户的 Chrome/Edge Native Host 注册。确认关闭吗？',
-      confirmButtonText: '关闭',
-      confirmButtonColor: '#ee0a24'
-    })
-  } catch {
-    return
-  }
-
-  pluginBusy.value = true
-  try {
-    const result = await api.disablePluginListener()
-    if (!result.ok || !result.data) return showFailToast(result.message || '关闭失败')
-    pluginListener.value = result.data
-    showSuccessToast('插件监听已关闭')
-  } catch {
-    showFailToast('关闭插件监听失败')
-  } finally {
-    pluginBusy.value = false
   }
 }
 
@@ -3203,6 +3210,36 @@ async function exportPortableBackupPackage() {
     showSuccessToast('完整备份已导出')
   } catch (error) {
     portableBackupStatus.value = error instanceof Error ? error.message : '完整备份导出失败'
+    showFailToast(portableBackupStatus.value)
+  } finally {
+    portableBackupBusy.value = false
+  }
+}
+
+async function exportAndroidVaultBackup() {
+  if (!vault.value || portableBackupBusy.value || !isAndroidRuntime) return
+  portableBackupBusy.value = true
+  portableBackupStatus.value = '正在准备加密保险库副本'
+  try {
+    const result = await api.exportVaultBackup()
+    if (!result.ok || !result.data) {
+      portableBackupStatus.value = result.message || '保险库导出失败'
+      return showFailToast(portableBackupStatus.value)
+    }
+    const date = new Date().toISOString().slice(0, 10)
+    const exported = await api.exportAndroidVaultFile(`mypwdmg-vault-${date}.json`, result.data.content)
+    if (!exported.ok || !exported.data) {
+      portableBackupStatus.value = exported.message || '保险库导出失败'
+      return showFailToast(portableBackupStatus.value)
+    }
+    if (!exported.data.saved) {
+      portableBackupStatus.value = ''
+      return
+    }
+    portableBackupStatus.value = '加密保险库已导出（不含附件）'
+    showSuccessToast('保险库已导出')
+  } catch (error) {
+    portableBackupStatus.value = error instanceof Error ? error.message : '保险库导出失败'
     showFailToast(portableBackupStatus.value)
   } finally {
     portableBackupBusy.value = false
@@ -4456,6 +4493,42 @@ async function collectLocalAttachmentObjects(payload: VaultPayload) {
   await api.collectAttachmentObjects(ids)
 }
 
+async function loadAttachmentStorageState() {
+  const result = await api.getAttachmentStorageState()
+  if (result.ok && result.data) attachmentStorageState.value = result.data
+}
+
+async function collectAttachmentStorage() {
+  if (!vault.value || attachmentStorageBusy.value) return
+  try {
+    await showConfirmDialog({
+      title: '整理附件存储',
+      message: '未被当前保险库引用的附件会先进入可恢复区；超过保留期限的对象将被永久删除。',
+      confirmButtonText: '整理'
+    })
+  } catch {
+    return
+  }
+
+  attachmentStorageBusy.value = true
+  try {
+    const ids = collectAttachmentReferences(vault.value.entries).map((reference) => reference.id)
+    const result = await api.collectAttachmentObjects(ids)
+    if (!result.ok || !result.data) {
+      showFailToast(result.message || '附件存储整理失败')
+      return
+    }
+    await loadAttachmentStorageState()
+    const changed = result.data.retained + result.data.deleted
+    if (!changed) showToast('附件存储已是最新状态')
+    else showSuccessToast(`已保留 ${result.data.retained} 个，清理 ${result.data.deleted} 个`)
+  } catch {
+    showFailToast('附件存储整理失败')
+  } finally {
+    attachmentStorageBusy.value = false
+  }
+}
+
 function failCloudSyncApply(
   context: CloudSyncApplyContext,
   message: string,
@@ -5638,8 +5711,11 @@ function openDrawer() {
   moreMenuOpen.value = false
   drawerOpen.value = true
   loadAppInfo()
+  loadDesktopTraySettings()
   if (drawerSection.value === 'settings' && showPluginSettings.value) loadPluginListenerState()
   loadAndroidAutofillState()
+  loadAndroidPasskeyProviderState()
+  loadAttachmentStorageState()
   if (!isDrawerWide.value) drawerDetailOpen.value = false
 }
 
@@ -5709,11 +5785,6 @@ function resetDeviceUnlockDraft() {
 function resetPasswordDraft() {
   changePasswordValue.value = ''
   changePasswordConfirm.value = ''
-}
-
-function openPluginDetail() {
-  pluginDetailOpen.value = true
-  loadPluginListenerState()
 }
 
 function openPasswordHealth() {
@@ -5928,6 +5999,10 @@ function selectDrawerSection(section: typeof drawerSection.value) {
   if (section === 'updates' && !showUpdateSettings.value) return
   drawerSection.value = section
   if (section === 'settings' && showPluginSettings.value) loadPluginListenerState()
+  if (section === 'settings') {
+    loadDesktopTraySettings()
+    loadAndroidPasskeyProviderState()
+  }
   if (!isDrawerWide.value) drawerDetailOpen.value = true
 }
 

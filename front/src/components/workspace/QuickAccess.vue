@@ -85,11 +85,13 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { entryKindIcon, entryKindLabel } from '../../services/entryKinds.ts'
 import { searchQuickAccessEntries } from '../../services/quickAccess.ts'
+import type { VaultSearchIndex } from '../../services/searchIndex.ts'
 import type { VaultEntry } from '../../types'
 
 const props = defineProps<{
   open: boolean
   entries: VaultEntry[]
+  searchIndex: VaultSearchIndex | null
   favoriteIds: ReadonlySet<string>
   recentIds: readonly string[]
 }>()
@@ -106,7 +108,10 @@ const keyword = ref('')
 const activeIndex = ref(0)
 const searchInput = ref<HTMLInputElement | null>(null)
 const resultList = ref<HTMLElement | null>(null)
-const results = computed(() => searchQuickAccessEntries(props.entries, keyword.value, {
+const results = computed(() => props.searchIndex?.quickAccess(keyword.value, {
+  favoriteIds: props.favoriteIds,
+  recentIds: props.recentIds
+}) || searchQuickAccessEntries(props.entries, keyword.value, {
   favoriteIds: props.favoriteIds,
   recentIds: props.recentIds
 }))

@@ -1,7 +1,12 @@
-import { emptyPluginListenerState, fail, ok } from './apiTypes'
-import { idbDelete, idbGet, idbSet, idbSetIfCurrentRevision, idbSetIfRevision } from './indexedDbStore'
+import { emptyAndroidPasskeyProviderState, emptyPluginListenerState, fail, ok } from './apiTypes'
+import { validateAttachmentId, validateEncryptedAttachmentObject } from './attachmentCrypto'
+import { idbGet, idbRunReadwrite, idbSet, idbSetIfCurrentRevision, idbSetIfRevision } from './indexedDbStore'
 import { clearLegacyWebData, currentLegacyStorageSnapshot, hasLegacyWebData } from './legacyWeb'
 import type { VaultStorageAdapter } from './storageTypes'
+import {
+  normalizeWebAttachmentManifest,
+  planWebAttachmentCollection
+} from './webAttachmentRetention.ts'
 
 type StoredBackup = {
   name: string
@@ -19,9 +24,6 @@ const ATTACHMENT_OBJECT_PREFIX = 'attachmentObject:'
 const ATTACHMENT_RETAINED_PREFIX = 'attachmentRetained:'
 const MAX_ATTACHMENT_FILE_BYTES = 10 * 1024 * 1024
 const MAX_ATTACHMENT_STORE_BYTES = 256 * 1024 * 1024
-
-type WebAttachmentManifestItem = { objectBytes: number; retained: boolean; deletedAt?: number }
-type WebAttachmentManifest = Record<string, WebAttachmentManifestItem>
 
 export const webStorageAdapter: VaultStorageAdapter = {
   getAppInfo: async () => ok({
@@ -56,7 +58,7 @@ export const webStorageAdapter: VaultStorageAdapter = {
   }),
   readLegacyLocalStorage: async () => ok(JSON.stringify(currentLegacyStorageSnapshot())),
   getAttachmentStorageState: () => guard(async () => {
-    const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
+    const manifest = normalizeWebAttachmentManifest(await idbGet<unknown>(ATTACHMENT_MANIFEST_KEY))
     const active = Object.values(manifest).filter((item) => !item.retained)
     const retained = Object.values(manifest).filter((item) => item.retained)
     return {
@@ -69,48 +71,116 @@ export const webStorageAdapter: VaultStorageAdapter = {
     }
   }),
   readAttachmentObject: (attachmentId) => guard(async () => {
-    const activeKey = ATTACHMENT_OBJECT_PREFIX + attachmentId
-    let text = await idbGet<string>(activeKey)
-    if (!text) {
-      const retainedKey = ATTACHMENT_RETAINED_PREFIX + attachmentId
-      text = await idbGet<string>(retainedKey)
-      if (text) {
-        await idbSet(activeKey, text)
-        await idbDelete(retainedKey)
-        const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
-        if (manifest[attachmentId]) manifest[attachmentId] = { ...manifest[attachmentId], retained: false, deletedAt: undefined }
-        await idbSet(ATTACHMENT_MANIFEST_KEY, manifest)
+    const id = validateAttachmentId(attachmentId)
+    return idbRunReadwrite(async (transaction) => {
+      const activeKey = ATTACHMENT_OBJECT_PREFIX + id
+      const retainedKey = ATTACHMENT_RETAINED_PREFIX + id
+      let text = await transaction.get<string>(activeKey)
+      if (text === null) text = await transaction.get<string>(retainedKey)
+      if (text === null) throw new Error('Attachment object does not exist')
+      validateEncryptedAttachmentObject(text, id)
+
+      const manifest = normalizeWebAttachmentManifest(await transaction.get<unknown>(ATTACHMENT_MANIFEST_KEY))
+      const existing = manifest[id]
+      manifest[id] = {
+        objectBytes: new TextEncoder().encode(text).byteLength,
+        retained: false,
+        createdAt: existing?.createdAt || Math.floor(Date.now() / 1000)
       }
-    }
-    if (!text) throw new Error('Attachment object does not exist')
-    return text
+      transaction.set(activeKey, text)
+      transaction.delete(retainedKey)
+      transaction.set(ATTACHMENT_MANIFEST_KEY, manifest)
+      return text
+    })
   }),
   writeAttachmentObject: (attachmentId, objectText) => guard(async () => {
-    const key = ATTACHMENT_OBJECT_PREFIX + attachmentId
-    const existing = await idbGet<string>(key)
-    if (existing && existing !== objectText) throw new Error('Attachment objects are immutable')
+    const id = validateAttachmentId(attachmentId)
+    validateEncryptedAttachmentObject(objectText, id)
     const objectBytes = new TextEncoder().encode(objectText).byteLength
-    const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
-    const storedBytes = Object.values(manifest).reduce((total, item) => total + item.objectBytes, 0)
-    if (!existing && storedBytes + objectBytes > MAX_ATTACHMENT_STORE_BYTES) throw new Error('Attachment storage quota exceeded')
-    await idbSet(key, objectText)
-    manifest[attachmentId] = { objectBytes, retained: false }
-    await idbSet(ATTACHMENT_MANIFEST_KEY, manifest)
-    return { attachmentId, objectBytes }
+    return idbRunReadwrite(async (transaction) => {
+      const activeKey = ATTACHMENT_OBJECT_PREFIX + id
+      const retainedKey = ATTACHMENT_RETAINED_PREFIX + id
+      const activeText = await transaction.get<string>(activeKey)
+      const retainedText = activeText === null ? await transaction.get<string>(retainedKey) : null
+      const existingText = activeText ?? retainedText
+      if (existingText !== null && existingText !== objectText) throw new Error('Attachment objects are immutable')
+
+      const manifest = normalizeWebAttachmentManifest(await transaction.get<unknown>(ATTACHMENT_MANIFEST_KEY))
+      const existingItem = manifest[id]
+      if (existingText === null) {
+        const storedBytes = Object.values(manifest).reduce((total, item) => total + item.objectBytes, 0)
+        if (storedBytes + objectBytes > MAX_ATTACHMENT_STORE_BYTES) throw new Error('Attachment storage quota exceeded')
+      }
+
+      transaction.set(activeKey, objectText)
+      transaction.delete(retainedKey)
+      manifest[id] = {
+        objectBytes,
+        retained: false,
+        createdAt: existingItem?.createdAt || Math.floor(Date.now() / 1000)
+      }
+      transaction.set(ATTACHMENT_MANIFEST_KEY, manifest)
+      return { attachmentId: id, objectBytes }
+    })
   }),
   retainAttachmentObject: (attachmentId) => guard(async () => {
-    const key = ATTACHMENT_OBJECT_PREFIX + attachmentId
-    const text = await idbGet<string>(key)
-    if (!text) return { attachmentId, retained: false }
-    const deletedAt = Math.floor(Date.now() / 1000)
-    await idbSet(ATTACHMENT_RETAINED_PREFIX + attachmentId, text)
-    await idbDelete(key)
-    const manifest = (await idbGet<WebAttachmentManifest>(ATTACHMENT_MANIFEST_KEY)) || {}
-    if (manifest[attachmentId]) manifest[attachmentId] = { ...manifest[attachmentId], retained: true, deletedAt }
-    await idbSet(ATTACHMENT_MANIFEST_KEY, manifest)
-    return { attachmentId, retained: true, deletedAt }
+    const id = validateAttachmentId(attachmentId)
+    return idbRunReadwrite(async (transaction) => {
+      const activeKey = ATTACHMENT_OBJECT_PREFIX + id
+      const text = await transaction.get<string>(activeKey)
+      if (text === null) return { attachmentId: id, retained: false }
+      validateEncryptedAttachmentObject(text, id)
+
+      const now = Math.floor(Date.now() / 1000)
+      const manifest = normalizeWebAttachmentManifest(await transaction.get<unknown>(ATTACHMENT_MANIFEST_KEY))
+      const existing = manifest[id]
+      transaction.set(ATTACHMENT_RETAINED_PREFIX + id, text)
+      transaction.delete(activeKey)
+      manifest[id] = {
+        objectBytes: new TextEncoder().encode(text).byteLength,
+        retained: true,
+        createdAt: existing?.createdAt || now,
+        deletedAt: now
+      }
+      transaction.set(ATTACHMENT_MANIFEST_KEY, manifest)
+      return { attachmentId: id, retained: true, deletedAt: now }
+    })
   }),
-  collectAttachmentObjects: async () => ok({ retained: 0, deleted: 0 }),
+  collectAttachmentObjects: (referencedIds) => guard(async () => idbRunReadwrite(async (transaction) => {
+    const currentManifest = await transaction.get<unknown>(ATTACHMENT_MANIFEST_KEY)
+    const plan = planWebAttachmentCollection(currentManifest, referencedIds)
+
+    for (const id of plan.restoreIds) {
+      const activeKey = ATTACHMENT_OBJECT_PREFIX + id
+      const retainedKey = ATTACHMENT_RETAINED_PREFIX + id
+      const activeText = await transaction.get<string>(activeKey)
+      const retainedText = await transaction.get<string>(retainedKey)
+      if (retainedText === null && activeText === null) throw new Error('Attachment object does not exist')
+      if (retainedText !== null) {
+        validateEncryptedAttachmentObject(retainedText, id)
+        if (activeText !== null && activeText !== retainedText) throw new Error('Attachment objects are immutable')
+        transaction.set(activeKey, retainedText)
+        transaction.delete(retainedKey)
+      }
+    }
+
+    for (const id of plan.retainIds) {
+      const activeKey = ATTACHMENT_OBJECT_PREFIX + id
+      const text = await transaction.get<string>(activeKey)
+      if (text === null) throw new Error('Attachment object does not exist')
+      validateEncryptedAttachmentObject(text, id)
+      transaction.set(ATTACHMENT_RETAINED_PREFIX + id, text)
+      transaction.delete(activeKey)
+    }
+
+    for (const id of plan.deleteIds) {
+      transaction.delete(ATTACHMENT_OBJECT_PREFIX + id)
+      transaction.delete(ATTACHMENT_RETAINED_PREFIX + id)
+    }
+
+    transaction.set(ATTACHMENT_MANIFEST_KEY, plan.manifest)
+    return { retained: plan.retainIds.length, deleted: plan.deleteIds.length }
+  })),
   cleanupLegacyStorage: (expectedDigest) => guard(async () => {
     const current = JSON.stringify(currentLegacyStorageSnapshot())
     if (await sha256Text(current) !== expectedDigest) throw new Error('Legacy data changed during migration')
@@ -125,6 +195,9 @@ export const webStorageAdapter: VaultStorageAdapter = {
   checkAppUpdate: async () => fail('NATIVE_ONLY', '应用更新只能在桌面端或 Android 端使用。'),
   downloadAppUpdate: async () => fail('NATIVE_ONLY', '应用更新只能在桌面端或 Android 端使用。'),
   applyAppUpdate: async () => fail('NATIVE_ONLY', '应用更新只能在桌面端或 Android 端使用。'),
+  getAndroidPasskeyProviderState: async () => ok(emptyAndroidPasskeyProviderState()),
+  setAndroidPasskeyProviderEnabled: async () => fail('ANDROID_ONLY', 'Android only.'),
+  openAndroidPasskeyProviderSettings: async () => fail('ANDROID_ONLY', 'Android only.'),
   safeExit: async () => ok(null)
 }
 

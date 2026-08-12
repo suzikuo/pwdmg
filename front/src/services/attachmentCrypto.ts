@@ -16,6 +16,7 @@ export type EncryptedAttachment = {
 
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const MAX_CIPHERTEXT_BYTES = MAX_ATTACHMENT_BYTES + 16
+export const MAX_ATTACHMENT_OBJECT_BYTES = Math.ceil(MAX_CIPHERTEXT_BYTES / 3) * 4 + 1024
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const SHA256_RE = /^[0-9a-f]{64}$/
 
@@ -120,8 +121,21 @@ export async function verifyAttachmentCiphertext(reference: VaultAttachment, obj
   validateAttachmentReference(reference)
   const encoded = new TextEncoder().encode(String(objectText || ''))
   if (await sha256Hex(encoded) !== reference.ciphertextSha256) throw new Error('Attachment ciphertext hash does not match')
-  parseAttachmentObject(objectText, reference.id)
+  validateEncryptedAttachmentObject(objectText, reference.id)
   return objectText
+}
+
+export function validateEncryptedAttachmentObject(value: string, expectedId: string): EncryptedAttachmentObject {
+  const object = parseAttachmentObject(value, validateAttachmentId(expectedId))
+  const nonce = base64ToBytesBounded(object.nonce, 12)
+  const ciphertext = base64ToBytesBounded(object.ciphertext, MAX_CIPHERTEXT_BYTES)
+  try {
+    if (nonce.byteLength !== 12 || ciphertext.byteLength < 16) throw new Error('Attachment object is malformed')
+  } finally {
+    nonce.fill(0)
+    ciphertext.fill(0)
+  }
+  return object
 }
 
 export function validateAttachmentReference(reference: VaultAttachment): VaultAttachment {
@@ -149,7 +163,7 @@ function parseAttachmentObject(value: string, expectedId: string): EncryptedAtta
   return record as EncryptedAttachmentObject
 }
 
-function validateAttachmentId(value: string) {
+export function validateAttachmentId(value: string) {
   const id = String(value || '').toLowerCase()
   if (!UUID_V4_RE.test(id)) throw new Error('Attachment ID is invalid')
   return id

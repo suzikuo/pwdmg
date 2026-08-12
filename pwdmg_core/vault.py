@@ -4,6 +4,7 @@ import copy
 import base64
 import hashlib
 import json
+import re
 import shutil
 import threading
 import time

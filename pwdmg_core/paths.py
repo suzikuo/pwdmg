@@ -21,6 +21,8 @@ DEFAULT_DESKTOP_CONFIG = {
     "height": 480,
     "x_position": 160,
     "y_position": 80,
+    "tray_enabled": True,
+    "close_behavior": "minimize-to-tray",
 }
 
 

@@ -161,6 +161,15 @@ export interface AppInfo {
   platform: string
 }
 
+export type DesktopCloseBehavior = 'minimize-to-tray' | 'exit'
+
+export interface DesktopTraySettings {
+  supported: boolean
+  trayEnabled: boolean
+  trayAvailable: boolean
+  closeBehavior: DesktopCloseBehavior
+}
+
 export interface PluginListenerState {
   supported: boolean
   hostName: string
@@ -183,6 +192,14 @@ export interface PluginListenerState {
 export interface AndroidAutofillState {
   supported: boolean
   enabled: boolean
+  serviceName: string
+  settingsAvailable: boolean
+}
+
+export interface AndroidPasskeyProviderState {
+  supported: boolean
+  componentEnabled: boolean
+  systemEnabled: boolean
   serviceName: string
   settingsAvailable: boolean
 }
