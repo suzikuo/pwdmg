@@ -39,14 +39,58 @@ export const desktopStorageAdapter: VaultStorageAdapter = {
   safeExit: () => call<null>('safeExit')
 }
 
+function getTauriInvoke(): ((cmd: string, payload?: any) => Promise<any>) | null {
+  const w = typeof window !== 'undefined' ? (window as any) : null
+  if (!w) return null
+  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke
+  if (w.__TAURI__?.core?.invoke) return w.__TAURI__.core.invoke
+  return null
+}
+
 export function callDesktopApi<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
   return call<T>(method, ...args)
 }
 
+export async function showDesktopWindow(): Promise<void> {
+  const invoke = getTauriInvoke()
+  if (invoke) {
+    try {
+      await invoke('desktop_api', { method: 'showWindow', args: [] })
+      return
+    } catch {
+      // ignore
+    }
+  }
+  void callDesktopApi('showWindow')
+}
+
 async function call<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
+  const invoke = getTauriInvoke()
+  if (invoke) {
+    try {
+      const res = (await invoke('desktop_api', { method, args })) as ApiResult<T>
+      if (res && typeof res === 'object' && 'ok' in res) return res
+      return ok(res as T)
+    } catch (err) {
+      return fail('DESKTOP_API_ERROR', err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const api = await resolvePyApi()
   if (api?.[method]) return api[method](...args) as Promise<ApiResult<T>>
-  return fail('PYWEBVIEW_NOT_READY', '正在等待桌面端本地 API。若长时间停留，请确认通过 main.py 启动。')
+
+  const lateInvoke = getTauriInvoke()
+  if (lateInvoke) {
+    try {
+      const res = (await lateInvoke('desktop_api', { method, args })) as ApiResult<T>
+      if (res && typeof res === 'object' && 'ok' in res) return res
+      return ok(res as T)
+    } catch (err) {
+      return fail('DESKTOP_API_ERROR', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  return fail('DESKTOP_API_NOT_READY', '正在等待桌面端本地 API。若长时间停留，请确认桌面应用正常运行。')
 }
 
 function pyApi() {
@@ -69,7 +113,14 @@ async function resolvePyApi() {
       }
 
       window.addEventListener('pywebviewready', finish, { once: true })
-      window.setTimeout(finish, pywebviewWaitMs)
+      let elapsed = 0
+      const pollTimer = window.setInterval(() => {
+        elapsed += 25
+        if (pyApi() || getTauriInvoke() || elapsed >= 1000) {
+          window.clearInterval(pollTimer)
+          finish()
+        }
+      }, 25)
     })
   }
 

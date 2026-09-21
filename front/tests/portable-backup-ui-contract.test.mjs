@@ -7,8 +7,8 @@ const settingsSource = readFileSync(new URL('../src/components/settings/Settings
 const apiSource = readFileSync(new URL('../src/services/api.ts', import.meta.url), 'utf8')
 const androidAdapterSource = readFileSync(new URL('../src/services/androidStorageAdapter.ts', import.meta.url), 'utf8')
 const androidBridgeSource = readFileSync(new URL('../../android/app/src/main/java/com/suzikuo/mypwdmg/AndroidPasswordBridge.java', import.meta.url), 'utf8')
-const mainSource = readFileSync(new URL('../../main.py', import.meta.url), 'utf8')
-const vaultSource = readFileSync(new URL('../../pwdmg_core/vault.py', import.meta.url), 'utf8')
+const bridgeSource = readFileSync(new URL('../../src-tauri/src/bridge.rs', import.meta.url), 'utf8')
+const portableSource = readFileSync(new URL('../../src-tauri/crates/core/src/portable.rs', import.meta.url), 'utf8')
 
 test('desktop backup settings expose compact complete-package actions', () => {
   assert.match(settingsSource, /class="portable-backup-panel"/)
@@ -19,14 +19,14 @@ test('desktop backup settings expose compact complete-package actions', () => {
 })
 
 test('native import keeps selected paths behind an opaque retryable token', () => {
-  const selectStart = mainSource.indexOf('def selectPortableBackupPackage')
-  const importStart = mainSource.indexOf('def importPortableBackupPackage')
-  const selectBody = mainSource.slice(selectStart, importStart)
-  const importBody = mainSource.slice(importStart, mainSource.indexOf('def discardPortableBackupSelection'))
+  const selectStart = bridgeSource.indexOf('"selectPortableBackupPackage"')
+  const importStart = bridgeSource.indexOf('"importPortableBackupPackage"')
+  const selectBody = bridgeSource.slice(selectStart, importStart)
+  const importBody = bridgeSource.slice(importStart, bridgeSource.indexOf('"discardPortableBackupSelection"'))
   assert.match(selectBody, /selectionToken/)
-  assert.match(selectBody, /self\._portable_backup_selection = \(token, package_path\)/)
-  assert.doesNotMatch(selectBody.slice(selectBody.indexOf('return {')), /packagePath|"path"/)
-  assert.ok(importBody.indexOf('self.api.importPortableBackup') < importBody.indexOf('self._portable_backup_selection = None'))
+  assert.match(selectBody, /state\.portable_backup_selection/)
+  assert.doesNotMatch(selectBody.slice(selectBody.indexOf('Ok(json!({')), /"path"/)
+  assert.ok(importBody.indexOf('import_portable_backup') < importBody.indexOf('*selection_guard = None'))
 })
 
 test('Android backup settings export the encrypted vault through a bounded document task', () => {
@@ -50,10 +50,10 @@ test('Android backup settings export the encrypted vault through a bounded docum
 })
 
 test('restore verifies objects before replacing metadata and clears the frontend session only on success', () => {
-  const serviceStart = vaultSource.indexOf('def import_portable_backup')
-  const serviceBody = vaultSource.slice(serviceStart, vaultSource.indexOf('def query_matches'))
-  assert.ok(serviceBody.indexOf('archive.verify_attachment_objects()') < serviceBody.indexOf('self.attachment_store.write'))
-  assert.ok(serviceBody.indexOf('self.attachment_store.write') < serviceBody.indexOf('self.write_vault_envelope'))
+  const serviceStart = portableSource.indexOf('pub fn import_portable_backup')
+  const serviceBody = portableSource.slice(serviceStart)
+  assert.ok(serviceBody.indexOf('decrypt_payload(password, &envelope)') < serviceBody.indexOf('fs::write(target, content)'))
+  assert.ok(serviceBody.indexOf('fs::write(target, content)') < serviceBody.indexOf('fs::write(&target_vault, envelope_text)'))
 
   const apiStart = apiSource.indexOf('async function importPortableBackupPackage')
   const apiBody = apiSource.slice(apiStart, apiSource.indexOf('async function discardPortableBackupSelection'))

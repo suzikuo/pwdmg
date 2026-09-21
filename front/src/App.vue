@@ -250,6 +250,7 @@
       :section="drawerSection"
       :section-title="drawerSectionTitle"
       :display-app-version="displayAppVersion"
+      :frontend-build-id="frontendBuildId"
       :stats="{ logins: stats.logins, folders: stats.folders }"
       :theme="theme"
       :ui-scale-percent="uiScalePercent"
@@ -297,6 +298,7 @@
       :update-progress-percent="updateProgressPercent"
       :update-status="updateStatus"
       :oss="settings.oss"
+      :cloud-encryption-binding-label="cloudEncryptionBindingLabel"
       :auto-sync-interval-min="AUTO_CLOUD_SYNC_INTERVAL_MIN_MINUTES"
       :auto-sync-interval-max="AUTO_CLOUD_SYNC_INTERVAL_MAX_MINUTES"
       :cloud-busy="cloudBusy"
@@ -354,6 +356,7 @@
       @upload-cloud="uploadCloudBackup"
       @backup-cloud="backupCloudVault"
       @download-cloud="downloadCloudBackup"
+      @rebind-cloud-encryption="rebindCloudEncryption"
       @refresh-cloud-list="refreshCloudBackupList"
       @select-cloud-backup="selectCloudBackup"
       @export-portable-backup="exportPortableBackupPackage"
@@ -361,6 +364,7 @@
       @export-android-vault="exportAndroidVaultBackup"
       @update-log-limit="setCloudSyncLogLimit"
       @clear-logs="clearCloudSyncLogs"
+      @resolve-sync-log="handleResolveSyncLog"
       @update-system-group="systemGroupKey = $event"
       @restore-entry="restoreEntry"
       @trash-entry="trashEntry"
@@ -388,14 +392,18 @@
       <div class="password-popup-inner">
         <van-nav-bar safe-area-inset-top title="启用设备快速解锁" left-arrow @click-left="deviceUnlockSheetOpen = false" />
         <van-form class="password-popup-form" @submit="enableDeviceUnlock">
-          <p class="settings-note compact-note">使用 Windows 当前用户保护设备密钥。主密码不会保存，超过所选期限后需重新输入。</p>
+          <p class="settings-note compact-note">使用当前设备系统安全层加密缓存密钥。主密码不保存明文，在所选期限内可在本机快速免密解锁。</p>
           <van-field v-model="deviceUnlockPassword" type="password" label="当前主密码" autocomplete="current-password" />
           <label class="device-unlock-interval-field">
-            <span>重新验证</span>
-            <select v-model.number="deviceUnlockReauthSeconds" aria-label="设备快速解锁重新验证周期">
+            <span>有效周期</span>
+            <select v-model.number="deviceUnlockReauthSeconds" aria-label="设备快速解锁有效周期">
               <option :value="86400">1 天</option>
               <option :value="604800">7 天</option>
               <option :value="2592000">30 天</option>
+              <option :value="7776000">90 天</option>
+              <option :value="15552000">180 天</option>
+              <option :value="31536000">365 天（1 年）</option>
+              <option :value="315360000">10 年（长期免密）</option>
             </select>
           </label>
           <van-button block type="primary" native-type="submit" :loading="busy">启用</van-button>
@@ -407,6 +415,8 @@
       v-if="cloudPasswordPromptOpen"
       :open="cloudPasswordPromptOpen"
       :password="cloudPasswordPromptValue"
+      :busy="cloudPasswordPromptBusy"
+      :note="cloudPasswordPromptBusy ? '正在使用云端主密码校验保险库，请稍候…' : undefined"
       @update:open="cloudPasswordPromptOpen = $event"
       @update:password="cloudPasswordPromptValue = $event"
       @submit="submitCloudPasswordPrompt"
@@ -441,7 +451,7 @@
       :is-item-checked="isCloudSyncItemChecked"
       :change-label="cloudSyncChangeLabel"
       :item-summary="cloudSyncItemSummary"
-      @update:open="cloudSyncReviewOpen = $event"
+      @update:open="if (!$event) hideCloudSyncReview(); else cloudSyncReviewOpen = true"
       @close="hideCloudSyncReview"
       @select-all="setAllCloudSyncDiffs"
       @discard="discardCloudSyncReview"
@@ -547,6 +557,11 @@ import { DEFAULT_OSS_OBJECT_NAME, normalizeObjectName } from './services/aliyunO
 import { normalizeAutofillMatchMode, normalizeAutofillRuleValues } from './services/autofillRules.ts'
 import { api } from './services/api'
 import { MAX_ATTACHMENT_BYTES } from './services/attachmentCrypto.ts'
+import {
+  clearCloudEncryptionBinding,
+  readCloudEncryptionBinding,
+  rememberCloudEncryptionBinding
+} from './services/cloudEncryptionBinding.ts'
 import { parseQrPayload } from './services/qrPayload.ts'
 import { createAliyunOssVaultStore } from './services/cloud/aliyunOssVaultStore'
 import {
@@ -736,6 +751,7 @@ const DEFAULT_UPDATE_MANIFEST_URL = GITHUB_UPDATE_MANIFEST_URL
 const BUILT_IN_MANIFEST_URL_PATTERN =
   /^(?:https:\/\/ghproxy\.net\/)?https:\/\/github\.com\/suzikuo\/pwdmg\/releases\/(?:latest\/download|download\/[^/]+)\/update-manifest\.json$/i
 const packagedAppVersion = String(import.meta.env.PACKAGE_VERSION || '').trim()
+const frontendBuildId = String(import.meta.env.FRONTEND_BUILD_ID || 'dev').trim() || 'dev'
 const runtimeMode = String(import.meta.env.VITE_STORAGE_MODE || import.meta.env.VITE_API_MODE || import.meta.env.MODE || '').toLowerCase()
 const isDesktopRuntime = ['desktop', 'pywebview', 'native'].includes(runtimeMode)
 const isAndroidRuntime = runtimeMode === 'android'
@@ -750,6 +766,7 @@ const EXTERNAL_VAULT_REFRESH_DELAY_MS = 180
 const EXTERNAL_VAULT_REFRESH_MIN_INTERVAL_MS = 900
 const AUTO_CLOUD_SYNC_UPLOAD_DELAY_MS = 700
 const AUTO_CLOUD_SYNC_DOWNLOAD_DELAY_MS = 1200
+const CLOUD_SYNC_VALIDATION_TIMEOUT_MS = 60_000
 const TEXT_EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .van-field__control'
 
 const state = reactive<AppState>({
@@ -777,6 +794,7 @@ const newPassword = ref('')
 const confirmPassword = ref('')
 const cloudPasswordPromptOpen = ref(false)
 const cloudPasswordPromptValue = ref('')
+const cloudPasswordPromptBusy = ref(false)
 const portableBackupBusy = ref(false)
 const portableBackupStatus = ref('')
 const portableBackupSelection = ref<PortableBackupSelection | null>(null)
@@ -784,6 +802,7 @@ const portableBackupPasswordOpen = ref(false)
 const portableBackupPassword = ref('')
 const changePasswordValue = ref('')
 const changePasswordConfirm = ref('')
+let passwordChangeInProgress = false
 const importLegacy = ref(true)
 const vault = ref<VaultPayload | null>(null)
 const vaultSearchIndex = shallowRef<VaultSearchIndex | null>(null)
@@ -893,6 +912,14 @@ const settings = reactive({
     autoSync: false,
     autoSyncIntervalMinutes: AUTO_CLOUD_SYNC_INTERVAL_DEFAULT_MINUTES
   }
+})
+const cloudEncryptionBindingVersion = ref(0)
+const cloudEncryptionBindingLabel = computed(() => {
+  void cloudEncryptionBindingVersion.value
+  const binding = readCloudEncryptionBinding(cloudSyncStateKey(settings.oss.objectName))
+  if (!binding) return '未绑定；首次校验云端主密码后会自动绑定'
+  const verifiedAt = new Date(binding.verifiedAt).toISOString()
+  return `已绑定 · PBKDF2-SHA256 ${binding.kdf.iterations.toLocaleString()} 次 · ${formatDateTime(verifiedAt)}`
 })
 const {
   drawerOpen,
@@ -1037,7 +1064,7 @@ const vaultSession = useVaultSession(() => {
 }, () => sessionTimeoutMilliseconds(sessionTimeoutMinutes.value))
 const passwordMask = computed(() => selectedEntry.value?.password ? '••••••••••••' : '未设置')
 const deviceUnlockSettingsLabel = computed(() => {
-  if (!deviceUnlockState.value.enabled) return '使用 Windows 当前用户保护'
+  if (!deviceUnlockState.value.enabled) return '使用系统硬件/凭据安全层保护'
   const expiresAt = deviceUnlockState.value.expiresAt
   return expiresAt > 0 ? `有效至 ${new Date(expiresAt * 1000).toLocaleDateString()}` : '已启用'
 })
@@ -1177,6 +1204,7 @@ let totpTimer = 0
 let autoCloudUploadTimer = 0
 let autoCloudDownloadTimer = 0
 let lastAutoCloudDownloadCheckAt = 0
+let cloudSyncRequestInFlight = false
 let totpCurrentStep = -1
 let lastBackRequestAt = 0
 let externalVaultRefreshTimer = 0
@@ -1226,6 +1254,9 @@ onMounted(() => {
   loadState()
   loadAndroidAutofillState()
   loadAndroidPasskeyProviderState()
+  window.setTimeout(() => {
+    void api.showDesktopWindow()
+  }, 250)
 })
 
 watch(drawerOpen, (open) => {
@@ -1522,13 +1553,21 @@ async function loadState() {
       stateError.value = result.message || '无法连接本地保险库'
     }
     await refreshDeviceUnlockState()
+    if (state.hasVault && state.locked && deviceUnlockState.value.enabled) {
+      shouldAutoUnlock = true
+    }
   } finally {
     stateLoading.value = false
+    void api.showDesktopWindow()
   }
 
   if (shouldAutoUnlock) {
     window.setTimeout(() => {
-      unlockWithPassword('', true)
+      if (state.locked && deviceUnlockState.value.enabled) {
+        unlockWithDevice()
+      } else if (state.locked && state.passwordless) {
+        unlockWithPassword('', true)
+      }
     }, 0)
   }
 }
@@ -1580,6 +1619,23 @@ async function refreshDeviceUnlockState() {
     : { supported: false, enabled: false, expiresAt: 0 }
 }
 
+async function rebindDeviceUnlockAfterPasswordChange(password: string) {
+  const existing = await api.getDeviceUnlockState()
+  if (!existing.ok || !existing.data?.enabled) return ''
+  const remainingSeconds = existing.data.expiresAt - Math.floor(Date.now() / 1000)
+  if (!password || remainingSeconds <= 0) {
+    const disabled = await api.disableDeviceUnlock()
+    return disabled.ok ? '' : (disabled.message || '无法清理旧的设备快速解锁密钥')
+  }
+  const rebound = await api.enableDeviceUnlock(password, remainingSeconds)
+  if (rebound.ok && rebound.data) {
+    deviceUnlockState.value = rebound.data
+    return ''
+  }
+  await api.disableDeviceUnlock()
+  return rebound.message || '设备快速解锁密钥未能同步，已关闭设备快速解锁'
+}
+
 async function unlockWithDevice() {
   if (busy.value || !deviceUnlockState.value.enabled) return
   const generation = vaultSession.capture()
@@ -1614,6 +1670,7 @@ async function unlockWithPassword(candidate: string, silent = false) {
     }
     if (!activateVaultSession(result.data, generation)) return false
     password.value = ''
+    if (candidate) autoSyncPasswordGate.clearAll()
     applyAndroidAutofillSearch()
     scheduleAutoCloudDownloadCheck(true)
     return true
@@ -1766,7 +1823,6 @@ function applyLockedUiState() {
   if (vault.value) pruneLocalEntryPreferences(vault.value.entries)
   cancelCloudOperation()
   resetBusyOperation()
-  autoSyncPasswordGate.clearAll()
   vaultSession.invalidate()
   state.locked = true
   state.expiresAt = 0
@@ -2870,17 +2926,21 @@ async function checkAppUpdate() {
   try {
     const result = await api.checkAppUpdate(manifestUrl, handleUpdateProgress)
     if (!result.ok || !result.data) {
-      showFailToast(result.message || '检查更新失败')
+      updateStatus.value = result.message || '检查更新失败'
+      showFailToast(updateStatus.value)
       return
     }
     updateInfo.value = result.data
-    syncAppVersion(result.data.currentVersion)
+    if (result.data.currentVersion) {
+      syncAppVersion(result.data.currentVersion)
+    }
     updateStatus.value = result.data.updateAvailable
       ? `发现新版本 ${result.data.latestVersion}`
       : '当前已是最新版本'
     showToast(updateStatus.value)
-  } catch {
-    updateStatus.value = '检查更新失败'
+  } catch (err) {
+    console.error('checkAppUpdate error:', err)
+    updateStatus.value = err instanceof Error ? err.message : '检查更新失败'
     showFailToast(updateStatus.value)
   } finally {
     updateBusy.value = ''
@@ -2899,16 +2959,23 @@ async function downloadAppUpdate() {
   try {
     const result = await api.downloadAppUpdate(manifestUrl, handleUpdateProgress)
     if (!result.ok || !result.data) {
-      showFailToast(result.message || '下载更新失败')
+      updateStatus.value = result.message || '下载更新失败'
+      showFailToast(updateStatus.value)
       return
     }
-    updateInfo.value = result.data.update
-    syncAppVersion(result.data.update.currentVersion)
-    downloadedUpdatePath.value = result.data.packagePath
-    updateStatus.value = `更新包已下载并校验通过，大小 ${formatBytes(result.data.size)}`
+    if (result.data.update) {
+      updateInfo.value = result.data.update
+      if (result.data.update.currentVersion) {
+        syncAppVersion(result.data.update.currentVersion)
+      }
+    }
+    downloadedUpdatePath.value = result.data.packagePath || ''
+    const sizeStr = result.data.size ? `，大小 ${formatBytes(result.data.size)}` : ''
+    updateStatus.value = `更新包已下载并校验通过${sizeStr}`
     showSuccessToast('更新包已下载')
-  } catch {
-    updateStatus.value = '下载更新失败'
+  } catch (err) {
+    console.error('downloadAppUpdate error:', err)
+    updateStatus.value = err instanceof Error ? err.message : '下载更新失败'
     showFailToast(updateStatus.value)
   } finally {
     updateBusy.value = ''
@@ -2987,35 +3054,56 @@ async function saveSettings() {
 }
 
 async function changeMasterPassword() {
-  if (busy.value) return
+  if (busy.value || passwordChangeInProgress) {
+    showToast('正在处理上一次主密码修改，请稍候')
+    return
+  }
   if (changePasswordValue.value !== changePasswordConfirm.value) {
     showFailToast('两次密码不一致')
     return
   }
-  if (cloudBusy.value) return showToast('请等待当前云端操作完成')
+  if (cloudBusy.value || cloudSyncReviewOpen.value || hasPendingCloudSyncReview()) {
+    return showToast('请先完成或放弃当前云端同步校验')
+  }
 
+  passwordChangeInProgress = true
+  const newPassword = changePasswordValue.value
   try {
     await showConfirmDialog({
-      title: changePasswordValue.value ? '修改主密码' : '清空主密码',
-      message: changePasswordValue.value
+      className: 'password-change-confirm-dialog',
+      overlayStyle: { zIndex: 4999 },
+      title: newPassword ? '修改主密码' : '清空主密码',
+      message: newPassword
         ? '将使用新主密码重新加密当前保险库，确认继续吗？'
         : '清空后打开保险库时可留空进入，确认继续吗？',
       confirmButtonText: '确认修改',
-      confirmButtonColor: changePasswordValue.value ? undefined : '#ee0a24'
+      confirmButtonColor: newPassword ? undefined : '#ee0a24'
     })
   } catch {
+    passwordChangeInProgress = false
     return
   }
 
-  if (cloudBusy.value) return showToast('请等待当前云端操作完成')
+  if (cloudBusy.value || cloudSyncReviewOpen.value || hasPendingCloudSyncReview()) {
+    passwordChangeInProgress = false
+    return showToast('请先完成或放弃当前云端同步校验')
+  }
+  passwordSheetOpen.value = false
   const generation = vaultSession.capture()
-  const newPassword = changePasswordValue.value
-  const cloudOperation = hasCompleteOssSettings()
+  const cloudRewriteEnabled = hasCompleteOssSettings()
+  const operationId = beginBusyOperation()
+  const cloudOperation = cloudRewriteEnabled
     ? beginCloudOperation('password-rewrite', { message: '正在准备云端重新加密' })
     : null
-  const operationId = beginBusyOperation()
+  if (cloudRewriteEnabled && !cloudOperation) {
+    finishBusyOperation(operationId)
+    passwordChangeInProgress = false
+    return showToast('当前已有云端操作，请稍候再修改主密码')
+  }
   let localPasswordChanged = false
+  let deviceUnlockError = ''
   try {
+    markCloudOperation(cloudOperation, 'reading-remote', '正在读取云端保险库')
     const cloudRewrite: {
       objectName: string
       remoteHeadIds: string[]
@@ -3023,11 +3111,18 @@ async function changeMasterPassword() {
     } | null = await prepareCloudRewriteForPasswordChange()
     if (!vaultSession.isCurrent(generation) || state.locked) return
 
+    markCloudOperation(cloudOperation, 'applying-local', '正在修改本地主密码')
     const result = await api.changePassword(newPassword)
     if (!vaultSession.isCurrent(generation) || state.locked) return
     if (!result.ok || !result.data) return showFailToast(result.message || '修改失败')
     localPasswordChanged = true
     Object.assign(state, result.data)
+    state.passwordless = newPassword === ''
+
+    // A device-unlock record contains the old derived vault key. Re-seal it
+    // immediately after a successful password change, otherwise the next
+    // quick-unlock attempt still uses stale encryption parameters.
+    deviceUnlockError = await rebindDeviceUnlockAfterPasswordChange(newPassword)
     await refreshDeviceUnlockState()
     const refreshedVault = await api.getVault()
     if (!vaultSession.isCurrent(generation) || state.locked) return
@@ -3057,15 +3152,24 @@ async function changeMasterPassword() {
         if (response.status !== 'success') {
           cloudRewriteError = response.message || '云端保险库重新加密失败'
         } else {
-          clearAutoSyncPasswordGate(cloudRewrite.objectName)
-          await rememberCloudSyncState(
+          markCloudOperation(cloudOperation, 'reading-remote', '正在回读验证云端新主密码')
+          const verificationError = await verifyCloudPasswordRewrite(
             cloudRewrite.objectName,
-            vault.value,
-            vault.value,
-            exported.data.content,
-            response.commitId ? [response.commitId] : []
+            exported.data.content
           )
-          if (!vaultSession.isCurrent(generation) || state.locked) return
+          if (verificationError) {
+            cloudRewriteError = verificationError
+          } else {
+            clearAutoSyncPasswordGate(cloudRewrite.objectName)
+            await rememberCloudSyncState(
+              cloudRewrite.objectName,
+              vault.value,
+              vault.value,
+              exported.data.content,
+              response.commitId ? [response.commitId] : []
+            )
+            if (!vaultSession.isCurrent(generation) || state.locked) return
+          }
         }
       }
     }
@@ -3073,8 +3177,9 @@ async function changeMasterPassword() {
     changePasswordValue.value = ''
     changePasswordConfirm.value = ''
     passwordSheetOpen.value = false
-    if (cloudRewriteError) {
-      backupStatus.value = `本地主密码已修改，但${cloudRewriteError}`
+    const passwordChangeWarnings = [deviceUnlockError, cloudRewriteError].filter(Boolean)
+    if (passwordChangeWarnings.length) {
+      backupStatus.value = `本地主密码已修改，但${passwordChangeWarnings.join('；')}`
       showFailToast(backupStatus.value)
     } else {
       showSuccessToast(cloudRewrite ? '主密码及云端保险库已重新加密' : '主密码已修改')
@@ -3086,6 +3191,28 @@ async function changeMasterPassword() {
   } finally {
     finishBusyOperation(operationId)
     if (cloudOperation) finishCloudOperation(cloudOperation)
+    passwordChangeInProgress = false
+  }
+}
+
+async function verifyCloudPasswordRewrite(objectName: string, expectedContent: string): Promise<string> {
+  try {
+    const client = createRemoteVaultStore()
+    const configuredObjectName = normalizeObjectName(settings.oss.objectName)
+    const remote = await readCloudVaultForSync(client, configuredObjectName, objectName)
+    if (remote.response.status !== RemoteVaultStatus.Success || typeof remote.response.content !== 'string') {
+      return '云端回读失败，无法确认新主密码已经生效'
+    }
+    if (remote.response.content !== expectedContent) {
+      return '云端回读仍是旧版本，主密码修改尚未同步完成'
+    }
+    const verified = await api.previewVaultBackup(remote.response.content)
+    if (!verified.ok || !verified.data) {
+      return '云端回读无法用新主密码校验，主密码修改尚未同步完成'
+    }
+    return ''
+  } catch (error) {
+    return error instanceof Error ? `云端回读失败：${error.message}` : '云端回读失败，无法确认新主密码已经生效'
   }
 }
 
@@ -3104,9 +3231,19 @@ async function prepareCloudRewriteForPasswordChange() {
     throw new Error(String(response.content || '无法检查云端保险库'))
   }
 
-  const remote = await api.previewVaultBackup(response.content)
+  let remote = await api.previewVaultBackup(response.content)
+  if (!remote.ok && isVaultPasswordChangedResult(remote)) {
+    backupStatus.value = '云端文件需要输入云端主密码校验'
+    const cloudPassword = await requestCloudVaultPassword()
+    if (cloudPassword === null) throw new Error('已取消云端校验')
+    try {
+      remote = await api.previewVaultBackupWithPassword(response.content, cloudPassword)
+    } finally {
+      finishCloudPasswordPrompt()
+    }
+  }
   if (!remote.ok || !remote.data) {
-    throw new Error('云端保险库无法用当前主密码解密，请先完成云同步再修改主密码')
+    throw new Error(remote.message || '云端保险库无法解密，请先完成云同步再修改主密码')
   }
   if (await cloudSyncPayloadFingerprint(remote.data) !== await cloudSyncPayloadFingerprint(vault.value)) {
     throw new Error('云端与本地保险库存在差异，请先完成同步再修改主密码')
@@ -3165,8 +3302,18 @@ async function androidBridgeCall<T>(method: string, ...args: unknown[]): Promise
   }
 }
 
+function isSettingsChanged() {
+  if (!vault.value) return false
+  return JSON.stringify(normalizeSettings(settings)) !== JSON.stringify(normalizeSettings(vault.value.settings))
+}
+
 async function persistSettings(options: { closeDrawer?: boolean; toast?: boolean; skipAutoSync?: boolean } = {}) {
-  if (!vault.value) return
+  if (!vault.value) return false
+  if (!isSettingsChanged()) {
+    if (options.closeDrawer) drawerOpen.value = false
+    if (options.toast) showSuccessToast('设置已保存')
+    return true
+  }
   const payload = cloneVault()
   payload.settings = normalizeSettings(settings)
   const result = await saveVaultForCurrentSession(payload)
@@ -3329,11 +3476,13 @@ async function checkCloudBackupInfo() {
   const cloudOperation = beginCloudOperation('inspect', { message: '正在检查云端文件' })
   backupStatus.value = ''
   try {
-    markCloudOperation(cloudOperation, 'persisting-settings', '正在保存云配置')
-    const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
-    if (!saved) {
-      finishCloudOperation(cloudOperation, 'error', '保存云配置失败')
-      return
+    if (isSettingsChanged()) {
+      markCloudOperation(cloudOperation, 'persisting-settings', '正在保存云配置')
+      const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
+      if (!saved) {
+        finishCloudOperation(cloudOperation, 'error', '保存云配置失败')
+        return
+      }
     }
     markCloudOperation(cloudOperation, 'reading-remote', '正在读取云端文件')
     const client = createRemoteVaultStore()
@@ -3379,11 +3528,13 @@ async function refreshCloudBackupList() {
   const cloudOperation = beginCloudOperation('list', { message: '正在读取云端备份列表' })
   backupStatus.value = ''
   try {
-    markCloudOperation(cloudOperation, 'persisting-settings', '正在保存云配置')
-    const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
-    if (!saved) {
-      finishCloudOperation(cloudOperation, 'error', '保存云配置失败')
-      return
+    if (isSettingsChanged()) {
+      markCloudOperation(cloudOperation, 'persisting-settings', '正在保存云配置')
+      const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
+      if (!saved) {
+        finishCloudOperation(cloudOperation, 'error', '保存云配置失败')
+        return
+      }
     }
     markCloudOperation(cloudOperation, 'reading-remote', '正在读取云端备份列表')
     const client = createRemoteVaultStore()
@@ -3459,11 +3610,13 @@ async function createDatedCloudBackup() {
   })
   backupStatus.value = ''
   try {
-    markCloudOperation(cloudOperation, 'persisting-settings', '正在保存云配置')
-    const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
-    if (!saved) {
-      finishCloudOperation(cloudOperation, 'error', '保存云配置失败')
-      return
+    if (isSettingsChanged()) {
+      markCloudOperation(cloudOperation, 'persisting-settings', '正在保存云配置')
+      const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
+      if (!saved) {
+        finishCloudOperation(cloudOperation, 'error', '保存云配置失败')
+        return
+      }
     }
 
     markCloudOperation(cloudOperation, 'exporting', '正在导出加密保险库')
@@ -3545,17 +3698,32 @@ async function downloadCloudBackup() {
 function requestCloudVaultPassword() {
   if (cloudPasswordPromptResolve) cloudPasswordPromptResolve(null)
   cloudPasswordPromptValue.value = ''
+  cloudPasswordPromptBusy.value = false
   cloudPasswordPromptOpen.value = true
+  drawerOpen.value = false
+  backupStatus.value = '云端文件需要输入云端主密码校验'
   return new Promise<string | null>((resolve) => {
     cloudPasswordPromptResolve = resolve
   })
 }
 
-function submitCloudPasswordPrompt() {
-  resolveCloudPasswordPrompt(cloudPasswordPromptValue.value)
+async function submitCloudPasswordPrompt() {
+  if (cloudPasswordPromptBusy.value) return
+  const resolve = cloudPasswordPromptResolve
+  if (!resolve) return
+  const submittedPassword = cloudPasswordPromptValue.value
+  cloudPasswordPromptBusy.value = true
+  await nextTick()
+  if (cloudPasswordPromptResolve !== resolve) {
+    cloudPasswordPromptBusy.value = false
+    return
+  }
+  cloudPasswordPromptResolve = null
+  resolve(submittedPassword)
 }
 
 function cancelCloudPasswordPrompt() {
+  if (cloudPasswordPromptBusy.value) return
   resolveCloudPasswordPrompt(null)
 }
 
@@ -3566,20 +3734,132 @@ function handleCloudPasswordPromptClosed() {
 function resolveCloudPasswordPrompt(value: string | null) {
   const resolve = cloudPasswordPromptResolve
   cloudPasswordPromptResolve = null
+  cloudPasswordPromptBusy.value = false
   cloudPasswordPromptOpen.value = false
   cloudPasswordPromptValue.value = ''
   if (resolve) resolve(value)
 }
 
+function finishCloudPasswordPrompt() {
+  cloudPasswordPromptBusy.value = false
+  cloudPasswordPromptOpen.value = false
+  cloudPasswordPromptValue.value = ''
+}
+
+type CloudEncryptionAdoptionResult =
+  | { ok: true; payload: VaultPayload; deviceUnlockWarning: string }
+  | { ok: false; message: string }
+
+async function adoptVerifiedCloudEncryption(options: {
+  envelopeText: string
+  password: string
+  scopeKey: string
+  remoteFingerprint?: string
+  isCurrent?: () => boolean
+}): Promise<CloudEncryptionAdoptionResult> {
+  const adopted = await api.adoptVaultEncryptionFromEnvelope(options.envelopeText, options.password)
+  if (!adopted.ok || !adopted.data) {
+    return {
+      ok: false,
+      message: adopted.message || '无法使用云端主密码绑定本地加密参数'
+    }
+  }
+  if (options.isCurrent && !options.isCurrent()) {
+    return { ok: false, message: '保险库会话已变化，请重新校验云端保险库' }
+  }
+
+  Object.assign(state, adopted.data)
+  state.passwordless = options.password === ''
+  const deviceUnlockWarning = await rebindDeviceUnlockAfterPasswordChange(options.password)
+  await refreshDeviceUnlockState()
+  const refreshed = await api.getVault()
+  if (!refreshed.ok || !refreshed.data || !publishVaultPayload(refreshed.data)) {
+    return { ok: false, message: '本地加密参数已更新，但无法重新载入本地保险库' }
+  }
+  if (options.isCurrent && !options.isCurrent()) {
+    return { ok: false, message: '保险库会话已变化，请重新校验云端保险库' }
+  }
+
+  try {
+    rememberCloudEncryptionBinding(
+      options.scopeKey,
+      JSON.parse(options.envelopeText),
+      options.remoteFingerprint || ''
+    )
+    cloudEncryptionBindingVersion.value += 1
+  } catch {
+    // The local envelope is already bound. The record is only a visible hint.
+  }
+  return { ok: true, payload: refreshed.data, deviceUnlockWarning }
+}
+
+async function rebindCloudEncryption() {
+  if (!vault.value || cloudBusy.value) return
+  if (cloudSyncReviewOpen.value || hasPendingCloudSyncReview()) {
+    showToast('请先完成或放弃当前云端同步校验')
+    return
+  }
+  if (!validateOssSettings()) return
+  const operation = beginCloudOperation('inspect', { message: '正在重新绑定云端加密参数' })
+  if (!operation) return
+  const generation = vaultSession.capture()
+  try {
+    if (isSettingsChanged()) {
+      const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
+      if (!saved) return
+    }
+    const cloudPassword = await requestCloudVaultPassword()
+    if (cloudPassword === null) {
+      finishCloudOperation(operation, 'cancelled', '已取消云端加密参数绑定')
+      return
+    }
+    const client = createRemoteVaultStore()
+    const configuredObjectName = normalizeObjectName(settings.oss.objectName)
+    const preferred = await readCloudVaultForSync(client, configuredObjectName, configuredObjectName)
+    if (preferred.response.status !== RemoteVaultStatus.Success || typeof preferred.response.content !== 'string') {
+      throw new Error(String(preferred.response.content || '读取云端保险库失败'))
+    }
+    const verified = await api.previewVaultBackupWithPassword(preferred.response.content, cloudPassword)
+    if (!verified.ok || !verified.data) throw new Error(verified.message || '云端主密码校验失败')
+    const adopted = await adoptVerifiedCloudEncryption({
+      envelopeText: preferred.response.content,
+      password: cloudPassword,
+      scopeKey: cloudSyncStateKey(preferred.objectName),
+      remoteFingerprint: preferred.response.revision,
+      isCurrent: () => vaultSession.isCurrent(generation) && !state.locked
+    })
+    if (!adopted.ok) throw new Error(adopted.message)
+    clearAutoSyncPasswordGate(preferred.objectName)
+    backupStatus.value = adopted.deviceUnlockWarning
+      ? `云端加密参数已绑定；${adopted.deviceUnlockWarning}`
+      : '云端加密参数已绑定，后续同步不再重复校验'
+    showSuccessToast('云端加密参数已绑定')
+  } catch (error) {
+    if (!state.locked) {
+      const message = error instanceof Error ? error.message : String(error)
+      backupStatus.value = message
+      showFailToast(message)
+    }
+  } finally {
+    finishCloudPasswordPrompt()
+    finishCloudOperation(operation)
+  }
+}
+
 function isVaultPasswordChangedResult(result: ApiResult<unknown>) {
   const message = `${result.code || ''} ${result.message || ''}`
-  return result.code === 'BAD_PASSWORD' && /vault password changed/i.test(message)
+  return result.code === 'BAD_PASSWORD' || /vault password changed|wrong password|decrypt|corrupt|tag mismatch/i.test(message)
 }
 
 type CloudSyncRemoteSnapshot = {
   payload: VaultPayload
   envelopeText: string
+  sourceEnvelopeText: string
+  localPayload?: VaultPayload
   usedAlternatePassword: boolean
+  encryptionBindingAdopted: boolean
+  deviceUnlockWarning?: string
+  alternatePassword?: string
 }
 
 async function loadVerifiedCloudRemote(options: {
@@ -3589,6 +3869,7 @@ async function loadVerifiedCloudRemote(options: {
   objectName: string
   preferred: CloudVaultRead
   ancestorPayload: VaultPayload | null
+  remoteFingerprint?: string
   operation: CloudOperationHandle | null
   sessionIsCurrent: () => boolean
   operationGateKeys: (...objectNames: string[]) => string[]
@@ -3607,16 +3888,31 @@ async function loadVerifiedCloudRemote(options: {
   const response = preferred.response
   let alternatePassword: string | null | undefined
   let usedAlternatePassword = false
+  let sourceEnvelopeText = ''
 
   const previewEnvelope = async (content: string) => {
     let result = await api.previewVaultBackup(content)
-    if (!sessionIsCurrent() || result.ok || !isVaultPasswordChangedResult(result) || automatic) return result
+    if (result.ok && result.data && !sourceEnvelopeText) sourceEnvelopeText = content
+    if (!sessionIsCurrent() || result.ok || !isVaultPasswordChangedResult(result)) return result
+    clearCloudEncryptionBinding(cloudSyncStateKey(objectName))
+    cloudEncryptionBindingVersion.value += 1
+    if (automatic) return result
     autoSyncPasswordGate.block(...operationGateKeys(requestedObjectName, objectName))
     backupStatus.value = '云端文件需要输入云端主密码校验'
     if (alternatePassword === undefined) alternatePassword = await requestCloudVaultPassword()
     if (!sessionIsCurrent() || alternatePassword === null) return result
-    result = await api.previewVaultBackupWithPassword(content, alternatePassword)
-    if (result.ok && result.data) usedAlternatePassword = true
+    try {
+      result = await api.previewVaultBackupWithPassword(content, alternatePassword)
+      if (result.ok && result.data) {
+        usedAlternatePassword = true
+        // The entered password must be paired with the envelope it actually
+        // decrypted. This is the KDF source used when the local session is
+        // adopted after the sync review is confirmed.
+        sourceEnvelopeText = content
+      }
+    } finally {
+      finishCloudPasswordPrompt()
+    }
     return result
   }
 
@@ -3744,13 +4040,49 @@ async function loadVerifiedCloudRemote(options: {
   }
 
   if (!payload) return null
+  let localPayload: VaultPayload | undefined
+  let encryptionBindingAdopted = false
+  let deviceUnlockWarning = ''
   if (usedAlternatePassword) {
-    autoSyncPasswordGate.block(...operationGateKeys(requestedObjectName, objectName))
+    if (!sourceEnvelopeText || typeof alternatePassword !== 'string') {
+      throw new Error('云端加密参数来源缺失，请重新校验云端保险库')
+    }
+    const adopted = await adoptVerifiedCloudEncryption({
+      envelopeText: sourceEnvelopeText,
+      password: alternatePassword,
+      scopeKey: cloudSyncStateKey(objectName),
+      remoteFingerprint: options.remoteFingerprint,
+      isCurrent: sessionIsCurrent
+    })
+    if (!adopted.ok) throw new Error(adopted.message)
+    localPayload = adopted.payload
+    encryptionBindingAdopted = true
+    deviceUnlockWarning = adopted.deviceUnlockWarning
+    clearAutoSyncPasswordGate(requestedObjectName, objectName)
     const checkpointEnvelope = await api.exportVaultBackupForPayload(payload)
     if (!sessionIsCurrent()) return null
     envelopeText = checkpointEnvelope.ok && checkpointEnvelope.data ? checkpointEnvelope.data.content : ''
+  } else if (sourceEnvelopeText) {
+    try {
+      rememberCloudEncryptionBinding(
+        cloudSyncStateKey(objectName),
+        JSON.parse(sourceEnvelopeText),
+        options.remoteFingerprint || ''
+      )
+      cloudEncryptionBindingVersion.value += 1
+    } catch {
+      // A visible binding record is optional; the validated envelope remains authoritative.
+    }
   }
-  return { payload, envelopeText, usedAlternatePassword }
+  return {
+    payload,
+    envelopeText,
+    sourceEnvelopeText,
+    localPayload,
+    usedAlternatePassword: false,
+    encryptionBindingAdopted,
+    deviceUnlockWarning
+  }
 }
 
 function canScheduleAutoCloudSync() {
@@ -3827,13 +4159,20 @@ function startCloudDownload(options: CloudSyncReviewOptions = {}) {
 async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direction: CloudSyncDirection }) {
   const { direction, ...options } = request
   if (!vault.value || cloudBusy.value) return
-  if (hasPendingCloudSyncReview()) {
-    if (!options.automatic) {
-      showCloudSyncReview()
-      backupStatus.value = '有未处理同步差异，请先确认'
-      showToast('有未处理同步差异，请先确认')
-    }
+  if (cloudSyncRequestInFlight) {
+    if (!options.automatic) showToast('云端校验正在进行，请稍候')
     return
+  }
+  if (hasPendingCloudSyncReview()) {
+    if (cloudSyncReviewOpen.value) {
+      if (!options.automatic) {
+        showCloudSyncReview()
+        backupStatus.value = '有未处理同步差异，请先确认'
+        showToast('有未处理同步差异，请先确认')
+      }
+      return
+    }
+    closeCloudSyncReview()
   }
   syncSettings(settings)
   if (options.automatic) {
@@ -3847,6 +4186,7 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
     (direction === 'download' && !options.automatic ? selectedCloudObjectName.value || settings.oss.objectName : settings.oss.objectName)
   )
   if (options.automatic && isAutoSyncPasswordBlocked(requestedObjectName)) return
+  cloudSyncRequestInFlight = true
   const operationOss = normalizeSettings(settings).oss
   const operationCloudScopeId = JSON.stringify([operationOss.region, operationOss.bucketName])
   const operationGateKeys = (...objectNames: string[]) => objectNames.map((name) => (
@@ -3871,14 +4211,33 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
   }
 
   const cloudOperation = beginCloudOperation('review', { direction, automatic: options.automatic === true })
+  if (!cloudOperation) {
+    cloudSyncRequestInFlight = false
+    return
+  }
+  const finishStaleCloudSync = () => {
+    const message = '本地保险库会话或云配置已变化，本次同步已取消，请重新下载校验'
+    finishCloudOperation(cloudOperation, 'cancelled', message)
+    if (!state.locked) backupStatus.value = message
+    appendCloudSyncLog({
+      direction,
+      automatic: options.automatic === true,
+      status: 'skipped',
+      objectName,
+      message
+    })
+  }
   backupStatus.value = direction === 'download' ? '正在生成下载差异' : '正在生成上传差异'
   try {
     const localPayloadBeforePersist = clonePayload(vault.value)
-    if (!options.skipPersist) {
+    if (!options.skipPersist && isSettingsChanged()) {
       markCloudOperation(cloudOperation, 'persisting-settings', '正在保存云配置')
       const saved = await persistSettings({ closeDrawer: false, toast: false, skipAutoSync: true })
-      if (!sessionIsCurrent()) return
-      if (!saved || !vault.value) {
+      if (!sessionIsCurrent()) {
+        finishStaleCloudSync()
+        return
+      }
+      if (!saved && direction !== 'download') {
         finishCloudOperation(cloudOperation, 'error', '保存云配置失败')
         appendCloudSyncLog({
           direction,
@@ -3891,36 +4250,52 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       }
     }
 
-    const localPayload = clonePayload(vault.value)
+    let localPayload = clonePayload(vault.value)
     markCloudOperation(cloudOperation, 'reading-remote', '正在读取云端保险库')
     const client = createRemoteVaultStore()
-    const preferred = await readCloudVaultForSync(
-      client,
-      normalizeObjectName(settings.oss.objectName),
-      requestedObjectName
+    const preferred = await withCloudSyncTimeout(
+      readCloudVaultForSync(
+        client,
+        normalizeObjectName(settings.oss.objectName),
+        requestedObjectName
+      ),
+      '读取云端保险库'
     )
-    if (!sessionIsCurrent()) return
+    if (!sessionIsCurrent()) {
+      finishStaleCloudSync()
+      return
+    }
     objectName = preferred.objectName
     const response = preferred.response
-    const ancestorPayload = await loadCloudSyncAncestor(objectName)
-    if (!sessionIsCurrent()) return
+    const ancestorPayload = await withCloudSyncTimeout(loadCloudSyncAncestor(objectName), '读取同步检查点')
+    if (!sessionIsCurrent()) {
+      finishStaleCloudSync()
+      return
+    }
 
     markCloudOperation(cloudOperation, 'decrypting', '正在校验云端保险库')
-    const remoteSnapshot = await loadVerifiedCloudRemote({
+    const remoteSnapshot = await withCloudSyncTimeout(loadVerifiedCloudRemote({
       direction,
       automatic: options.automatic === true,
       requestedObjectName,
       objectName,
       preferred,
       ancestorPayload,
+      remoteFingerprint: response.revision,
       operation: cloudOperation,
       sessionIsCurrent,
       operationGateKeys
-    })
-    if (!remoteSnapshot || !sessionIsCurrent()) return
+    }), '校验云端保险库')
+    if (!remoteSnapshot || !sessionIsCurrent()) {
+      if (!sessionIsCurrent()) finishStaleCloudSync()
+      return
+    }
+    if (remoteSnapshot.localPayload) localPayload = clonePayload(remoteSnapshot.localPayload)
     const remotePayload = remoteSnapshot.payload
     const remoteEnvelopeText = remoteSnapshot.envelopeText
+    const remoteEncryptionEnvelopeText = remoteSnapshot.sourceEnvelopeText
     const usedAlternateRemotePassword = remoteSnapshot.usedAlternatePassword
+    const encryptionBindingAdopted = remoteSnapshot.encryptionBindingAdopted
 
 
     markCloudOperation(cloudOperation, 'building-diff', '正在计算两端差异')
@@ -3933,7 +4308,10 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       pullStrategy: options.automatic ? 'integrate' : 'snapshot',
       fingerprint: cloudSyncPayloadFingerprint
     })
-    if (!sessionIsCurrent()) return
+    if (!sessionIsCurrent()) {
+      finishStaleCloudSync()
+      return
+    }
     if (!planResult.ok) {
       finishCloudOperation(cloudOperation, 'error', planResult.message)
       backupStatus.value = planResult.message
@@ -3962,7 +4340,10 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
     const items = activePlan.items
 
     if (!usedAncestor && direction === 'upload' && await shouldPreferCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)) {
-      if (!sessionIsCurrent()) return
+      if (!sessionIsCurrent()) {
+        finishStaleCloudSync()
+        return
+      }
       const message = '云端数据较新，已停止上传；请先执行下载校验'
       backupStatus.value = message
       appendCloudSyncLog({
@@ -3975,10 +4356,27 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       if (!options.automatic) showToast(message)
       return
     }
-    if (!sessionIsCurrent()) return
+    if (!sessionIsCurrent()) {
+      finishStaleCloudSync()
+      return
+    }
 
+    if (direction === 'upload' && state.passwordless && usedAlternateRemotePassword) {
+      const message = '云端保险库已设置主密码，当前设备未设置密码；直接上传将清除云端密码保护。请先执行【下载】以同步云端主密码。'
+      finishCloudOperation(cloudOperation, 'error', message)
+      backupStatus.value = message
+      appendCloudSyncLog({
+        direction: 'upload',
+        automatic: options.automatic === true,
+        status: 'skipped',
+        objectName,
+        message
+      })
+      if (!options.automatic) showFailToast(message)
+      return
+    }
 
-    const needsSessionKeyRewrite = usedAlternateRemotePassword && effectiveDirection === 'upload'
+    const needsSessionKeyRewrite = usedAlternateRemotePassword
     if (needsSessionKeyRewrite) targetNeedsWrite = true
 
     const configuredObjectName = normalizeObjectName(settings.oss.objectName)
@@ -3996,7 +4394,10 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       items.length > 0 &&
       await shouldSkipAutomaticCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)
     ) {
-      if (!sessionIsCurrent()) return
+      if (!sessionIsCurrent()) {
+        finishStaleCloudSync()
+        return
+      }
       cloudSyncPreview.value = null
       const message = '检测到本地待上传变更，已暂停自动下载；启动时不会自动上传'
       backupStatus.value = message
@@ -4011,7 +4412,10 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       })
       return
     }
-    if (!sessionIsCurrent()) return
+    if (!sessionIsCurrent()) {
+      finishStaleCloudSync()
+      return
+    }
 
     if (!items.length && !targetNeedsWrite) {
       cloudSyncPreview.value = null
@@ -4022,10 +4426,13 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
         remoteEnvelopeText,
         preferred.remoteHeadIds
       )
-      if (!sessionIsCurrent()) return
+      if (!sessionIsCurrent()) {
+        finishStaleCloudSync()
+        return
+      }
       const message = usedAlternateRemotePassword
         ? '校验完成；自动同步仍暂停，请手动上传以更新云端主密码'
-        : direction === 'download' && localChangedSinceBase && !remoteChangedSinceBase
+          : direction === 'download' && localChangedSinceBase && !remoteChangedSinceBase
           ? '云端没有新变更；本地有待上传内容'
           : '当前方向没有待同步变更'
       backupStatus.value = message
@@ -4045,7 +4452,10 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
     const remoteObjectFingerprint = response.status === RemoteVaultStatus.Success && typeof response.content === 'string'
       ? response.revision || await sha256Text(response.content)
       : 'missing'
-    if (!sessionIsCurrent()) return
+    if (!sessionIsCurrent()) {
+      finishStaleCloudSync()
+      return
+    }
     const preview: CloudSyncPreview = {
       direction: effectiveDirection,
       objectName,
@@ -4068,11 +4478,18 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       remoteHeadIds: preferred.remoteHeadIds,
       legacyObjectNames: preferred.legacyObjectNames,
       remoteEnvelopeText,
-      remoteNeedsSessionKeyRewrite: usedAlternateRemotePassword
+      remoteEncryptionEnvelopeText,
+      remoteNeedsSessionKeyRewrite: usedAlternateRemotePassword,
+      alternatePassword: remoteSnapshot.alternatePassword,
+      encryptionBindingAdopted,
+      deviceUnlockWarning: remoteSnapshot.deviceUnlockWarning
     }
     await routePreparedCloudSyncPreview(preview, options, cloudOperation, needsSessionKeyRewrite)
   } catch (error) {
-    if (!sessionIsCurrent()) return
+    if (!sessionIsCurrent()) {
+      finishStaleCloudSync()
+      return
+    }
     const message = error instanceof Error ? error.message : String(error || '同步校验失败')
     finishCloudOperation(cloudOperation, 'error', message)
     if (!options.automatic) showFailToast(message)
@@ -4085,6 +4502,7 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
     })
   } finally {
     finishCloudOperation(cloudOperation)
+    cloudSyncRequestInFlight = false
   }
 }
 
@@ -4098,28 +4516,36 @@ async function routePreparedCloudSyncPreview(
   const items = preview.items
 
   if (!items.length) {
-    await applyCloudSyncItems(preview, [], {
-      operation,
-      clearPreview: true,
-      showSuccess: !options.automatic,
-      showErrors: !options.automatic,
-      successMessage: needsSessionKeyRewrite
-        ? '云端主密码已更新，自动同步已恢复'
-        : '通行密钥状态已同步'
-    })
+    await withCloudSyncTimeout(
+      applyCloudSyncItems(preview, [], {
+        operation,
+        clearPreview: true,
+        showSuccess: !options.automatic,
+        showErrors: !options.automatic,
+        successMessage: needsSessionKeyRewrite
+          ? (preview.direction === 'download' ? '主密码已与云端同步，自动同步已恢复' : '云端主密码已更新，自动同步已恢复')
+          : preview.encryptionBindingAdopted
+            ? '云端加密参数已绑定，后续同步不再重复校验'
+          : '通行密钥状态已同步'
+      }),
+      preview.direction === 'download' ? '应用下载差异' : '应用上传差异'
+    )
     return
   }
 
   if (options.automatic) {
     const autoDecision = resolveAutoCloudSyncDecision(preview)
     if (autoDecision.apply) {
-      await applyCloudSyncItems(preview, items, {
-        operation,
-        clearPreview: true,
-        showSuccess: false,
-        showErrors: false,
-        successMessage: autoDecision.message
-      })
+      await withCloudSyncTimeout(
+        applyCloudSyncItems(preview, items, {
+          operation,
+          clearPreview: true,
+          showSuccess: false,
+          showErrors: false,
+          successMessage: autoDecision.message
+        }),
+        preview.direction === 'download' ? '应用下载差异' : '应用上传差异'
+      )
       return
     }
 
@@ -4161,12 +4587,16 @@ async function applyCloudSyncPreview() {
 
   const cloudOperation = beginCloudOperation('apply', { direction: preview.direction, automatic: preview.automatic })
   try {
-    await applyCloudSyncItems(preview, selectedItems, {
-      operation: cloudOperation,
-      closeReview: true,
-      showSuccess: true,
-      showErrors: true
-    })
+    const applied = await withCloudSyncTimeout(
+      applyCloudSyncItems(preview, selectedItems, {
+        operation: cloudOperation,
+        closeReview: true,
+        showSuccess: true,
+        showErrors: true
+      }),
+      preview.direction === 'download' ? '应用下载差异' : '应用上传差异'
+    )
+    if (applied && cloudSyncPreview.value === preview) closeCloudSyncReview()
   } finally {
     finishCloudOperation(cloudOperation)
   }
@@ -4278,6 +4708,16 @@ function isCloudSyncPreviewCurrent(preview: CloudSyncPreview) {
     preview.cloudScopeId === currentCloudScopeId()
 }
 
+function syncCloudSyncPreviewAfterDownload(preview: CloudSyncPreview, appliedVault: VaultPayload) {
+  if (state.locked || vault.value !== appliedVault) return false
+  // Saving/publishing a download is allowed to refresh the active frontend
+  // session and the OSS settings carried by the local payload. Those changes
+  // belong to this operation and must not invalidate its completion path.
+  preview.sessionGeneration = vaultSession.current()
+  preview.cloudScopeId = currentCloudScopeId()
+  return true
+}
+
 type CloudSyncApplyContext = {
   preview: CloudSyncPreview
   selectedItems: CloudSyncDiffItem[]
@@ -4287,6 +4727,51 @@ type CloudSyncApplyContext = {
   localAlreadyApplied: VaultPayload | null
   previewStats: ReturnType<typeof cloudSyncSelectionStats>
   selectedStats: ReturnType<typeof cloudSyncSelectionStats>
+}
+
+type CloudPasswordRewriteResult =
+  | { ok: true; remoteHeadIds: string[] }
+  | { ok: false; message: string }
+
+async function rewriteCloudEnvelopeWithCurrentSession(
+  preview: CloudSyncPreview,
+  remoteClient: RemoteVaultStore,
+  remotePayload: VaultPayload
+): Promise<CloudPasswordRewriteResult> {
+  const exported = await api.exportVaultBackupForPayload(remotePayload)
+  if (!exported.ok || !exported.data?.content) {
+    return { ok: false, message: exported.message || '无法生成当前设备密钥加密的云端文件' }
+  }
+  if (!isCloudSyncPreviewCurrent(preview)) {
+    return { ok: false, message: '保险库会话或云配置已变化，请重新检测同步差异' }
+  }
+
+  if (preview.managedRemote) {
+    const managedWrite = await writeManagedCloudVault(
+      remoteClient,
+      preview.uploadObjectName,
+      exported.data.content,
+      preview.remoteHeadIds,
+      preview.legacyObjectNames
+    )
+    if (managedWrite.status !== 'success') {
+      return { ok: false, message: managedWrite.message || '云端保险库重新加密失败' }
+    }
+    return {
+      ok: true,
+      remoteHeadIds: managedWrite.commitId ? [managedWrite.commitId] : []
+    }
+  }
+
+  const directWrite = await remoteClient.writeObject(
+    preview.uploadObjectName,
+    exported.data.content,
+    'application/json'
+  )
+  if (directWrite.status !== RemoteVaultStatus.Success) {
+    return { ok: false, message: String(directWrite.content || '云端保险库重新加密失败') }
+  }
+  return { ok: true, remoteHeadIds: [] }
 }
 
 async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: CloudSyncDiffItem[], options: CloudSyncApplyOptions = {}) {
@@ -4376,7 +4861,49 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
 
   if (!publishVaultPayload(appliedVault)) return false
   void collectLocalAttachmentObjects(appliedVault)
-  if (!isCloudSyncPreviewCurrent(preview) || vault.value !== appliedVault) return false
+  if (!syncCloudSyncPreviewAfterDownload(preview, appliedVault)) return false
+
+  let passwordAdopted = false
+  let deviceUnlockWarning = ''
+  let checkpointRemoteHeadIds = preview.remoteHeadIds
+  if (preview.alternatePassword !== undefined) {
+    if (!preview.remoteEncryptionEnvelopeText) {
+      return failCloudSyncApply(context, '云端加密参数来源缺失，请重新校验云端保险库')
+    }
+    markCloudOperation(options.operation || null, 'applying-local', '正在同步主密码到本地')
+    const adoptResult = await api.adoptVaultEncryptionFromEnvelope(
+      preview.remoteEncryptionEnvelopeText,
+      preview.alternatePassword
+    )
+    if (!adoptResult.ok || !adoptResult.data) {
+      const message = `本地主密码同步失败：${adoptResult.message || '无法使用云端主密码重新加密本地保险库'}`
+      return failCloudSyncApply(context, message)
+    }
+    Object.assign(state, adoptResult.data)
+    state.passwordless = preview.alternatePassword === ''
+    deviceUnlockWarning = await rebindDeviceUnlockAfterPasswordChange(preview.alternatePassword)
+    await refreshDeviceUnlockState()
+    const refreshed = await api.getVault()
+    if (!refreshed.ok || !refreshed.data || !publishVaultPayload(refreshed.data)) {
+      return failCloudSyncApply(context, '本地主密码已更新，但无法重新载入本地保险库')
+    }
+    appliedVault = refreshed.data
+    if (!syncCloudSyncPreviewAfterDownload(preview, appliedVault)) return false
+
+    markCloudOperation(options.operation || null, 'writing-remote', '正在用当前设备密钥更新云端保险库')
+    const rewrite = await rewriteCloudEnvelopeWithCurrentSession(
+      preview,
+      remoteClient,
+      preview.remoteBaselinePayload
+    )
+    if (!rewrite.ok) {
+      const message = `本地主密码已更新，但云端保险库重新加密失败：${rewrite.message}`
+      return failCloudSyncApply(context, message)
+    }
+    checkpointRemoteHeadIds = rewrite.remoteHeadIds
+    passwordAdopted = true
+    clearAutoSyncPasswordGate(preview.objectName, preview.uploadObjectName)
+  }
 
   markCloudOperation(options.operation || null, 'recording-checkpoint', '正在记录同步检查点')
   await rememberCloudSyncState(
@@ -4384,18 +4911,25 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
     preview.remoteBaselinePayload,
     appliedVault,
     preview.remoteEnvelopeText,
-    preview.remoteHeadIds
+    checkpointRemoteHeadIds
   )
-  if (!isCloudSyncPreviewCurrent(preview) || vault.value !== appliedVault) return false
+  if (!syncCloudSyncPreviewAfterDownload(preview, appliedVault)) return false
 
   if (selectedEntry.value) {
     selectedEntry.value = findEntry(appliedVault.entries, selectedEntry.value.id)
     if (!selectedEntry.value) clearSelectedEntry()
   }
   selectedCloudObjectName.value = ''
-  const message = options.successMessage || (preview.remoteNeedsSessionKeyRewrite
-    ? '已下载 ' + selectedItems.length + ' 项差异；自动同步仍暂停，请手动上传以更新云端主密码'
-    : '已下载 ' + selectedItems.length + ' 项差异')
+  const passwordAdoptionMessage = passwordAdopted
+    ? (selectedItems.length ? `已下载 ${selectedItems.length} 项差异并同步主密码` : '已同步云端主密码')
+    : preview.encryptionBindingAdopted
+      ? `已下载 ${selectedItems.length} 项差异并绑定云端加密参数`
+    : (preview.remoteNeedsSessionKeyRewrite
+      ? '已下载 ' + selectedItems.length + ' 项差异；自动同步仍暂停，请手动上传以更新云端主密码'
+      : '已下载 ' + selectedItems.length + ' 项差异')
+  const message = options.successMessage || (deviceUnlockWarning
+    ? `${passwordAdoptionMessage}；${deviceUnlockWarning}`
+    : passwordAdoptionMessage)
   backupStatus.value = message
   appendCloudSyncLog({
     direction: 'download',
@@ -4408,12 +4942,16 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
     ...cloudSyncDiffCountsForItems(selectedItems)
   })
   finishCloudSyncApplyPreview(preview, options)
-  if (options.showSuccess) showSuccessToast('下载差异已应用')
+  if (options.showSuccess) showSuccessToast(passwordAdopted ? '下载差异已应用，本地主密码已与云端同步' : '下载差异已应用')
   return true
 }
 
 async function applyCloudUpload(context: CloudSyncApplyContext) {
   const { preview, selectedItems, options, remoteClient, nextPayload, previewStats, selectedStats } = context
+  if (state.passwordless && preview.remoteNeedsSessionKeyRewrite) {
+    const message = '云端保险库已设置主密码，当前设备未设置密码；禁止上传以防止覆盖云端密码。请先执行【下载】以同步主密码。'
+    return failCloudSyncApply(context, message)
+  }
   markCloudOperation(options.operation || null, 'writing-remote', '正在校验并上传附件对象')
   await ensureRemoteAttachmentObjects(
     remoteClient,
@@ -4564,6 +5102,7 @@ function finishCloudSyncApplyPreview(preview: CloudSyncPreview, options: CloudSy
 function closeCloudSyncReview() {
   cloudSyncReviewOpen.value = false
   cloudSyncPreview.value = null
+  cancelCloudOperation()
 }
 
 function showCloudSyncReview() {
@@ -4573,20 +5112,13 @@ function showCloudSyncReview() {
 }
 
 function hideCloudSyncReview() {
-  cloudSyncReviewOpen.value = false
+  closeCloudSyncReview()
 }
 
 async function discardCloudSyncReview() {
   const preview = cloudSyncPreview.value
-  if (!preview) return
-  try {
-    await showConfirmDialog({
-      title: '放弃同步确认',
-      message: '本次差异不会应用，也不会删除两端数据。之后可以重新检测生成新的同步差异。',
-      confirmButtonText: '放弃本次',
-      confirmButtonColor: '#ee0a24'
-    })
-  } catch {
+  if (!preview) {
+    closeCloudSyncReview()
     return
   }
   const stats = cloudSyncSelectionStats(preview.items)
@@ -4602,6 +5134,7 @@ async function discardCloudSyncReview() {
   })
   backupStatus.value = '已放弃本次同步差异'
   closeCloudSyncReview()
+  showToast('已放弃本次同步差异')
 }
 
 function hasPendingCloudSyncReview() {
@@ -4656,8 +5189,17 @@ function resolveAutoCloudSyncDecision(preview: CloudSyncPreview) {
 }
 
 function appendCloudSyncLog(input: Partial<CloudSyncLogEntry> & Pick<CloudSyncLogEntry, 'direction' | 'status' | 'objectName' | 'message'>) {
+  const replacementIndex = input.status === 'started' || input.automatic === true
+    ? -1
+    : cloudSyncLogs.value.findIndex((item) => (
+      (item.status === 'started' || item.status === 'review') &&
+      !item.automatic &&
+      item.direction === input.direction &&
+      normalizeObjectName(item.objectName) === normalizeObjectName(input.objectName)
+    ))
+  const existing = replacementIndex >= 0 ? cloudSyncLogs.value[replacementIndex] : null
   const entry: CloudSyncLogEntry = {
-    id: makeId(),
+    id: existing?.id || makeId(),
     at: Date.now(),
     direction: input.direction,
     automatic: input.automatic === true,
@@ -4670,7 +5212,13 @@ function appendCloudSyncLog(input: Partial<CloudSyncLogEntry> & Pick<CloudSyncLo
     selected: Number(input.selected || 0),
     total: Number(input.total || 0)
   }
-  cloudSyncLogs.value = [entry, ...cloudSyncLogs.value].slice(0, cloudSyncLogLimit.value)
+  if (replacementIndex >= 0) {
+    const nextLogs = [...cloudSyncLogs.value]
+    nextLogs[replacementIndex] = entry
+    cloudSyncLogs.value = nextLogs.slice(0, cloudSyncLogLimit.value)
+  } else {
+    cloudSyncLogs.value = [entry, ...cloudSyncLogs.value].slice(0, cloudSyncLogLimit.value)
+  }
   persistCloudSyncLogs()
 }
 
@@ -4734,6 +5282,18 @@ function clearCloudSyncLogs() {
   cloudSyncLogs.value = []
   persistCloudSyncLogs()
   showToast('同步记录已清空')
+}
+
+async function handleResolveSyncLog(item: CloudSyncLogEntry) {
+  if (hasPendingCloudSyncReview()) {
+    showCloudSyncReview()
+    return
+  }
+  if (item.direction === 'download' || item.message?.includes('云端保险库主密码与当前会话不同')) {
+    await startCloudDownload({ objectName: item.objectName })
+    return
+  }
+  await startCloudUpload({ objectName: item.objectName })
 }
 
 async function shouldPreferCloudDownload(
@@ -4812,13 +5372,19 @@ async function rememberCloudSyncState(
     }
     localStorage.setItem(CLOUD_SYNC_STATE_KEY, JSON.stringify(state))
     if (ancestorEnvelope) {
-      await writeSyncCheckpoint({
-        key: cloudSyncStateKey(objectName),
-        envelope: ancestorEnvelope,
-        payloadFingerprint: remoteFingerprint,
-        remoteHeadIds,
-        recordedAt: Date.now()
-      })
+      // The remote envelope may have been encrypted on another device with a
+      // different KDF salt. Checkpoints are read with the current session key,
+      // so always re-encrypt the verified ancestor locally before persisting it.
+      const localEnvelope = await api.exportVaultBackupForPayload(remotePayload)
+      if (localEnvelope.ok && localEnvelope.data?.content) {
+        await writeSyncCheckpoint({
+          key: cloudSyncStateKey(objectName),
+          envelope: localEnvelope.data.content,
+          payloadFingerprint: remoteFingerprint,
+          remoteHeadIds,
+          recordedAt: Date.now()
+        })
+      }
     }
   } catch {
     // Sync state is only a safety hint; failing to persist it must not block vault use.
@@ -5162,6 +5728,24 @@ function finishCloudOperation(
 
 function cancelCloudOperation() {
   cloudSyncRuntime.cancel()
+}
+
+async function withCloudSyncTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timer = 0
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => {
+          cancelCloudOperation()
+          resolveCloudPasswordPrompt(null)
+          reject(new Error(`${label}超时（60 秒），请检查 OSS 配置和网络连接后重试`))
+        }, CLOUD_SYNC_VALIDATION_TIMEOUT_MS)
+      })
+    ])
+  } finally {
+    if (timer) window.clearTimeout(timer)
+  }
 }
 
 type CloudVaultRead = {

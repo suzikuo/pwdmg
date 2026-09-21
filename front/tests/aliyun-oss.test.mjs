@@ -5,9 +5,12 @@ import test from 'node:test'
 import { AliyunOSSAPI, APIResponseStatus } from '../src/services/aliyunOss.ts'
 
 const originalFetch = globalThis.fetch
+const originalDOMParser = globalThis.DOMParser
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch
+  if (originalDOMParser) globalThis.DOMParser = originalDOMParser
+  else delete globalThis.DOMParser
 })
 
 function createClient() {
@@ -60,6 +63,40 @@ test('immutable uploads use the OSS forbid-overwrite contract and surface collis
 
   assert.equal(requestHeaders.get('x-oss-forbid-overwrite'), 'true')
   assert.equal(response.status, APIResponseStatus.Conflict)
+})
+
+test('parses namespaced OSS list responses so immutable sync heads are discoverable', async () => {
+  const element = (name, text = '', children = []) => ({
+    textContent: text,
+    getElementsByTagNameNS: (_namespace, localName) => [
+      ...(name === localName ? [element(name, text, children)] : []),
+      ...children.flatMap((child) => child.getElementsByTagNameNS(_namespace, localName))
+    ],
+    getElementsByTagName: (localName) => [
+      ...(name === localName ? [element(name, text, children)] : []),
+      ...children.flatMap((child) => child.getElementsByTagName(localName))
+    ]
+  })
+  const contents = element('Contents', '', [
+    element('Key', 'vault.json.sync-v3/commits/0000000000001-client.json'),
+    element('Size', '42'),
+    element('LastModified', '2026-09-20T10:00:00.000Z')
+  ])
+  const document = element('ListBucketResult', '', [
+    contents,
+    element('IsTruncated', 'false')
+  ])
+  globalThis.DOMParser = class {
+    parseFromString() {
+      return document
+    }
+  }
+  globalThis.fetch = async () => new Response('<ListBucketResult xmlns="http://doc.oss-cn-hangzhou.aliyuncs.com" />', { status: 200 })
+
+  const response = await createClient().listFiles('vault.json.sync-v3/commits/', 100)
+
+  assert.equal(response.status, APIResponseStatus.Success)
+  assert.equal(response.content[0].name, 'vault.json.sync-v3/commits/0000000000001-client.json')
 })
 
 test('binds requests to the active vault-session abort signal', async () => {

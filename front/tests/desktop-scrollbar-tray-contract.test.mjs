@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 const styles = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8')
-const mainSource = readFileSync(new URL('../../main.py', import.meta.url), 'utf8')
-const shellSource = readFileSync(new URL('../../pwdmg_core/desktop_shell.py', import.meta.url), 'utf8')
+const desktopMainSource = readFileSync(new URL('../../src-tauri/src/main.rs', import.meta.url), 'utf8')
+const desktopBridgeSource = readFileSync(new URL('../../src-tauri/src/bridge.rs', import.meta.url), 'utf8')
+const desktopTrayComposableSource = readFileSync(new URL('../src/composables/useDesktopTraySettings.ts', import.meta.url), 'utf8')
 const settingsSource = readFileSync(new URL('../src/components/settings/SettingsDrawer.vue', import.meta.url), 'utf8')
 const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
 const apiSource = readFileSync(new URL('../src/services/api.ts', import.meta.url), 'utf8')
@@ -24,15 +25,10 @@ test('desktop scrollbars use a compact shared style without exposing utility scr
 })
 
 test('tray reset command moves to the default coordinates and persists them', () => {
-  assert.match(shellSource, /RESET_POSITION_COMMAND = "reset-position"/)
-  assert.match(shellSource, /"重置窗口位置"/)
-  assert.match(shellSource, /command_reset_position:\s*RESET_POSITION_COMMAND/)
-  const resetStart = mainSource.indexOf('def reset_desktop_window_position')
-  const resetBody = mainSource.slice(resetStart, mainSource.indexOf('def lock_desktop_vault'))
-  assert.ok(resetStart >= 0)
-  assert.match(resetBody, /window\.move\(target_x, target_y\)/)
-  assert.match(resetBody, /state\.reset_position\(target_x, target_y\)/)
-  assert.match(mainSource, /reset_position=reset_desktop_window_position/)
+  assert.match(desktopMainSource, /"reset_position"/)
+  assert.match(desktopMainSource, /"重置窗口位置"/)
+  assert.match(desktopMainSource, /window\.set_size/)
+  assert.match(desktopMainSource, /window\.center\(\)/)
 })
 
 test('desktop settings expose an immediate tray switch and close behavior', () => {
@@ -50,17 +46,24 @@ test('desktop tray settings use the native device config instead of vault settin
   assert.match(apiSource, /callDesktopApi<DesktopTraySettings>\('getDesktopTraySettings'\)/)
   assert.match(apiSource, /callDesktopApi<DesktopTraySettings>\('setDesktopTraySettings', trayEnabled, closeBehavior\)/)
   assert.match(traySettingsSource, /api\.setDesktopTraySettings\(trayEnabled, closeBehavior\)/)
-  assert.match(mainSource, /"tray_enabled": tray_enabled/)
-  assert.match(mainSource, /"close_behavior": close_behavior/)
-  assert.match(mainSource, /state\.should_minimize_on_close\(\)/)
-  assert.match(shellSource, /message == tray_control_message/)
+  assert.match(desktopBridgeSource, /"tray_enabled"/)
+  assert.match(desktopBridgeSource, /"close_behavior"/)
+  assert.match(desktopMainSource, /configured_close_behavior/)
+  assert.match(desktopMainSource, /"minimize-to-tray"/)
+})
+
+test('desktop close exits the process unless tray minimization was explicitly selected', () => {
+  assert.match(desktopBridgeSource, /DEFAULT_CLOSE_BEHAVIOR: &str = "exit"/)
+  assert.match(desktopBridgeSource, /"close_behavior_user_set"/)
+  assert.match(desktopBridgeSource, /configured_close_behavior/)
+  assert.match(desktopMainSource, /let behavior = configured_close_behavior\(&cfg\)/)
+  assert.match(desktopMainSource, /window_clone\.app_handle\(\)\.exit\(0\)/)
+  assert.match(desktopTrayComposableSource, /DEFAULT_CLOSE_BEHAVIOR: DesktopCloseBehavior = 'exit'/)
+  assert.match(settingsSource, /props\.desktopTraySettings\?\.closeBehavior \|\| 'exit'/)
 })
 
 test('desktop startup is single-instance and reopens the existing window', () => {
-  assert.match(shellSource, /class WindowsSingleInstance:/)
-  assert.match(shellSource, /CreateMutexW\(None, False, self\.mutex_name\)/)
-  assert.match(shellSource, /RegisterWindowMessageW\(SHOW_MAIN_MESSAGE_NAME\)/)
-  assert.match(shellSource, /dispatch\(SHOW_MAIN_COMMAND\)/)
-  assert.match(mainSource, /if not instance\.acquire\(\):\s*instance\.notify_existing\(\)\s*return/s)
-  assert.match(mainSource, /finally:\s*instance\.release\(\)/s)
+  assert.match(desktopMainSource, /tauri_plugin_single_instance/)
+  assert.match(desktopMainSource, /window\.show\(\)/)
+  assert.match(desktopMainSource, /window\.set_focus\(\)/)
 })

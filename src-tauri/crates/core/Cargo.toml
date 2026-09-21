@@ -1,0 +1,31 @@
+[package]
+name = "pwdmg-core"
+version = "2.0.79"
+edition = "2021"
+
+[dependencies]
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", features = ["hmac"] }
+sha2 = "0.10"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zeroize = { version = "1.8", features = ["derive"] }
+uuid = { version = "1.10", features = ["v4", "fast-rng"] }
+rand = "0.8"
+regex = "1.10"
+directories = "5.0"
+url = "2.5"
+chrono = "0.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+winreg = "0.52"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Security_Credentials_UI",
+] }

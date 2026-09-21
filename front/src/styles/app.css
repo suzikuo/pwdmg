@@ -1920,6 +1920,20 @@ body.is-entry-pointer-drag .entry-drop-zone {
   background: #b45309;
 }
 
+.cloud-sync-log-item.is-actionable {
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.cloud-sync-log-item.is-actionable:hover {
+  border-color: var(--brand, #1989fa);
+}
+
+.cloud-sync-log-action {
+  margin-top: 4px;
+  justify-self: end;
+}
+
 @media (max-width: 520px) {
   .cloud-sync-log-head,
   .cloud-sync-log-item {
@@ -2029,6 +2043,8 @@ body.is-entry-pointer-drag .entry-drop-zone {
   grid-template-columns: 18px auto minmax(0, 1fr);
   align-items: center;
   gap: 9px;
+  cursor: pointer;
+  user-select: none;
 }
 
 .cloud-sync-item input,
@@ -2471,6 +2487,15 @@ body.is-entry-pointer-drag .entry-drop-zone {
   font-size: var(--app-font-sm);
 }
 
+.drawer-build-marker {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: calc(var(--app-font-sm) * 0.9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.02em;
+}
+
 .drawer-nav {
   display: grid;
   gap: 4px;
@@ -2742,11 +2767,16 @@ body.is-entry-pointer-drag .entry-drop-zone {
 }
 
 .password-popup {
+  z-index: 3500 !important;
   width: min(92vw, 380px);
   max-height: min(82vh, 520px);
   max-height: min(82dvh, 520px);
   overflow: hidden;
   background: var(--panel-bg);
+}
+
+.password-change-confirm-dialog {
+  z-index: 5000 !important;
 }
 
 .password-popup-inner {

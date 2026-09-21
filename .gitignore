@@ -1,4 +1,10 @@
-# Python
+# Rust & Cargo
+target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Python & test tooling
 __pycache__/
 *.py[cod]
 /.venv/
@@ -14,11 +20,15 @@ __pycache__/
 # Local environment files
 .env
 .env.*
+*.env
+*.env.*
 !.env.example
 !.env.*.example
+!*.env.example
+!*.env.*.example
 
 # Frontend (Node.js, TypeScript, and Vite)
-/front/node_modules/
+**/node_modules/
 /front/dist/
 /front/.vite/
 *.tsbuildinfo
@@ -58,12 +68,29 @@ __pycache__/
 *.backup.json
 *.log
 
-# Signing keys and certificates
+# Signing keys, certificates, and local credentials
 /.update-signing/
 *.jks
 *.keystore
 *.p12
 *.pfx
+*.pem
+*.key
+*.der
+*.crt
+*.cer
+*.csr
+*.p7b
+*.p7c
+*.p8
+*.mobileprovision
+*.provisionprofile
+credentials*.json
+secrets*.json
+client_secret*.json
+service-account*.json
+/.credentials/
+/.secrets/
 !/android/app/debug.keystore
 
 # Operating system metadata
@@ -71,4 +98,9 @@ __pycache__/
 Thumbs.db
 Desktop.ini
 
+# Crash dumps and local diagnostics
+*.dmp
+*.dump
+
+# Task notes are local working records
 TASK_PLAN*

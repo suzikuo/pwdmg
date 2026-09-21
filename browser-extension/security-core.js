@@ -11,6 +11,58 @@
   const CARD_CODE_RE = /(^|[^a-z0-9])(cvv|cvc|card[\s_-]*security|card[\s_-]*code)(?=$|[^a-z0-9])/i
   const AUTOFILL_MATCH_MODES = new Set(['base-domain', 'exact-host', 'subdomain', 'url-prefix', 'never'])
 
+  const MULTIPART_TLD_SET = new Set([
+    'co.uk', 'org.uk', 'me.uk', 'net.uk', 'ltd.uk', 'plc.uk', 'ac.uk', 'gov.uk',
+    'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn', 'ac.cn', 'mil.cn',
+    'com.hk', 'org.hk', 'edu.hk', 'gov.hk', 'net.hk', 'idv.hk',
+    'com.tw', 'org.tw', 'gov.tw', 'edu.tw', 'net.tw', 'idv.tw', 'club.tw',
+    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'asn.au', 'id.au',
+    'co.jp', 'ne.jp', 'or.jp', 'go.jp', 'ac.jp', 'ed.jp', 'ad.jp', 'gr.jp', 'lg.jp',
+    'co.kr', 'ne.kr', 'or.kr', 're.kr', 'pe.kr', 'go.kr', 'mil.kr', 'ac.kr',
+    'com.sg', 'net.sg', 'org.sg', 'gov.sg', 'edu.sg', 'per.sg',
+    'com.my', 'net.my', 'org.my', 'gov.my', 'edu.my', 'mil.my',
+    'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
+    'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in', 'ind.in', 'nic.in', 'ac.in', 'edu.in', 'res.in', 'gov.in',
+    'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz', 'edu.nz',
+    'co.za', 'net.za', 'org.za', 'web.za', 'gov.za', 'ac.za', 'edu.za',
+    'com.mx', 'net.mx', 'org.mx', 'edu.mx', 'gob.mx',
+    'com.ru', 'net.ru', 'org.ru', 'pp.ru',
+    'github.io', 'gitlab.io', 'pages.dev', 'vercel.app', 'azurewebsites.net', 'herokuapp.com', 'cloudfront.net'
+  ])
+
+  const SECONDARY_TOKENS = new Set([
+    'com', 'co', 'net', 'ne', 'org', 'or', 'gov', 'go', 'gob', 'edu', 'ed',
+    'ac', 'mil', 'biz', 'info', 'ltd', 'plc', 'gen', 'firm', 'ind', 'nic',
+    'res', 'asn', 'idv', 'id', 'web', 'pp', 'asso'
+  ])
+
+  const CN_PROVINCES = new Set([
+    'bj', 'sh', 'tj', 'cq', 'he', 'sx', 'nm', 'ln', 'jl', 'hl', 'js', 'zj',
+    'ah', 'fj', 'jx', 'sd', 'ha', 'hb', 'hn', 'gd', 'gx', 'hi', 'sc', 'gz',
+    'yn', 'xz', 'sn', 'gs', 'qh', 'nx', 'xj', 'tw', 'hk', 'mo'
+  ])
+
+  function extractBaseDomain(rawHost) {
+    if (!rawHost) return ''
+    let host = String(rawHost).trim().toLowerCase()
+    host = host.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0].split('@').pop().split(':')[0]
+    host = host.replace(/^\.+|\.+$/g, '')
+    if (!host) return ''
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':') || host.startsWith('[')) return host
+    if (!host.includes('.')) return host
+    const labels = host.split('.').filter(Boolean)
+    const tld = labels[labels.length - 1]
+    if (['localhost', 'local', 'internal', 'lan'].includes(tld)) return tld
+    if (labels.length <= 2) return host
+    const sld = labels[labels.length - 2]
+    const twoPartSuffix = `${sld}.${tld}`
+    const isMultiPart = MULTIPART_TLD_SET.has(twoPartSuffix) || (tld.length === 2 && (SECONDARY_TOKENS.has(sld) || (tld === 'cn' && CN_PROVINCES.has(sld))))
+    if (isMultiPart) {
+      return labels.length >= 3 ? labels.slice(-3).join('.') : host
+    }
+    return labels.slice(-2).join('.')
+  }
+
   function normalizeHost(value = '') {
     const raw = String(value || '').trim()
     if (!raw) return ''
@@ -39,12 +91,19 @@
     const domain = normalizeSavedDomain(savedDomain)
     if (!host || !domain) return false
     if (domain.includes('*')) {
+      if (domain.startsWith('*.') && !domain.slice(2).includes('*')) {
+        const base = domain.slice(2)
+        return host === base || host.endsWith(`.${base}`)
+      }
       const pattern = domain
         .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-        .replace(/\*/g, '[^.]*')
+        .replace(/\*/g, '.*')
       return new RegExp(`^${pattern}$`, 'i').test(host)
     }
-    return host === domain || host.endsWith(`.${domain}`)
+    if (host === domain || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`)) return true
+    const hostBase = extractBaseDomain(host)
+    const domainBase = extractBaseDomain(domain)
+    return Boolean(hostBase && domainBase && hostBase === domainBase)
   }
 
   function normalizeAutofillMatchMode(value = '') {
@@ -84,14 +143,22 @@
     const domain = normalizeSavedDomain(savedRule, normalizedMode === 'base-domain')
     if (!host || !domain) return false
     if (domain.includes('*')) {
+      if (domain.startsWith('*.') && !domain.slice(2).includes('*')) {
+        const base = domain.slice(2)
+        return host === base || host.endsWith(`.${base}`)
+      }
       const pattern = domain
         .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-        .replace(/\*/g, '[^.]*')
+        .replace(/\*/g, '.*')
       return new RegExp(`^${pattern}$`, 'i').test(host)
     }
     if (normalizedMode === 'exact-host') return host === domain
     if (normalizedMode === 'subdomain') return host !== domain && host.endsWith(`.${domain}`)
-    return host === domain || host.endsWith(`.${domain}`)
+
+    if (host === domain || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`)) return true
+    const hostBase = extractBaseDomain(host)
+    const domainBase = extractBaseDomain(domain)
+    return Boolean(hostBase && domainBase && hostBase === domainBase)
   }
 
   function entryMatchesHostname(entry, hostname = '') {
@@ -177,6 +244,7 @@
     domainMatches,
     entryMatchesPage,
     entryMatchesHostname,
+    extractBaseDomain,
     normalizeAutofillMatchMode,
     normalizeHost,
     normalizeSavedDomain,

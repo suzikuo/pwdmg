@@ -8,7 +8,7 @@ const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8
 const apiSource = readFileSync(new URL('../src/services/api.ts', import.meta.url), 'utf8')
 const authSource = readFileSync(new URL('../src/components/auth/AuthScreen.vue', import.meta.url), 'utf8')
 const settingsSource = readFileSync(new URL('../src/components/settings/SettingsDrawer.vue', import.meta.url), 'utf8')
-const mainSource = readFileSync(new URL('../../main.py', import.meta.url), 'utf8')
+const bridgeSource = readFileSync(new URL('../../src-tauri/src/bridge.rs', import.meta.url), 'utf8')
 
 test('imports device material as a non-extractable bounded AES key', async () => {
   const material = await importVaultKeyMaterial(
@@ -23,8 +23,8 @@ test('imports device material as a non-extractable bounded AES key', async () =>
   await assert.rejects(() => importVaultKeyMaterial(Buffer.alloc(32).toString('base64'), Buffer.alloc(16).toString('base64'), 1))
 })
 
-test('quick unlock remains desktop-only and validates the current envelope', () => {
-  assert.match(apiSource, /if \(!useDesktopStorage\(\)\) return fail\('DESKTOP_ONLY'/)
+test('quick unlock validates the current envelope and checks platform support', () => {
+  assert.match(apiSource, /if \(!useDesktopStorage\(\)\) return fail\('UNSUPPORTED_PLATFORM'/)
   assert.match(apiSource, /readDeviceUnlockKey/)
   assert.match(apiSource, /decryptPayloadWithKey\(importedKey, envelope\)/)
   assert.doesNotMatch(apiSource.slice(apiSource.indexOf('async function quickUnlock'), apiSource.indexOf('async function openExternalUrl')), /localStorage/)
@@ -40,8 +40,8 @@ test('settings and lock screen expose explicit device unlock controls', () => {
 })
 
 test('desktop bridge exposes only bounded quick-unlock commands', () => {
-  assert.match(mainSource, /def getDeviceUnlockState\(/)
-  assert.match(mainSource, /def enableDeviceUnlock\(self, password: str, reauthSeconds: int\)/)
-  assert.match(mainSource, /def disableDeviceUnlock\(/)
-  assert.match(mainSource, /def readDeviceUnlockKey\(/)
+  assert.match(bridgeSource, /"getDeviceUnlockState"/)
+  assert.match(bridgeSource, /"enableDeviceUnlock"/)
+  assert.match(bridgeSource, /"disableDeviceUnlock"/)
+  assert.match(bridgeSource, /"readDeviceUnlockKey"/)
 })

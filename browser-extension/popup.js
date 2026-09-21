@@ -4,6 +4,7 @@ const siteHostEl = document.getElementById('siteHost')
 const stateBadgeEl = document.getElementById('stateBadge')
 const form = document.getElementById('unlockForm')
 const passwordInput = document.getElementById('password')
+const quickUnlockButton = document.getElementById('quickUnlockButton')
 const lockButton = document.getElementById('lockButton')
 const refreshButton = document.getElementById('refreshButton')
 const showPanelButton = document.getElementById('showPanelButton')
@@ -271,7 +272,7 @@ function shortcutKeyFromEvent(event) {
   return aliases[event.code] || ''
 }
 
-function showLocked(message = '请输入主密码解锁插件。') {
+async function showLocked(message = '请输入主密码解锁插件。') {
   setBadge('已锁定', 'locked')
   statusEl.textContent = message
   matchInfoEl.textContent = ''
@@ -279,12 +280,17 @@ function showLocked(message = '请输入主密码解锁插件。') {
   form.hidden = false
   lockButton.hidden = true
   showPanelButton.hidden = true
+  if (quickUnlockButton) {
+    const duState = await send({ type: 'MYPWDMG_DEVICE_UNLOCK_STATE' }).catch(() => null)
+    quickUnlockButton.hidden = !(duState?.ok && duState?.data?.enabled)
+  }
   window.setTimeout(() => passwordInput.focus(), 20)
 }
 
 function showUnlocked() {
   setBadge('已解锁', 'unlocked')
   form.hidden = true
+  if (quickUnlockButton) quickUnlockButton.hidden = true
   lockButton.hidden = false
   showPanelButton.hidden = !activeHost
 }
@@ -420,6 +426,10 @@ async function loadState() {
 form.addEventListener('submit', async (event) => {
   event.preventDefault()
   await unlock(passwordInput.value, false)
+})
+
+quickUnlockButton?.addEventListener('click', async () => {
+  await unlock('', false)
 })
 
 lockButton.addEventListener('click', async () => {

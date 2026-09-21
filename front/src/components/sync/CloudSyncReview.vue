@@ -32,17 +32,17 @@
             class="cloud-sync-item"
             :class="`is-${item.changeType}`"
           >
-            <label class="cloud-sync-item-head">
-              <input :checked="isItemChecked(item)" type="checkbox" @change="emit('item-checked', item, readCheckboxChecked($event))" />
+            <div class="cloud-sync-item-head" role="checkbox" :aria-checked="isItemChecked(item)" @click="toggleItem(item)">
+              <input :checked="isItemChecked(item)" type="checkbox" @click.stop.prevent="toggleItem(item)" />
               <span class="cloud-sync-tag">{{ changeLabel(item.changeType) }}</span>
               <span class="cloud-sync-copy">
                 <strong>{{ item.path }}</strong>
                 <small>{{ itemSummary(item) }}</small>
               </span>
-            </label>
+            </div>
             <div v-if="item.changeType === 'modified' && item.details.length" class="cloud-sync-field-list">
-              <label v-for="detail in item.details" :key="detail.key" class="cloud-sync-field">
-                <input :checked="detail.checked" type="checkbox" @change="emit('detail-checked', item, detail, readCheckboxChecked($event))" />
+              <div v-for="detail in item.details" :key="detail.key" class="cloud-sync-field" role="checkbox" :aria-checked="detail.checked" @click="toggleDetail(item, detail)">
+                <input :checked="detail.checked" type="checkbox" @click.stop.prevent="toggleDetail(item, detail)" />
                 <span class="cloud-sync-field-copy">
                   <strong>{{ detail.label }}</strong>
                   <small>
@@ -54,7 +54,7 @@
                     <b>{{ detail.baseText }}</b>
                   </small>
                 </span>
-              </label>
+              </div>
             </div>
           </article>
         </div>
@@ -73,7 +73,7 @@
 <script setup lang="ts">
 import type { CloudSyncChangeDetail, CloudSyncDiffItem, CloudSyncPreview } from '../../services/sync/legacyDiff'
 
-defineProps<{
+const props = defineProps<{
   open: boolean
   preview: CloudSyncPreview | null
   title: string
@@ -96,7 +96,12 @@ const emit = defineEmits<{
   apply: []
 }>()
 
-function readCheckboxChecked(event: Event) {
-  return (event.target as HTMLInputElement | null)?.checked === true
+function toggleItem(item: CloudSyncDiffItem) {
+  const nextChecked = !props.isItemChecked(item)
+  emit('item-checked', item, nextChecked)
+}
+
+function toggleDetail(item: CloudSyncDiffItem, detail: CloudSyncChangeDetail) {
+  emit('detail-checked', item, detail, !detail.checked)
 }
 </script>

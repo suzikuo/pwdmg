@@ -688,11 +688,17 @@ function queryHostnames(hostname = '') {
   return candidates
 }
 
+function entryMatchesPageOrLegacy(entry, hostname = '', pageUrl = '') {
+  if (!entry || typeof entry !== 'object') return false
+  if (!Array.isArray(entry.domains)) return true
+  return Security.entryMatchesPage(entry, hostname, pageUrl)
+}
+
 function filterMatchesForPage(response, hostname = '', pageUrl = '') {
   if (!response?.ok || !Array.isArray(response.data)) return response
   return {
     ...response,
-    data: response.data.filter((entry) => Security.entryMatchesPage(entry, hostname, pageUrl))
+    data: response.data.filter((entry) => entryMatchesPageOrLegacy(entry, hostname, pageUrl))
   }
 }
 
@@ -763,14 +769,17 @@ function matchingEntry(response, entryId, hostname, pageUrl = '') {
   if (!requestedId) return null
   return response.data.find((entry) => (
     String(entry?.id || '') === requestedId
-    && Security.entryMatchesPage(entry, hostname, pageUrl)
+    && entryMatchesPageOrLegacy(entry, hostname, pageUrl)
   )) || null
 }
 
 function payloadMatchesEntry(payload, entry) {
   if (!payload || !entry) return false
-  return ['id', 'title', 'username', 'email', 'phone', 'loginAccountSource']
-    .every((key) => String(payload[key] ?? '') === String(entry[key] ?? ''))
+  const coreKeys = ['id', 'title', 'username', 'email']
+  if (!coreKeys.every((key) => String(payload[key] ?? '') === String(entry[key] ?? ''))) return false
+  if (entry.phone !== undefined && String(payload.phone ?? '') !== String(entry.phone ?? '')) return false
+  if (entry.loginAccountSource !== undefined && String(payload.loginAccountSource ?? '') !== String(entry.loginAccountSource ?? '')) return false
+  return true
 }
 
 async function authorizeFill(entryId, sender, acknowledgedRisks = []) {
@@ -1206,6 +1215,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return
     }
     if (message?.type === 'MYPWDMG_STATE') {
+      clearQueryCache()
       sendResponse(await nativeCall('getState'))
       return
     }
@@ -1215,6 +1225,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === 'MYPWDMG_SET_AUTO_SETTINGS') {
       sendResponse({ ok: true, data: await setAutoSettings(message.settings || {}) })
+      return
+    }
+    if (message?.type === 'MYPWDMG_DEVICE_UNLOCK_STATE') {
+      sendResponse(await nativeCall('getDeviceUnlockState'))
+      return
+    }
+    if (message?.type === 'MYPWDMG_ENABLE_DEVICE_UNLOCK') {
+      const resp = await nativeCall('enableDeviceUnlock', {
+        password: message.password || '',
+        reauthSeconds: message.reauthSeconds || 0,
+      })
+      if (resp.ok) clearQueryCache()
+      sendResponse(resp)
+      return
+    }
+    if (message?.type === 'MYPWDMG_DISABLE_DEVICE_UNLOCK') {
+      const resp = await nativeCall('disableDeviceUnlock')
+      sendResponse(resp)
       return
     }
     sendResponse({ ok: false, code: 'UNKNOWN_MESSAGE', message: 'Unknown extension message.' })

@@ -10,6 +10,7 @@ export const APIResponseStatus = {
 } as const
 
 export const MAX_OSS_OBJECT_BYTES = 16 * 1024 * 1024
+const OSS_REQUEST_TIMEOUT_MS = 30_000
 
 export type APIResponseStatusValue = (typeof APIResponseStatus)[keyof typeof APIResponseStatus]
 
@@ -69,6 +70,36 @@ export class AliyunOSSAPI {
     return new Date().toUTCString()
   }
 
+  private request(input: RequestInfo | URL, init: RequestInit = {}) {
+    const controller = new AbortController()
+    const abortFromParent = () => controller.abort()
+    let timedOut = false
+    if (this.signal?.aborted) controller.abort()
+    else this.signal?.addEventListener('abort', abortFromParent, { once: true })
+    let rejectTimeout: ((reason?: unknown) => void) | null = null
+    const timeoutPromise = new Promise<Response>((_, reject) => {
+      rejectTimeout = reject
+    })
+    const timeoutId = globalThis.setTimeout(() => {
+      timedOut = true
+      controller.abort()
+      rejectTimeout?.(new Error('云端请求超时（30 秒）'))
+    }, OSS_REQUEST_TIMEOUT_MS)
+    const requestSignal = this.signal || controller.signal
+    const request = fetch(input, { ...init, signal: requestSignal })
+      .catch((error) => {
+        if (timedOut) throw new Error('云端请求超时（30 秒）')
+        throw error
+      })
+    return Promise.race([
+      request,
+      timeoutPromise
+    ]).finally(() => {
+      globalThis.clearTimeout(timeoutId)
+      this.signal?.removeEventListener('abort', abortFromParent)
+    })
+  }
+
   async generateSignature(
     method: 'GET' | 'HEAD' | 'PUT',
     contentMD5: string,
@@ -119,7 +150,7 @@ export class AliyunOSSAPI {
         Authorization: `OSS ${this.accessKeyId}:${signature}`,
         ...(options.forbidOverwrite ? { 'x-oss-forbid-overwrite': 'true' } : {})
       }
-      const response = await fetch(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
+      const response = await this.request(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'PUT',
         headers,
         body: fileContent,
@@ -135,7 +166,7 @@ export class AliyunOSSAPI {
         }
       }
 
-      const errorText = await response.text()
+      const errorText = await readTextResponseLimited(response, 64 * 1024)
       if (response.status === 403 && errorText.includes('QuotaExceeded')) {
         return { status: APIResponseStatus.QuotaExceeded, content: '存储空间配额已满' }
       }
@@ -161,7 +192,7 @@ export class AliyunOSSAPI {
       const resource = `/${this.bucketName}/${objectName}`
       const ossHeaders = `x-oss-date:${date}`
       const signature = await this.generateSignature('GET', '', '', date, ossHeaders, resource)
-      const response = await fetch(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
+      const response = await this.request(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'GET',
         signal: this.signal,
         headers: {
@@ -186,7 +217,7 @@ export class AliyunOSSAPI {
       }
       if (response.status === 404) return { status: APIResponseStatus.FileNotExist, content: '文件未找到' }
 
-      const errorText = await response.text()
+      const errorText = await readTextResponseLimited(response, 64 * 1024)
       return { status: APIResponseStatus.Fail, content: formatOssHttpError('下载', response.status, errorText) }
     } catch (error) {
       return { status: APIResponseStatus.Fail, content: formatOssError(error) }
@@ -210,7 +241,7 @@ export class AliyunOSSAPI {
       const resource = `/${this.bucketName}/${objectName}`
       const ossHeaders = `x-oss-date:${date}`
       const signature = await this.generateSignature('HEAD', '', '', date, ossHeaders, resource)
-      const response = await fetch(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
+      const response = await this.request(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'HEAD',
         signal: this.signal,
         headers: {
@@ -243,7 +274,7 @@ export class AliyunOSSAPI {
           }
         }
       }
-      const errorText = await response.text().catch(() => '')
+      const errorText = await readTextResponseLimited(response, 64 * 1024).catch(() => '')
       return { status: APIResponseStatus.Fail, content: `检测失败: ${response.status} ${errorText}` }
     } catch (error) {
       return { status: APIResponseStatus.Fail, content: formatOssError(error) }
@@ -264,7 +295,7 @@ export class AliyunOSSAPI {
       const resource = `/${this.bucketName}/`
       const ossHeaders = `x-oss-date:${date}`
       const signature = await this.generateSignature('GET', '', '', date, ossHeaders, resource)
-      const response = await fetch(`${this.getEndpoint()}/?${query}`, {
+      const response = await this.request(`${this.getEndpoint()}/?${query}`, {
         method: 'GET',
         signal: this.signal,
         headers: {
@@ -273,20 +304,20 @@ export class AliyunOSSAPI {
         }
       })
       if (!response.ok) {
-        const errorText = await response.text()
+        const errorText = await readTextResponseLimited(response, 64 * 1024)
         return { status: APIResponseStatus.Fail, content: `列表失败: ${response.status} ${errorText}` }
       }
 
-      const xmlText = await response.text()
+      const xmlText = await readTextResponseLimited(response, 2 * 1024 * 1024)
       const doc = new DOMParser().parseFromString(xmlText, 'application/xml')
-      const items = [...doc.querySelectorAll('Contents')].map((node) => ({
-        name: node.querySelector('Key')?.textContent || '',
+      const items = xmlElements(doc, 'Contents').map((node) => ({
+        name: xmlElementText(node, 'Key'),
         exists: true,
-        size: Number(node.querySelector('Size')?.textContent || 0),
-        lastModified: node.querySelector('LastModified')?.textContent || ''
+        size: Number(xmlElementText(node, 'Size') || 0),
+        lastModified: xmlElementText(node, 'LastModified')
       })).filter((item) => item.name)
-      const isTruncated = doc.querySelector('IsTruncated')?.textContent?.trim().toLowerCase() === 'true'
-      const nextMarker = isTruncated ? doc.querySelector('NextMarker')?.textContent?.trim() || '' : ''
+      const isTruncated = xmlTextContent(doc, 'IsTruncated').toLowerCase() === 'true'
+      const nextMarker = isTruncated ? xmlTextContent(doc, 'NextMarker') : ''
       if (isTruncated && !nextMarker) {
         return { status: APIResponseStatus.Fail, content: '列表响应缺少分页游标' }
       }
@@ -336,7 +367,8 @@ async function readBlobResponseLimited(response: Response, maxBytes: number) {
 
 async function readResponseBytesLimited(response: Response, maxBytes: number) {
   if (!response.body) {
-    const bytes = new Uint8Array(await response.arrayBuffer())
+    const buffer = await promiseWithTimeout(response.arrayBuffer(), '云端响应读取超时（30 秒）')
+    const bytes = new Uint8Array(buffer)
     if (bytes.byteLength > maxBytes) throw new Error('云端文件超过安全上限')
     return bytes
   }
@@ -344,15 +376,20 @@ async function readResponseBytesLimited(response: Response, maxBytes: number) {
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > maxBytes) {
-      await reader.cancel()
-      throw new Error('云端文件超过安全上限')
+  try {
+    while (true) {
+      const { done, value } = await promiseWithTimeout(reader.read(), '云端响应读取超时（30 秒）')
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        throw new Error('云端文件超过安全上限')
+      }
+      chunks.push(value)
     }
-    chunks.push(value)
+  } catch (error) {
+    await reader.cancel().catch(() => undefined)
+    throw error
   }
 
   const result = new Uint8Array(total)
@@ -362,6 +399,20 @@ async function readResponseBytesLimited(response: Response, maxBytes: number) {
     offset += chunk.byteLength
   }
   return result
+}
+
+async function promiseWithTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  let timer = 0
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = globalThis.setTimeout(() => reject(new Error(message)), OSS_REQUEST_TIMEOUT_MS)
+      })
+    ])
+  } finally {
+    if (timer) globalThis.clearTimeout(timer)
+  }
 }
 
 function formatOssError(error: unknown) {
@@ -382,13 +433,28 @@ function parseOssErrorDetails(errorText: string) {
   if (!errorText.trim()) return { code: '', message: '', requestId: '' }
   try {
     const doc = new DOMParser().parseFromString(errorText, 'application/xml')
-    if (doc.querySelector('parsererror')) throw new Error('Invalid OSS XML response')
+    if (xmlElements(doc, 'parsererror').length) throw new Error('Invalid OSS XML response')
     return {
-      code: doc.querySelector('Code')?.textContent?.trim() || '',
-      message: doc.querySelector('Message')?.textContent?.trim() || '',
-      requestId: doc.querySelector('RequestId')?.textContent?.trim() || ''
+      code: xmlTextContent(doc, 'Code'),
+      message: xmlTextContent(doc, 'Message'),
+      requestId: xmlTextContent(doc, 'RequestId')
     }
   } catch {
     return { code: '', message: errorText.trim().slice(0, 240), requestId: '' }
   }
+}
+
+function xmlElements(document: Document, localName: string): Element[] {
+  const namespaced = [...document.getElementsByTagNameNS('*', localName)]
+  return namespaced.length ? namespaced : [...document.getElementsByTagName(localName)]
+}
+
+function xmlTextContent(document: Document, localName: string): string {
+  return xmlElements(document, localName)[0]?.textContent?.trim() || ''
+}
+
+function xmlElementText(element: Element, localName: string): string {
+  const namespaced = [...element.getElementsByTagNameNS('*', localName)]
+  const match = namespaced[0] || element.getElementsByTagName(localName)[0]
+  return match?.textContent?.trim() || ''
 }

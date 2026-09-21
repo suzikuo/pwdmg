@@ -159,12 +159,19 @@ test('domain authorization accepts only matching saved domains', () => {
   assert.equal(Security.domainMatches('example.com.evil.test', 'example.com'), false)
   assert.equal(Security.domainMatches('evil-example.com', 'example.com'), false)
   assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'accounts.example.com'), true)
-  assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'example.com'), false)
+  assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'] }, 'example.com'), true)
+  assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'], autofillMatchMode: 'exact-host' }, 'example.com'), false)
+  assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'], autofillMatchMode: 'subdomain' }, 'example.com'), false)
+  assert.equal(Security.entryMatchesHostname({ domains: ['accounts.example.com'], autofillMatchMode: 'subdomain' }, 'login.accounts.example.com'), true)
 })
 
 test('autofill rule modes enforce host and URL boundaries', () => {
   const pageUrl = 'https://login.example.com/account/profile'
   assert.equal(Security.entryMatchesPage({ domains: ['example.com'], autofillMatchMode: 'base-domain' }, 'login.example.com', pageUrl), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['sub.example.com'], autofillMatchMode: 'base-domain' }, 'example.com', pageUrl), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['sub.example.com'], autofillMatchMode: 'base-domain' }, 'other.example.com', pageUrl), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['sub.example.com.cn'], autofillMatchMode: 'base-domain' }, 'other.example.com.cn', pageUrl), true)
+  assert.equal(Security.entryMatchesPage({ domains: ['sub.example.com.cn'], autofillMatchMode: 'base-domain' }, 'example.com.cn', pageUrl), true)
   assert.equal(Security.entryMatchesPage({ domains: ['example.com'], autofillMatchMode: 'exact-host' }, 'login.example.com', pageUrl), false)
   assert.equal(Security.entryMatchesPage({ domains: ['example.com'], autofillMatchMode: 'subdomain' }, 'login.example.com', pageUrl), true)
   assert.equal(Security.entryMatchesPage({ domains: ['login.example.com'], autofillMatchMode: 'subdomain' }, 'login.example.com', pageUrl), false)
@@ -280,6 +287,31 @@ test('background falls back to a parent hostname and filters returned entries fo
   assert.deepEqual(response.data.map((entry) => entry.id), ['aws-parent'])
   assert.deepEqual(cachedResponse.data.map((entry) => entry.id), ['aws-parent'])
   assert.deepEqual(calls, ['us-east-2.signin.aws.amazon.com', 'signin.aws.amazon.com'])
+})
+
+test('background retains matches when native host returns entries without domains field', async () => {
+  const legacyEntry = {
+    id: 'legacy-site',
+    title: 'Legacy Site',
+    username: 'bob',
+    email: '',
+    hasPassword: true,
+    hasTotp: false,
+    kind: 'login',
+    matchType: 'domain'
+  }
+  const background = loadBackground((method) => {
+    if (method !== 'queryMatches') return { ok: true, data: {} }
+    return { ok: true, data: [legacyEntry] }
+  }, { id: 8, url: 'https://example.com/login' })
+  const popupSender = {
+    id: 'abcdefghijklmnopabcdefghijklmnop',
+    url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html'
+  }
+
+  const response = await background.dispatch({ type: 'MYPWDMG_QUERY_MATCHES' }, popupSender)
+  assert.equal(response.ok, true)
+  assert.deepEqual(response.data.map((entry) => entry.id), ['legacy-site'])
 })
 
 test('background returns a parent-query failure instead of reporting an empty match list', async () => {

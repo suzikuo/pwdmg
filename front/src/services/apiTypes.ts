@@ -62,6 +62,7 @@ export interface PasswordManagerApiAdapter {
   saveVault: (payload: VaultPayload) => Promise<ApiResult<VaultPayload>>
   deletePasskey: (passkeyId: string) => Promise<ApiResult<VaultPayload>>
   changePassword: (newPassword: string) => Promise<ApiResult<AppState>>
+  adoptVaultEncryptionFromEnvelope: (envelopeText: string, password: string) => Promise<ApiResult<AppState>>
   exportVaultBackup: () => Promise<ApiResult<VaultBackupExport>>
   exportAndroidVaultFile: (displayName: string, contentText: string) => Promise<ApiResult<{ saved: boolean; path: string }>>
   exportVaultBackupForPayload: (payload: VaultPayload) => Promise<ApiResult<VaultBackupExport>>
@@ -87,6 +88,7 @@ export interface PasswordManagerApiAdapter {
   applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
   openExternalUrl: (url: string) => Promise<ApiResult<null>>
   safeExit: () => Promise<ApiResult<null>>
+  showDesktopWindow: () => Promise<void>
 }
 
 export function ok<T>(data: T): ApiResult<T> {

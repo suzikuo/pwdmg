@@ -252,6 +252,30 @@ public final class AndroidPasswordBridge {
     }
 
     @JavascriptInterface
+    public String getDeviceUnlockState() {
+        return result(() -> store.deviceUnlockState());
+    }
+
+    @JavascriptInterface
+    public String enableDeviceUnlock(String password, long reauthSeconds) {
+        return result(() -> store.enableDeviceUnlock(password, reauthSeconds));
+    }
+
+    @JavascriptInterface
+    public String disableDeviceUnlock() {
+        return result(() -> store.disableDeviceUnlock());
+    }
+
+    @JavascriptInterface
+    public String quickUnlock() {
+        return result(() -> {
+            JSONObject res = store.quickUnlock();
+            checkAndHandleAutofillAuth();
+            return res;
+        });
+    }
+
+    @JavascriptInterface
     public String lock() {
         return result(() -> {
             store.lock();
@@ -277,6 +301,11 @@ public final class AndroidPasswordBridge {
     @JavascriptInterface
     public String changePassword(String newPassword) {
         return result(() -> store.changePassword(newPassword));
+    }
+
+    @JavascriptInterface
+    public String adoptVaultEncryptionFromEnvelope(String envelopeText, String password) {
+        return result(() -> store.adoptEncryptionFromEnvelope(envelopeText, password));
     }
 
     @JavascriptInterface

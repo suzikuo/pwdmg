@@ -1,3 +1,9 @@
+if (typeof window.__mypwdmgCleanup === 'function') {
+  try {
+    window.__mypwdmgCleanup()
+  } catch {}
+}
+
 if (!window.__mypwdmgContentScriptLoaded) {
   window.__mypwdmgContentScriptLoaded = true
   const Security = globalThis.MyPwdMgSecurity
@@ -132,6 +138,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function sendMessage(message) {
     if (extensionContextInvalidated) {
+      removeRoot()
       return Promise.resolve({ ok: false, code: 'EXTENSION_CONTEXT_INVALIDATED', message: 'Extension context invalidated.' })
     }
     return new Promise((resolve) => {
@@ -142,6 +149,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
             const messageText = String(error.message || error)
             if (/context invalidated|extension context/i.test(messageText)) {
               extensionContextInvalidated = true
+              removeRoot()
             }
             resolve({ ok: false, code: 'EXTENSION_MESSAGE_ERROR', message: messageText })
             return
@@ -152,6 +160,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
         const messageText = String(error?.message || error)
         if (/context invalidated|extension context/i.test(messageText)) {
           extensionContextInvalidated = true
+          removeRoot()
         }
         resolve({ ok: false, code: 'EXTENSION_MESSAGE_ERROR', message: messageText })
       }
@@ -524,6 +533,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
   function ensureRoot() {
     if (rootHost?.isConnected && rootView) return rootView
 
+    document.querySelectorAll(`#${ROOT_ID}`).forEach((el) => el.remove())
+
     rootHost = document.createElement('div')
     rootHost.id = ROOT_ID
     const shadow = rootHost.attachShadow({ mode: 'closed' })
@@ -538,7 +549,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function removeRoot() {
-    rootHost?.remove()
+    document.querySelectorAll(`#${ROOT_ID}`).forEach((el) => el.remove())
     rootHost = null
     rootView = null
     entryButtonIds = new WeakMap()
@@ -559,14 +570,21 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function isRootOpen() {
-    return Boolean(rootHost?.isConnected && rootView)
+    return Boolean((rootHost?.isConnected && rootView) || document.getElementById(ROOT_ID))
   }
 
   function isManualPanelOpen() {
-    return panelManualMode && isRootOpen() && !pendingSave?.token
+    return isRootOpen() && !pendingSave?.token
   }
 
+  let lastManualToggleAt = 0
   function toggleManualPanel(source = '') {
+    const now = Date.now()
+    if (now - lastManualToggleAt < 250) {
+      return Promise.resolve()
+    }
+    lastManualToggleAt = now
+
     if (isManualPanelOpen()) {
       removeRoot()
       return Promise.resolve()
@@ -1413,6 +1431,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
       sendResponse?.({ ok: true })
     }
     if (message?.type === 'MYPWDMG_SHOW_PANEL') {
+      if (window !== window.top && !document.hasFocus()) {
+        sendResponse?.({ ok: true, ignored: true })
+        return
+      }
       toggleManualPanel(message.source || '')
         .then(() => sendResponse?.({ ok: true }))
         .catch((error) => sendResponse?.({ ok: false, message: String(error?.message || error) }))
@@ -1497,4 +1519,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
       scheduleQuery(true)
       scheduleTakePreparedSavePrompt(SAVE_PROMPT_RESTORE_DELAY_MS)
     })
+
+  window.__mypwdmgCleanup = () => {
+    extensionContextInvalidated = true
+    removeRoot()
+    observer?.disconnect()
+  }
 }

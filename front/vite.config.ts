@@ -8,6 +8,8 @@ export default defineConfig(({ mode, command }) => {
   const fileProtocolTarget = target === 'desktop' || target === 'android'
   const plugins = [vue()]
   const packageVersion = process.env.npm_package_version || '0.0.0'
+  const buildStamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 17)
+  const frontendBuildId = `${packageVersion}-${target}-${buildStamp}`
   const configuredStorageMode = process.env.VITE_STORAGE_MODE || process.env.VITE_API_MODE || target
 
   if (fileProtocolTarget) {
@@ -26,6 +28,7 @@ export default defineConfig(({ mode, command }) => {
     base: './',
     define: {
       'import.meta.env.PACKAGE_VERSION': JSON.stringify(packageVersion),
+      'import.meta.env.FRONTEND_BUILD_ID': JSON.stringify(frontendBuildId),
       'import.meta.env.MODE': JSON.stringify(target),
       'import.meta.env.DEV': JSON.stringify(command !== 'build'),
       'import.meta.env.PROD': JSON.stringify(command === 'build'),

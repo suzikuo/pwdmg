@@ -76,7 +76,13 @@ export type CloudSyncPreview = {
   remoteHeadIds: string[]
   legacyObjectNames: string[]
   remoteEnvelopeText: string
+  /** The remote envelope whose password-derived KDF parameters are canonical for this sync. */
+  remoteEncryptionEnvelopeText: string
+  /** True when a verified remote KDF was adopted before the review was shown. */
+  encryptionBindingAdopted?: boolean
+  deviceUnlockWarning?: string
   remoteNeedsSessionKeyRewrite?: boolean
+  alternatePassword?: string
 }
 
 export const CLOUD_SYNC_CHANGE_LABELS: Record<CloudSyncChangeField, string> = {

@@ -98,7 +98,7 @@ export function useCloudSync(options: { initialLogs?: CloudSyncLogEntry[]; initi
   const initialDownloadRequired = ref(false)
   let nextId = 0
 
-  const busy = computed(() => !['idle', 'success', 'error', 'cancelled'].includes(current.value.stage))
+  const busy = computed(() => !['idle', 'success', 'error', 'cancelled', 'waiting-review'].includes(current.value.stage))
 
   function begin(
     kind: CloudOperationKind,
@@ -145,10 +145,11 @@ export function useCloudSync(options: { initialLogs?: CloudSyncLogEntry[]; initi
 
   function cancel() {
     const activeController = controller.value
-    if (!activeController) return
-    activeController.abort()
+    if (activeController) {
+      activeController.abort()
+      controller.value = null
+    }
     current.value = { ...current.value, stage: 'cancelled', message: '云端操作已取消' }
-    controller.value = null
   }
 
   function signal() {

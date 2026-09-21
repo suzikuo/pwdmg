@@ -1,0 +1,13 @@
+[package]
+name = "pwdmg-native-host"
+version = "2.0.79"
+edition = "2021"
+
+[[bin]]
+name = "my-password-host"
+path = "src/main.rs"
+
+[dependencies]
+pwdmg-core = { path = "../core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

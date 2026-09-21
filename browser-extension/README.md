@@ -40,17 +40,12 @@ Google Chrome 137 and newer branded builds ignore the command-line `--load-exten
 
 If Chrome/Edge shows `Error when communicating with the native messaging host`, check:
 
-1. The extension ID used by `install_native_host.ps1` is the current unpacked extension ID.
-2. `.env\Scripts\python.exe` can start and import dependencies:
-
-```powershell
-.\.env\Scripts\python.exe -c "import cryptography; import webview; import pwdmg_core.native_host"
-```
-
-3. Native host startup errors are written to:
+1. The extension ID registered matches your current unpacked extension ID.
+2. `My Password Host.exe` exists in `release\desktop\` or `src-tauri\target\release\`.
+3. Native host log output is written to:
 
 ```text
 native-host\native-host-error.log
 ```
 
-Native Messaging uses stdout for framed JSON messages. Do not add `echo`, `print`, or other stdout output to the native host launcher or Python host.
+Native Messaging uses stdout for 4-byte length-framed JSON messages. Do not print raw text or standard output to stdout.

@@ -3,7 +3,7 @@ import { showFailToast } from 'vant'
 import { api } from '../services/api'
 import type { DesktopCloseBehavior, DesktopTraySettings } from '../types'
 
-const DEFAULT_CLOSE_BEHAVIOR: DesktopCloseBehavior = 'minimize-to-tray'
+const DEFAULT_CLOSE_BEHAVIOR: DesktopCloseBehavior = 'exit'
 
 export function useDesktopTraySettings(desktopSupported: boolean) {
   const state = ref<DesktopTraySettings | null>(null)

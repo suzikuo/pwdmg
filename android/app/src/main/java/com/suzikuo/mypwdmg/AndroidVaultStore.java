@@ -30,9 +30,14 @@ import java.util.Set;
 import java.util.UUID;
 
 import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
 import javax.crypto.Mac;
+import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.security.KeyStore;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 
 final class AndroidVaultStore {
     private static final String TAG = "AndroidVaultStore";
@@ -62,8 +67,9 @@ final class AndroidVaultStore {
     private final SecureRandom random = new SecureRandom();
     private final File vaultFile;
     private final File backupDir;
-    private final Map<String, JSONObject> webPasskeyMaterials = new HashMap<>();
-    private final Set<String> webAuthorizedTombstones = new HashSet<>();
+    private final File deviceUnlockFile;
+    private static final Map<String, JSONObject> webPasskeyMaterials = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Set<String> webAuthorizedTombstones = java.util.Collections.synchronizedSet(new HashSet<>());
 
     private static volatile JSONObject payload;
     private static volatile byte[] key;
@@ -148,17 +154,21 @@ final class AndroidVaultStore {
         File root = context.getApplicationContext().getFilesDir();
         this.vaultFile = new File(root, "vault.json");
         this.backupDir = new File(root, "backups");
+        this.deviceUnlockFile = new File(root, "device_unlock.json");
     }
 
     synchronized JSONObject state() throws JSONException {
         synchronized (VAULT_MUTATION_LOCK) {
             boolean unlocked = isUnlocked();
+            JSONObject du = deviceUnlockState();
             return new JSONObject()
                 .put("hasVault", vaultFile.exists())
                 .put("locked", !unlocked)
                 .put("expiresAt", unlocked ? expiresAt / 1000 : 0)
                 .put("legacyAvailable", false)
-                .put("vaultPath", vaultFile.getAbsolutePath());
+                .put("vaultPath", vaultFile.getAbsolutePath())
+                .put("passwordless", readPasswordlessMarker())
+                .put("deviceUnlock", du);
         }
     }
 
@@ -166,7 +176,8 @@ final class AndroidVaultStore {
         return new JSONObject()
             .put("hasVault", vaultFile.exists())
             .put("legacyAvailable", false)
-            .put("vaultPath", vaultFile.getAbsolutePath());
+            .put("vaultPath", vaultFile.getAbsolutePath())
+            .put("passwordless", readPasswordlessMarker());
     }
 
     synchronized String readVaultEnvelope() throws Exception {
@@ -236,6 +247,12 @@ final class AndroidVaultStore {
 
     synchronized JSONObject unlock(String password) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
+            if ((password == null || password.isEmpty()) && deviceUnlockFile != null && deviceUnlockFile.exists()) {
+                try {
+                    return quickUnlock();
+                } catch (Exception ignored) {
+                }
+            }
             DecryptedVault decrypted = null;
             boolean committed = false;
             try {
@@ -290,6 +307,137 @@ final class AndroidVaultStore {
         } catch (Exception error) {
             Log.e(TAG, "Empty-password autofill unlock failed", error);
             return null;
+        }
+    }
+
+    private static final String DEVICE_UNLOCK_KEY_ALIAS = "mypwdmg_device_unlock_v1";
+
+    private SecretKey getOrCreateDeviceUnlockKey() throws Exception {
+        KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+        keyStore.load(null);
+        if (!keyStore.containsAlias(DEVICE_UNLOCK_KEY_ALIAS)) {
+            KeyGenerator keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+            KeyGenParameterSpec.Builder builder = new KeyGenParameterSpec.Builder(
+                DEVICE_UNLOCK_KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
+            )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256);
+            keyGen.init(builder.build());
+            return keyGen.generateKey();
+        }
+        return (SecretKey) keyStore.getKey(DEVICE_UNLOCK_KEY_ALIAS, null);
+    }
+
+    synchronized JSONObject deviceUnlockState() {
+        try {
+            if (deviceUnlockFile == null || !deviceUnlockFile.exists()) {
+                return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
+            }
+            String text = readFile(deviceUnlockFile);
+            JSONObject obj = new JSONObject(text);
+            long exp = obj.optLong("expiresAt", 0);
+            if (exp > nowSeconds()) {
+                return new JSONObject().put("supported", true).put("enabled", true).put("expiresAt", exp);
+            } else {
+                disableDeviceUnlock();
+            }
+        } catch (Exception ignored) {
+            disableDeviceUnlock();
+        }
+        try {
+            return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
+        } catch (JSONException e) {
+            return new JSONObject();
+        }
+    }
+
+    synchronized JSONObject enableDeviceUnlock(String password, long reauthSeconds) throws Exception {
+        if (!vaultFile.exists()) {
+            throw new IllegalStateException("Vault does not exist");
+        }
+        JSONObject envelope = readEnvelope();
+        DecryptedVault decrypted = decryptPayloadForPassword(password, envelope);
+        try {
+            long effectiveReauth = reauthSeconds <= 0 ? 7 * 24 * 3600L : reauthSeconds;
+            long exp = nowSeconds() + effectiveReauth;
+            JSONObject keyObj = new JSONObject()
+                .put("key", Base64.getEncoder().encodeToString(decrypted.key))
+                .put("salt", Base64.getEncoder().encodeToString(decrypted.salt))
+                .put("iterations", decrypted.iterations);
+
+            byte[] plaintext = keyObj.toString().getBytes(StandardCharsets.UTF_8);
+            SecretKey ksKey = getOrCreateDeviceUnlockKey();
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, ksKey);
+            byte[] iv = cipher.getIV();
+            byte[] ciphertext = cipher.doFinal(plaintext);
+
+            JSONObject record = new JSONObject()
+                .put("version", 1)
+                .put("expiresAt", exp)
+                .put("iv", Base64.getEncoder().encodeToString(iv))
+                .put("ciphertext", Base64.getEncoder().encodeToString(ciphertext));
+
+            writeFile(deviceUnlockFile, record.toString(2));
+            return new JSONObject().put("supported", true).put("enabled", true).put("expiresAt", exp);
+        } finally {
+            wipeBytes(decrypted.key);
+            wipeBytes(decrypted.salt);
+        }
+    }
+
+    synchronized JSONObject disableDeviceUnlock() {
+        if (deviceUnlockFile != null && deviceUnlockFile.exists()) {
+            deviceUnlockFile.delete();
+        }
+        try {
+            return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
+        } catch (JSONException e) {
+            return new JSONObject();
+        }
+    }
+
+    synchronized JSONObject quickUnlock() throws Exception {
+        if (deviceUnlockFile == null || !deviceUnlockFile.exists()) {
+            throw new IllegalStateException("Device unlock is not enabled");
+        }
+        String text = readFile(deviceUnlockFile);
+        JSONObject record = new JSONObject(text);
+        long exp = record.optLong("expiresAt", 0);
+        if (exp <= nowSeconds()) {
+            disableDeviceUnlock();
+            throw new IllegalStateException("Device unlock session expired");
+        }
+        byte[] iv = Base64.getDecoder().decode(record.getString("iv"));
+        byte[] ciphertext = Base64.getDecoder().decode(record.getString("ciphertext"));
+
+        SecretKey ksKey = getOrCreateDeviceUnlockKey();
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, ksKey, new GCMParameterSpec(128, iv));
+        byte[] plaintext = cipher.doFinal(ciphertext);
+
+        JSONObject keyObj = new JSONObject(new String(plaintext, StandardCharsets.UTF_8));
+        byte[] k = Base64.getDecoder().decode(keyObj.getString("key"));
+        byte[] s = Base64.getDecoder().decode(keyObj.getString("salt"));
+        int iter = keyObj.getInt("iterations");
+        boolean committed = false;
+
+        try {
+            JSONObject envelope = readEnvelope();
+            JSONObject decPayload = decryptEnvelopeWithKey(envelope, k);
+            JSONObject normalized = normalizePayload(decPayload);
+            setPayload(normalized);
+            replaceSessionSecrets(k, s, iter);
+            refreshSession();
+            committed = true;
+            return exposePayloadToWeb(payload);
+        } finally {
+            if (!committed) {
+                wipeBytes(k);
+                wipeBytes(s);
+            }
         }
     }
 
@@ -530,6 +678,40 @@ final class AndroidVaultStore {
                 if (!committed) {
                     wipeBytes(nextKey);
                     wipeBytes(nextSalt);
+                }
+            }
+        }
+    }
+
+    synchronized JSONObject adoptEncryptionFromEnvelope(String envelopeText, String password) throws Exception {
+        requirePayload();
+        synchronized (VAULT_MUTATION_LOCK) {
+            JSONObject targetEnvelope = validateEnvelope(envelopeText);
+            DecryptedVault target = null;
+            boolean committed = false;
+            try {
+                target = decryptPayloadForPassword(password, targetEnvelope);
+                JSONObject currentEnvelope = readEnvelope();
+                JSONObject current = normalizePayload(decryptWithCurrentKey(currentEnvelope));
+                current.put("revision", nextRevision(VaultFormat.readPayloadRevision(current)));
+                current.put("updatedAt", nowSeconds());
+                JSONObject nextEnvelope = encryptPayloadWithKey(
+                    current,
+                    target.key,
+                    target.salt,
+                    target.iterations,
+                    randomBytes(VaultFormat.NONCE_BYTES)
+                ).put("passwordless", password == null || password.isEmpty());
+                writeEnvelope(nextEnvelope);
+                setPayload(current);
+                replaceSessionSecrets(target.key, target.salt, target.iterations);
+                refreshSession();
+                committed = true;
+                return state();
+            } finally {
+                if (!committed && target != null) {
+                    wipeBytes(target.key);
+                    wipeBytes(target.salt);
                 }
             }
         }
@@ -777,7 +959,7 @@ final class AndroidVaultStore {
     static JSONObject findCaptureCandidateInPayload(JSONObject sourcePayload, JSONObject capture) {
         List<JSONObject> candidates = capture.optString("hostname").isEmpty()
             ? loginEntriesFromPayload(sourcePayload)
-            : matchingLoginEntriesFromPayload(sourcePayload, capture.optString("hostname"));
+            : captureCandidatesFromPayload(sourcePayload, capture.optString("hostname"));
         JSONObject fallback = null;
         for (JSONObject entry : candidates) {
             if (!accountMatchesCapture(entry, capture)) continue;
@@ -785,6 +967,23 @@ final class AndroidVaultStore {
             if (fallback == null) fallback = entry;
         }
         return fallback;
+    }
+
+    private static List<JSONObject> captureCandidatesFromPayload(JSONObject sourcePayload, String hostname) {
+        String host = normalizeDomain(hostname, false);
+        List<JSONObject> matches = new ArrayList<>();
+        for (JSONObject entry : loginEntriesFromPayload(sourcePayload)) {
+            if (entryMatchesCaptureHost(entry, host)) matches.add(entry);
+        }
+        return matches;
+    }
+
+    private static boolean entryMatchesCaptureHost(JSONObject entry, String hostname) {
+        JSONArray domains = entry.optJSONArray("domains");
+        for (int index = 0; domains != null && index < domains.length(); index += 1) {
+            if (domainMatches(hostname, domains.optString(index))) return true;
+        }
+        return false;
     }
 
     private static boolean accountMatchesCapture(JSONObject entry, JSONObject capture) {
@@ -1439,6 +1638,16 @@ final class AndroidVaultStore {
         return new JSONObject(readFile(vaultFile));
     }
 
+    private boolean readPasswordlessMarker() {
+        if (!vaultFile.exists()) return false;
+        try {
+            JSONObject envelope = readEnvelope();
+            return envelope.has("passwordless") && envelope.optBoolean("passwordless", false);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private JSONObject validateEnvelope(String envelopeText) throws JSONException {
         return validateEnvelope(new JSONObject(envelopeText));
     }
@@ -1630,6 +1839,19 @@ final class AndroidVaultStore {
                 throw new SecurityException("WebView cannot provide passkey private-key material");
             }
             JSONObject material = materials.get(webMaterialKey(passkey));
+            if (material == null && current != null) {
+                JSONArray currentPasskeys = current.optJSONArray("passkeys");
+                if (currentPasskeys != null) {
+                    for (int i = 0; i < currentPasskeys.length(); i++) {
+                        JSONObject cp = currentPasskeys.optJSONObject(i);
+                        if (cp != null && webIdentityKey(cp).equals(webIdentityKey(passkey))) {
+                            material = cp;
+                            materials.put(webMaterialKey(passkey), copy(cp));
+                            break;
+                        }
+                    }
+                }
+            }
             if (material == null) throw new SecurityException("WebView passkey material handle is not authorized");
             for (String field : new String[] {
                 "id", "credentialId", "rpId", "userHandle", "algorithm", "publicKeyCose",
@@ -1645,6 +1867,18 @@ final class AndroidVaultStore {
         for (int index = 0; index < incomingTombstones.length(); index += 1) {
             JSONObject tombstone = incomingTombstones.getJSONObject(index);
             String identity = webIdentityKey(tombstone);
+            if (!authorizedTombstones.contains(identity) && current != null) {
+                JSONArray currentTombstones = current.optJSONArray("passkeyTombstones");
+                if (currentTombstones != null) {
+                    for (int i = 0; i < currentTombstones.length(); i++) {
+                        JSONObject ct = currentTombstones.optJSONObject(i);
+                        if (ct != null && webIdentityKey(ct).equals(identity)) {
+                            authorizedTombstones.add(identity);
+                            break;
+                        }
+                    }
+                }
+            }
             if (!authorizedTombstones.contains(identity)) {
                 throw new SecurityException("WebView passkey tombstone is not authorized");
             }
@@ -1762,6 +1996,61 @@ final class AndroidVaultStore {
         }
     }
 
+    private static final Set<String> MULTIPART_TLDS = new HashSet<>(Arrays.asList(
+        "co.uk", "org.uk", "me.uk", "net.uk", "ltd.uk", "plc.uk", "ac.uk", "gov.uk",
+        "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn", "mil.cn",
+        "com.hk", "org.hk", "edu.hk", "gov.hk", "net.hk", "idv.hk",
+        "com.tw", "org.tw", "gov.tw", "edu.tw", "net.tw", "idv.tw", "club.tw",
+        "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+        "co.jp", "ne.jp", "or.jp", "go.jp", "ac.jp", "ed.jp", "ad.jp", "gr.jp", "lg.jp",
+        "co.kr", "ne.kr", "or.kr", "re.kr", "pe.kr", "go.kr", "mil.kr", "ac.kr",
+        "com.sg", "net.sg", "org.sg", "gov.sg", "edu.sg", "per.sg",
+        "com.my", "net.my", "org.my", "gov.my", "edu.my", "mil.my",
+        "com.br", "net.br", "org.br", "gov.br", "edu.br",
+        "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in", "nic.in", "ac.in", "edu.in", "res.in", "gov.in",
+        "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz", "edu.nz",
+        "co.za", "net.za", "org.za", "web.za", "gov.za", "ac.za", "edu.za",
+        "com.mx", "net.mx", "org.mx", "edu.mx", "gob.mx",
+        "com.ru", "net.ru", "org.ru", "pp.ru",
+        "github.io", "gitlab.io", "pages.dev", "vercel.app", "azurewebsites.net", "herokuapp.com", "cloudfront.net"
+    ));
+
+    private static final Set<String> SECONDARY_TOKENS = new HashSet<>(Arrays.asList(
+        "com", "co", "net", "ne", "org", "or", "gov", "go", "gob", "edu", "ed",
+        "ac", "mil", "biz", "info", "ltd", "plc", "gen", "firm", "ind", "nic",
+        "res", "asn", "idv", "id", "web", "pp", "asso"
+    ));
+
+    private static final Set<String> CN_PROVINCES = new HashSet<>(Arrays.asList(
+        "bj", "sh", "tj", "cq", "he", "sx", "nm", "ln", "jl", "hl", "js", "zj",
+        "ah", "fj", "jx", "sd", "ha", "hb", "hn", "gd", "gx", "hi", "sc", "gz",
+        "yn", "xz", "sn", "gs", "qh", "nx", "xj", "tw", "hk", "mo"
+    ));
+
+    static String extractBaseDomain(String rawHost) {
+        String host = normalizeDomain(rawHost, false);
+        if (host.isEmpty()) return "";
+        if (host.matches("^\\d{1,3}(\\.\\d{1,3}){3}$") || host.contains(":") || host.startsWith("[")) return host;
+        if (!host.contains(".")) return host;
+        String[] labels = host.split("\\.");
+        if (labels.length == 0) return "";
+        String tld = labels[labels.length - 1];
+        if ("localhost".equals(tld) || "local".equals(tld) || "internal".equals(tld) || "lan".equals(tld)) return tld;
+        if (labels.length <= 2) return host;
+        String sld = labels[labels.length - 2];
+        String twoPart = sld + "." + tld;
+        boolean isMultiPart = MULTIPART_TLDS.contains(twoPart)
+            || (tld.length() == 2 && (SECONDARY_TOKENS.contains(sld) || ("cn".equals(tld) && CN_PROVINCES.contains(sld))));
+        if (isMultiPart) {
+            if (labels.length >= 3) {
+                return labels[labels.length - 3] + "." + twoPart;
+            } else {
+                return host;
+            }
+        }
+        return labels[labels.length - 2] + "." + tld;
+    }
+
     static boolean autofillRuleMatches(String hostname, String savedDomain, String mode) {
         String normalizedMode = normalizeAutofillMatchMode(mode);
         if (AUTOFILL_NEVER.equals(normalizedMode) || AUTOFILL_URL_PREFIX.equals(normalizedMode)) return false;
@@ -1772,7 +2061,10 @@ final class AndroidVaultStore {
         if (domain.indexOf('*') >= 0) return wildcardDomainMatches(host, domain);
         if (AUTOFILL_EXACT_HOST.equals(normalizedMode)) return host.equals(domain);
         if (AUTOFILL_SUBDOMAIN.equals(normalizedMode)) return !host.equals(domain) && host.endsWith("." + domain);
-        return host.equals(domain) || host.endsWith("." + domain);
+        if (host.equals(domain) || host.endsWith("." + domain) || domain.endsWith("." + host)) return true;
+        String hostBase = extractBaseDomain(host);
+        String domainBase = extractBaseDomain(domain);
+        return !hostBase.isEmpty() && hostBase.equals(domainBase);
     }
 
     private static boolean entryMatchesHost(JSONObject entry, String hostname) {

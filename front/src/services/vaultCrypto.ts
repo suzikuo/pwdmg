@@ -34,9 +34,9 @@ const MAX_CIPHERTEXT_BYTES = 16 * 1024 * 1024 + 16
 const MAX_PLAINTEXT_BYTES = MAX_CIPHERTEXT_BYTES - 16
 
 export async function encryptPayload(password: string, payload: VaultPayload) {
-  const salt = randomBytes(16)
+  const salt = randomBytes(SALT_BYTES)
   const key = await deriveVaultKey(password, salt, DEFAULT_ITERATIONS)
-  const vaultKey = { key, salt, iterations: DEFAULT_ITERATIONS }
+  const vaultKey: VaultKey = { key, salt, iterations: DEFAULT_ITERATIONS }
   const envelope = await encryptPayloadWithKey(vaultKey, payload)
   setEnvelopePasswordless(envelope, (password || '') === '')
   return {
@@ -119,7 +119,7 @@ export async function importVaultKeyMaterial(
   assertWebCrypto()
   const rawKey = base64ToBytes(rawKeyBase64)
   const salt = base64ToBytes(saltBase64)
-  if (rawKey.byteLength !== 32 || salt.byteLength !== 16) throw new Error('设备解锁密钥无效')
+  if (rawKey.byteLength !== 32 || salt.byteLength !== SALT_BYTES) throw new Error('设备解锁密钥无效')
   if (!Number.isSafeInteger(iterations) || iterations < 10_000 || iterations > 2_000_000) {
     throw new Error('设备解锁参数无效')
   }

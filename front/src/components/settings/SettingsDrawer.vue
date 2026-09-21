@@ -13,6 +13,7 @@
         <div>
           <strong>My Password</strong>
           <span>v{{ displayAppVersion }} · {{ stats.logins }} 登录 · {{ stats.folders }} 分组</span>
+          <small class="drawer-build-marker">前端构建 {{ frontendBuildId }}</small>
         </div>
       </div>
 
@@ -283,6 +284,20 @@
           <p v-if="portableBackupStatus" class="settings-note compact-note">{{ portableBackupStatus }}</p>
         </div>
         <p class="settings-note">上传/下载会先校验新增、修改、删除项；备份会直接上传一个带日期的云端文件，不在本地留存。</p>
+        <div class="portable-backup-panel cloud-encryption-binding-panel">
+          <div class="portable-backup-copy">
+            <strong>云端加密参数</strong>
+            <span>{{ cloudEncryptionBindingLabel }}</span>
+          </div>
+          <van-button
+            class="backup-action-button"
+            size="small"
+            plain
+            type="default"
+            :loading="cloudBusy"
+            @click="emit('rebind-cloud-encryption')"
+          >重新绑定</van-button>
+        </div>
         <van-form @submit="emit('save-settings')">
           <van-field :model-value="oss.bucketName" label="Bucket" placeholder="OSS Bucket 名称" @update:model-value="updateOss('bucketName', $event)" />
           <van-field :model-value="oss.accessKeyId" label="Key ID" placeholder="AccessKey ID" @update:model-value="updateOss('accessKeyId', $event)" />
@@ -324,13 +339,33 @@
             </div>
           </div>
           <div v-if="cloudSyncLogs.length" class="cloud-sync-log-list">
-            <div v-for="item in cloudSyncLogs" :key="item.id" class="cloud-sync-log-item" :class="`is-${item.status}`">
+            <div
+              v-for="item in cloudSyncLogs"
+              :key="item.id"
+              class="cloud-sync-log-item"
+              :class="[`is-${item.status}`, { 'is-actionable': item.status === 'review' }]"
+              @click="item.status === 'review' && emit('resolve-sync-log', item)"
+            >
               <div class="cloud-sync-log-main">
                 <span class="cloud-sync-log-badge">{{ directionLabel(item.direction) }}</span>
                 <strong>{{ logTitle(item) }}</strong>
                 <small>{{ formatDateTime(new Date(item.at).toISOString()) }} · {{ item.automatic ? '自动' : '手动' }}</small>
               </div>
-              <div class="cloud-sync-log-meta"><span>{{ statusLabel(item.status) }}</span><small>{{ logSummary(item) }}</small><small>{{ item.objectName }}</small></div>
+              <div class="cloud-sync-log-meta">
+                <span>{{ statusLabel(item.status) }}</span>
+                <small>{{ logSummary(item) }}</small>
+                <small>{{ item.objectName }}</small>
+                <van-button
+                  v-if="item.status === 'review'"
+                  class="cloud-sync-log-action"
+                  size="mini"
+                  type="primary"
+                  plain
+                  @click.stop="emit('resolve-sync-log', item)"
+                >
+                  手动处理
+                </van-button>
+              </div>
             </div>
           </div>
           <van-empty v-else image="search" description="暂无同步记录" />
@@ -431,6 +466,7 @@ const props = defineProps<{
   section: DrawerSection
   sectionTitle: string
   displayAppVersion: string
+  frontendBuildId: string
   stats: { logins: number; folders: number }
   theme: ThemeMode
   uiScalePercent: number
@@ -478,6 +514,7 @@ const props = defineProps<{
   updateProgressPercent: number
   updateStatus: string
   oss: OssSettings
+  cloudEncryptionBindingLabel: string
   autoSyncIntervalMin: number
   autoSyncIntervalMax: number
   cloudBusy: boolean
@@ -513,7 +550,7 @@ const allSystemEntriesSelected = computed(() => (
   && props.systemGroupEntries.every((entry) => systemSelectedIds.value.has(entry.id))
 ))
 const desktopCloseBehavior = computed<DesktopCloseBehavior>(() => (
-  props.desktopTraySettings?.closeBehavior || 'minimize-to-tray'
+  props.desktopTraySettings?.closeBehavior || 'exit'
 ))
 const desktopTrayLabel = computed(() => {
   const settings = props.desktopTraySettings
@@ -578,6 +615,7 @@ const emit = defineEmits<{
   'upload-cloud': []
   'backup-cloud': []
   'download-cloud': []
+  'rebind-cloud-encryption': []
   'refresh-cloud-list': []
   'select-cloud-backup': [name: string]
   'export-portable-backup': []
@@ -585,6 +623,7 @@ const emit = defineEmits<{
   'export-android-vault': []
   'update-log-limit': [value: number | string]
   'clear-logs': []
+  'resolve-sync-log': [item: CloudLog]
   'update-system-group': [key: 'archived' | 'trashed']
   'restore-entry': [entryId: string]
   'trash-entry': [entryId: string]

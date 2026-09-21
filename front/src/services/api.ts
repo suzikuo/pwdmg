@@ -1,7 +1,7 @@
 import type { ApiResult, AppState, AttachmentObjectRetention, AttachmentStorageState, DesktopTraySettings, DeviceUnlockState, PluginListenerState, PortableBackupExport, PortableBackupImport, PortableBackupSelection, VaultAttachment, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types'
 import { androidStorageAdapter, exportAndroidAttachmentFile, exportAndroidVaultFile } from './androidStorageAdapter'
 import { fail, ok, type AttachmentCreateResult, type CreateVaultResult, type PasswordManagerApiAdapter, type StartupData } from './apiTypes'
-import { callDesktopApi, desktopStorageAdapter } from './desktopStorageAdapter'
+import { callDesktopApi, desktopStorageAdapter, showDesktopWindow as showDesktopWindowAdapter } from './desktopStorageAdapter'
 import { decryptAttachmentObject, encryptAttachmentObject, generateAttachmentKey, importAttachmentKey, verifyAttachmentCiphertext } from './attachmentCrypto'
 import { migrateLegacyStorageText } from './legacyWeb'
 import { removePasskeyWithTombstone } from './passkeyManagement'
@@ -45,6 +45,12 @@ export const api: PasswordManagerApiAdapter = {
   saveVault: (nextPayload) => nativeVaultCall('saveVault', () => guard(() => saveVault(nextPayload)), nextPayload),
   deletePasskey: (passkeyId) => nativeVaultCall('deletePasskey', () => guard(() => deletePasskey(passkeyId)), passkeyId),
   changePassword: (newPassword) => nativeVaultCall('changePassword', () => guard(() => changePassword(newPassword)), newPassword),
+  adoptVaultEncryptionFromEnvelope: (envelopeText, password) => nativeVaultCall(
+    'adoptVaultEncryptionFromEnvelope',
+    () => guard(() => adoptVaultEncryptionFromEnvelope(envelopeText, password)),
+    envelopeText,
+    password
+  ),
   exportVaultBackup: () => nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
   exportAndroidVaultFile: (displayName, contentText) => exportAndroidVaultFile(displayName, contentText),
   exportVaultBackupForPayload: (nextPayload) => nativeVaultCall('exportVaultBackupForPayload', () => guard(() => exportVaultBackupForPayload(nextPayload)), nextPayload),
@@ -73,7 +79,14 @@ export const api: PasswordManagerApiAdapter = {
   downloadAppUpdate: (manifestUrl, onProgress) => selectedStorage().downloadAppUpdate(manifestUrl, onProgress),
   applyAppUpdate: (packagePath) => selectedStorage().applyAppUpdate(packagePath),
   openExternalUrl: (url) => openExternalUrl(url),
-  safeExit: () => selectedStorage().safeExit()
+  safeExit: () => selectedStorage().safeExit(),
+  showDesktopWindow: () => showDesktopWindow()
+}
+
+export async function showDesktopWindow(): Promise<void> {
+  if (useDesktopStorage()) {
+    await showDesktopWindowAdapter()
+  }
 }
 
 async function createAttachmentObject(name: string, mimeType: string, bytes: Uint8Array): Promise<ApiResult<AttachmentCreateResult>> {
@@ -156,22 +169,34 @@ async function writeAttachmentCiphertext(reference: VaultAttachment, objectText:
 }
 
 async function getDeviceUnlockState(): Promise<ApiResult<DeviceUnlockState>> {
-  if (!useDesktopStorage()) return ok({ supported: false, enabled: false, expiresAt: 0 })
-  return callDesktopApi<DeviceUnlockState>('getDeviceUnlockState')
+  if (useDesktopStorage()) return callDesktopApi<DeviceUnlockState>('getDeviceUnlockState')
+  if (useAndroidNativeApi()) return callAndroidApi<DeviceUnlockState>('getDeviceUnlockState')
+  return ok({ supported: false, enabled: false, expiresAt: 0 })
 }
 
 async function enableDeviceUnlock(password: string, reauthSeconds: number): Promise<ApiResult<DeviceUnlockState>> {
-  if (!useDesktopStorage()) return fail('DESKTOP_ONLY', '设备快速解锁仅支持 Windows 桌面端。')
-  return callDesktopApi<DeviceUnlockState>('enableDeviceUnlock', password, reauthSeconds)
+  if (useDesktopStorage()) return callDesktopApi<DeviceUnlockState>('enableDeviceUnlock', password, reauthSeconds)
+  if (useAndroidNativeApi()) return callAndroidApi<DeviceUnlockState>('enableDeviceUnlock', password, reauthSeconds)
+  return fail('UNSUPPORTED_PLATFORM', '设备快速解锁仅支持桌面端与移动端。')
 }
 
 async function disableDeviceUnlock(): Promise<ApiResult<DeviceUnlockState>> {
-  if (!useDesktopStorage()) return fail('DESKTOP_ONLY', '设备快速解锁仅支持 Windows 桌面端。')
-  return callDesktopApi<DeviceUnlockState>('disableDeviceUnlock')
+  if (useDesktopStorage()) return callDesktopApi<DeviceUnlockState>('disableDeviceUnlock')
+  if (useAndroidNativeApi()) return callAndroidApi<DeviceUnlockState>('disableDeviceUnlock')
+  return fail('UNSUPPORTED_PLATFORM', '设备快速解锁仅支持桌面端与移动端。')
 }
 
 async function quickUnlock(): Promise<ApiResult<VaultPayload>> {
-  if (!useDesktopStorage()) return fail('DESKTOP_ONLY', '设备快速解锁仅支持 Windows 桌面端。')
+  if (useAndroidNativeApi()) {
+    const result = await callAndroidApi<VaultPayload>('quickUnlock')
+    if (result.ok && result.data) {
+      payload = result.data
+      passwordless = false
+      return ok(cloneVaultPayload(result.data))
+    }
+    return fail(result.code || 'DEVICE_UNLOCK_FAILED', result.message || '设备快速解锁失败')
+  }
+  if (!useDesktopStorage()) return fail('UNSUPPORTED_PLATFORM', '设备快速解锁仅支持桌面端与移动端。')
   try {
     const material = await callDesktopApi<{ key: string; salt: string; iterations: number }>('readDeviceUnlockKey')
     if (!material.ok || !material.data) {
@@ -311,11 +336,13 @@ async function unlock(password: string): Promise<VaultPayload> {
     JSON.stringify(rawPayload.passkeyTombstones ?? []) !== JSON.stringify(unlockedPayload.passkeyTombstones)
   if (needsSchemaRewrite || envelope.passwordless !== unlockedPasswordless) {
     const expectedRevision = unlockedPayload.revision
-    unlockedPayload = normalizeVaultPayload({
-      ...unlockedPayload,
-      revision: expectedRevision + 1,
-      updatedAt: nowSeconds()
-    })
+    if (needsSchemaRewrite) {
+      unlockedPayload = normalizeVaultPayload({
+        ...unlockedPayload,
+        revision: expectedRevision + 1,
+        updatedAt: nowSeconds()
+      })
+    }
     const upgradedEnvelope = await encryptPayloadWithKey(decrypted.vaultKey, unlockedPayload)
     sessionGeneration.requireCurrent(generation)
     setEnvelopePasswordless(upgradedEnvelope, unlockedPasswordless)
@@ -398,10 +425,43 @@ async function changePassword(newPassword: string): Promise<AppState> {
   sessionGeneration.requireCurrent(generation)
   unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(encrypted.envelope, null, 2), false, expectedRevision))
   sessionGeneration.requireCurrent(generation)
+  await verifyPersistedVaultAfterWrite(encrypted.vaultKey, current, generation)
   await cacheNativeSessionForGeneration(newPassword || '', generation)
   payload = current
   vaultKey = encrypted.vaultKey
   passwordless = (newPassword || '') === ''
+  refreshSession()
+  return getState()
+}
+
+/**
+ * Bind the local vault to the exact KDF parameters from a verified remote
+ * envelope. The remote payload is only used to validate the password; local
+ * sync has already decided which payload must be kept.
+ */
+async function adoptVaultEncryptionFromEnvelope(envelopeText: string, password: string): Promise<AppState> {
+  const generation = sessionGeneration.capture()
+  const currentPayload = cloneVaultPayload(await requirePayload())
+  sessionGeneration.requireCurrent(generation)
+  const expectedRevision = currentPayload.revision
+  const targetEnvelope = parseEnvelopeText(envelopeText)
+  const decrypted = await decryptPayload(password || '', targetEnvelope)
+  sessionGeneration.requireCurrent(generation)
+  const nextPayload = normalizeVaultPayload({
+    ...currentPayload,
+    revision: expectedRevision + 1,
+    updatedAt: nowSeconds()
+  })
+  const nextEnvelope = await encryptPayloadWithKey(decrypted.vaultKey, nextPayload)
+  setEnvelopePasswordless(nextEnvelope, (password || '') === '')
+  sessionGeneration.requireCurrent(generation)
+  unwrap(await selectedStorage().writeVaultEnvelope(JSON.stringify(nextEnvelope, null, 2), false, expectedRevision))
+  sessionGeneration.requireCurrent(generation)
+  await verifyPersistedVaultAfterWrite(decrypted.vaultKey, nextPayload, generation)
+  await cacheNativeSessionForGeneration(password || '', generation)
+  payload = nextPayload
+  vaultKey = decrypted.vaultKey
+  passwordless = (password || '') === ''
   refreshSession()
   return getState()
 }
@@ -415,6 +475,23 @@ async function exportVaultBackup(): Promise<VaultBackupExport> {
     content,
     vaultPath: unwrap(await selectedStorage().getStorageState()).vaultPath,
     updatedAt: nowSeconds()
+  }
+}
+
+async function verifyPersistedVaultAfterWrite(
+  expectedKey: VaultKey,
+  expectedPayload: VaultPayload,
+  generation: number
+) {
+  try {
+    const persistedEnvelope = parseEnvelopeText(unwrap(await selectedStorage().readVaultEnvelope()))
+    const persistedPayload = normalizeVaultPayload(await decryptPayloadWithKey(expectedKey, persistedEnvelope))
+    sessionGeneration.requireCurrent(generation)
+    if (JSON.stringify(persistedPayload) !== JSON.stringify(expectedPayload)) {
+      throw new Error('payload mismatch')
+    }
+  } catch {
+    throw new Error('保险库写入校验失败，修改未生效')
   }
 }
 
@@ -608,7 +685,13 @@ function errorCode(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
   if (/conflict|revision/i.test(message)) return 'CONFLICT'
   if (/locked/i.test(message)) return 'LOCKED'
-  if (/password|decrypt|corrupt|operationerror|malformed/i.test(message)) return 'BAD_PASSWORD'
+  // A malformed/unsupported remote envelope cannot be repaired by asking for
+  // another password. Keep it separate so cloud sync reports the actual
+  // format problem instead of reopening the password prompt on every retry.
+  if (/malformed|unsupported vault|invalid (?:vault|kdf|salt|nonce|ciphertext)/i.test(message)) {
+    return 'INVALID_VAULT'
+  }
+  if (/password|decrypt|corrupt|operationerror/i.test(message)) return 'BAD_PASSWORD'
   if (/exist/i.test(message)) return 'ERROR'
   return 'ERROR'
 }

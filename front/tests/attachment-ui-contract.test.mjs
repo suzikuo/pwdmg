@@ -10,7 +10,7 @@ const androidAdapterSource = readFileSync(new URL('../src/services/androidStorag
 const androidBridgeSource = readFileSync(new URL('../../android/app/src/main/java/com/suzikuo/mypwdmg/AndroidPasswordBridge.java', import.meta.url), 'utf8')
 const androidActivitySource = readFileSync(new URL('../../android/app/src/main/java/com/suzikuo/mypwdmg/MainActivity.java', import.meta.url), 'utf8')
 const androidStoreSource = readFileSync(new URL('../../android/app/src/main/java/com/suzikuo/mypwdmg/AndroidAttachmentStore.java', import.meta.url), 'utf8')
-const mainSource = readFileSync(new URL('../../main.py', import.meta.url), 'utf8')
+const bridgeSource = readFileSync(new URL('../../src-tauri/src/bridge.rs', import.meta.url), 'utf8')
 
 test('detail view exposes compact bounded attachment controls', () => {
   assert.match(detailSource, /class="detail-attachments"/)
@@ -26,9 +26,11 @@ test('detail view exposes compact bounded attachment controls', () => {
 test('desktop export uses Save As without auto-opening plaintext temporary files', () => {
   assert.match(apiSource, /saveAttachmentFile/)
   assert.match(apiSource, /bytes\.fill\(0\)/)
-  assert.match(mainSource, /webview\.SAVE_DIALOG/)
-  assert.match(mainSource, /os\.replace\(str\(temp_path\), str\(target\)\)/)
-  assert.doesNotMatch(mainSource.slice(mainSource.indexOf('def saveAttachmentFile'), mainSource.indexOf('def cleanupLegacyStorage')), /startfile|Popen|open_external/i)
+  assert.match(bridgeSource, /save_attachment_file_dialog/)
+  assert.match(bridgeSource, /rfd::FileDialog::new\(\)/)
+  assert.match(bridgeSource, /save_file\(\)/)
+  assert.match(bridgeSource, /fs::write\(&target, data\)/)
+  assert.doesNotMatch(bridgeSource.slice(bridgeSource.indexOf('fn save_attachment_file_dialog'), bridgeSource.indexOf('fn check_desktop_update')), /open::that|Command::new|spawn/i)
 })
 
 test('Android stores only bounded encrypted objects and exports through the document picker', () => {
