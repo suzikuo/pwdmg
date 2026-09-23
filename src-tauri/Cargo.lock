@@ -2356,7 +2356,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mypwdmg-desktop"
-version = "2.0.79"
+version = "2.0.80"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3015,7 +3015,7 @@ dependencies = [
 
 [[package]]
 name = "pwdmg-core"
-version = "2.0.79"
+version = "2.0.80"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "pwdmg-native-host"
-version = "2.0.79"
+version = "2.0.80"
 dependencies = [
  "pwdmg-core",
  "serde",

@@ -63,6 +63,8 @@ export type CloudSyncPreview = {
   sourcePayload: VaultPayload
   basePayload: VaultPayload
   remoteBaselinePayload: VaultPayload
+  mergedPayload: VaultPayload | null
+  targetNeedsWrite: boolean
   items: CloudSyncDiffItem[]
   automatic: boolean
   sessionGeneration: number

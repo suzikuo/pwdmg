@@ -1,6 +1,6 @@
 [package]
 name = "pwdmg-native-host"
-version = "2.0.79"
+version = "2.0.80"
 edition = "2021"
 
 [[bin]]

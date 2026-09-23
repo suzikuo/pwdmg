@@ -20,6 +20,7 @@ export type CloudSyncPlan = {
   basePayload: VaultPayload
   items: CloudSyncDiffItem[]
   resolvedPasskeyState: ResolvedPasskeyState
+  mergedPayload: VaultPayload | null
   usedAncestor: boolean
   localChangedSinceBase: boolean
   remoteChangedSinceBase: boolean
@@ -116,7 +117,8 @@ export async function createCloudSyncPlan(input: {
     ])
     localChangedSinceBase = localFingerprint !== ancestorFingerprint
     remoteChangedSinceBase = remoteFingerprint !== ancestorFingerprint
-    if (requestedDirection === 'upload' && remoteChangedSinceBase && localFingerprint !== remoteFingerprint) {
+    const divergentSinceBase = remoteChangedSinceBase && localFingerprint !== remoteFingerprint
+    if (requestedDirection === 'upload' && divergentSinceBase && pullStrategy !== 'integrate') {
       return {
         ok: false,
         code: 'pull-required',
@@ -124,13 +126,16 @@ export async function createCloudSyncPlan(input: {
       }
     }
 
-    if (requestedDirection === 'download' && pullStrategy === 'integrate') {
+    if (
+      pullStrategy === 'integrate' &&
+      (requestedDirection === 'download' || (requestedDirection === 'upload' && divergentSinceBase))
+    ) {
       const merged = mergeVaultPayloads(ancestorPayload, localPayload, remotePayload)
       if (merged.conflicts.length) {
         return {
           ok: false,
           code: 'conflict',
-          message: `检测到 ${merged.conflicts.length} 项真实三方冲突，已停止自动覆盖`
+          message: `检测到 ${merged.conflicts.length} 项真实三方冲突，已停止同步以避免覆盖冲突数据`
         }
       }
       convergedPayload = merged.payload
@@ -168,6 +173,7 @@ export async function createCloudSyncPlan(input: {
       basePayload,
       items,
       resolvedPasskeyState,
+      mergedPayload: convergedPayload ? plannedPayload : null,
       usedAncestor: Boolean(ancestorPayload),
       localChangedSinceBase,
       remoteChangedSinceBase,

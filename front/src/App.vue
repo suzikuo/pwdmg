@@ -4305,7 +4305,7 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       localPayload,
       remotePayload,
       ancestorPayload,
-      pullStrategy: options.automatic ? 'integrate' : 'snapshot',
+      pullStrategy: direction === 'upload' || options.automatic ? 'integrate' : 'snapshot',
       fingerprint: cloudSyncPayloadFingerprint
     })
     if (!sessionIsCurrent()) {
@@ -4417,7 +4417,7 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       return
     }
 
-    if (!items.length && !targetNeedsWrite) {
+    if (!items.length && !targetNeedsWrite && !activePlan.mergedPayload) {
       cloudSyncPreview.value = null
       await rememberCloudSyncState(
         objectName,
@@ -4465,6 +4465,8 @@ async function prepareCloudSyncReview(request: CloudSyncReviewOptions & { direct
       sourcePayload,
       basePayload,
       remoteBaselinePayload,
+      mergedPayload: activePlan.mergedPayload,
+      targetNeedsWrite,
       items,
       automatic: options.automatic === true,
       sessionGeneration: generation,
@@ -4564,7 +4566,9 @@ async function routePreparedCloudSyncPreview(
     return
   }
 
-  const message = `发现 ${items.length} 项差异`
+  const message = preview.mergedPayload
+    ? `发现 ${items.length} 项差异；确认上传时会把云端更新合并到本地`
+    : `发现 ${items.length} 项差异`
   markCloudOperation(operation, 'waiting-review', message)
   showCloudSyncReview()
   backupStatus.value = message
@@ -4708,11 +4712,11 @@ function isCloudSyncPreviewCurrent(preview: CloudSyncPreview) {
     preview.cloudScopeId === currentCloudScopeId()
 }
 
-function syncCloudSyncPreviewAfterDownload(preview: CloudSyncPreview, appliedVault: VaultPayload) {
+function syncCloudSyncPreviewAfterLocalApply(preview: CloudSyncPreview, appliedVault: VaultPayload) {
   if (state.locked || vault.value !== appliedVault) return false
-  // Saving/publishing a download is allowed to refresh the active frontend
-  // session and the OSS settings carried by the local payload. Those changes
-  // belong to this operation and must not invalidate its completion path.
+  // Applying a sync result may refresh the active frontend session and OSS
+  // settings carried by the local payload. Those changes belong to this
+  // operation and must not invalidate its completion path.
   preview.sessionGeneration = vaultSession.current()
   preview.cloudScopeId = currentCloudScopeId()
   return true
@@ -4724,6 +4728,7 @@ type CloudSyncApplyContext = {
   options: CloudSyncApplyOptions
   remoteClient: RemoteVaultStore
   nextPayload: VaultPayload
+  currentLocal: VaultPayload
   localAlreadyApplied: VaultPayload | null
   previewStats: ReturnType<typeof cloudSyncSelectionStats>
   selectedStats: ReturnType<typeof cloudSyncSelectionStats>
@@ -4805,6 +4810,7 @@ async function applyCloudSyncItems(preview: CloudSyncPreview, selectedItems: Clo
       options,
       remoteClient: createRemoteVaultStore(),
       nextPayload,
+      currentLocal: validation.currentLocal,
       localAlreadyApplied: validation.localAlreadyApplied ? validation.currentLocal : null,
       previewStats: cloudSyncSelectionStats(preview.items),
       selectedStats: cloudSyncSelectionStats(selectedItems)
@@ -4861,7 +4867,7 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
 
   if (!publishVaultPayload(appliedVault)) return false
   void collectLocalAttachmentObjects(appliedVault)
-  if (!syncCloudSyncPreviewAfterDownload(preview, appliedVault)) return false
+  if (!syncCloudSyncPreviewAfterLocalApply(preview, appliedVault)) return false
 
   let passwordAdopted = false
   let deviceUnlockWarning = ''
@@ -4888,7 +4894,7 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
       return failCloudSyncApply(context, '本地主密码已更新，但无法重新载入本地保险库')
     }
     appliedVault = refreshed.data
-    if (!syncCloudSyncPreviewAfterDownload(preview, appliedVault)) return false
+    if (!syncCloudSyncPreviewAfterLocalApply(preview, appliedVault)) return false
 
     markCloudOperation(options.operation || null, 'writing-remote', '正在用当前设备密钥更新云端保险库')
     const rewrite = await rewriteCloudEnvelopeWithCurrentSession(
@@ -4913,7 +4919,7 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
     preview.remoteEnvelopeText,
     checkpointRemoteHeadIds
   )
-  if (!syncCloudSyncPreviewAfterDownload(preview, appliedVault)) return false
+  if (!syncCloudSyncPreviewAfterLocalApply(preview, appliedVault)) return false
 
   if (selectedEntry.value) {
     selectedEntry.value = findEntry(appliedVault.entries, selectedEntry.value.id)
@@ -4947,11 +4953,79 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
 }
 
 async function applyCloudUpload(context: CloudSyncApplyContext) {
-  const { preview, selectedItems, options, remoteClient, nextPayload, previewStats, selectedStats } = context
+  const { preview, selectedItems, options, remoteClient, nextPayload, currentLocal, previewStats, selectedStats } = context
   if (state.passwordless && preview.remoteNeedsSessionKeyRewrite) {
     const message = '云端保险库已设置主密码，当前设备未设置密码；禁止上传以防止覆盖云端密码。请先执行【下载】以同步主密码。'
     return failCloudSyncApply(context, message)
   }
+
+  let appliedLocalPayload: VaultPayload | null = null
+  if (preview.mergedPayload) {
+    markCloudOperation(options.operation || null, 'applying-local', '正在合并云端更新到本地')
+    await ensureLocalAttachmentObjects(
+      remoteClient,
+      normalizeObjectName(settings.oss.objectName),
+      preview.mergedPayload,
+      api
+    )
+    if (!isCloudSyncPreviewCurrent(preview)) return false
+
+    const currentLocalFingerprint = await cloudSyncPayloadFingerprint(currentLocal)
+    const mergedLocalFingerprint = await cloudSyncPayloadFingerprint(preview.mergedPayload)
+    if (currentLocalFingerprint !== mergedLocalFingerprint) {
+      const mergedLocalPayload = clonePayload(preview.mergedPayload)
+      mergedLocalPayload.revision = currentLocal.revision
+      const saved = await saveVaultForCurrentSession(mergedLocalPayload)
+      if (!saved.ok || !saved.data) {
+        const message = saved.code === 'CONFLICT'
+          ? '本地保险库在合并云端更新期间已变化，请重新检测同步差异'
+          : saved.message || '合并云端更新到本地失败'
+        if (saved.code === 'CONFLICT') await handleVaultWriteError(saved, message)
+        return failCloudSyncApply(context, message, { showToast: saved.code !== 'CONFLICT' })
+      }
+      appliedLocalPayload = saved.data
+      if (!publishVaultPayload(appliedLocalPayload)) return false
+      void collectLocalAttachmentObjects(appliedLocalPayload)
+      if (!syncCloudSyncPreviewAfterLocalApply(preview, appliedLocalPayload)) return false
+    } else {
+      appliedLocalPayload = currentLocal
+    }
+
+    if (selectedEntry.value) {
+      selectedEntry.value = findEntry(appliedLocalPayload.entries, selectedEntry.value.id)
+      if (!selectedEntry.value) clearSelectedEntry()
+    }
+  }
+
+  if (!preview.targetNeedsWrite && !preview.remoteNeedsSessionKeyRewrite) {
+    autoSyncPasswordGate.clear(...preview.passwordGateScopeKeys)
+    await rememberCloudSyncState(
+      preview.objectName,
+      preview.remoteBaselinePayload,
+      appliedLocalPayload || vault.value || currentLocal,
+      preview.remoteEnvelopeText,
+      preview.remoteHeadIds
+    )
+    if (!isCloudSyncPreviewCurrent(preview)) return false
+    const message = appliedLocalPayload
+      ? '云端更新已合并到本地'
+      : '当前方向没有待同步变更'
+    backupStatus.value = message
+    appendCloudSyncLog({
+      direction: 'upload',
+      automatic: preview.automatic,
+      status: 'success',
+      objectName: preview.objectName,
+      message,
+      selected: selectedStats.selected,
+      total: previewStats.total,
+      ...cloudSyncDiffCountsForItems(selectedItems)
+    })
+    finishCloudSyncApplyPreview(preview, options)
+    if (options.showSuccess) showSuccessToast(message)
+    return true
+  }
+
   markCloudOperation(options.operation || null, 'writing-remote', '正在校验并上传附件对象')
   await ensureRemoteAttachmentObjects(
     remoteClient,
@@ -5003,14 +5077,16 @@ async function applyCloudUpload(context: CloudSyncApplyContext) {
   await rememberCloudSyncState(
     preview.uploadObjectName,
     uploadedPayload,
-    vault.value || uploadedPayload,
+    appliedLocalPayload || vault.value || uploadedPayload,
     exported.data.content,
     managedWrite?.commitId ? [managedWrite.commitId] : []
   )
   if (!isCloudSyncPreviewCurrent(preview)) return false
 
-  const message = options.successMessage || '已上传 ' + selectedItems.length + ' 项差异'
-  backupStatus.value = options.successMessage || '已上传 ' + selectedItems.length + ' 项差异到 ' + settings.oss.bucketName + '/' + preview.uploadObjectName
+  const message = options.successMessage || (preview.mergedPayload
+    ? '已合并云端更新并上传 ' + selectedItems.length + ' 项差异'
+    : '已上传 ' + selectedItems.length + ' 项差异')
+  backupStatus.value = options.successMessage || message + ' 到 ' + settings.oss.bucketName + '/' + preview.uploadObjectName
   appendCloudSyncLog({
     direction: 'upload',
     automatic: preview.automatic,
