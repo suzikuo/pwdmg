@@ -73,6 +73,38 @@
               <van-icon :name="selectedIds.has(entry.id) ? 'checked' : 'circle'" />
             </div>
             <div v-else class="entry-right">
+              <div v-if="entry.kind === 'login'" class="entry-quick-actions" @click.stop>
+                <button
+                  v-if="entry.username"
+                  class="entry-quick-btn"
+                  type="button"
+                  title="复制账号"
+                  aria-label="复制账号"
+                  @click="emit('copy', entry.username)"
+                >
+                  <van-icon name="user-o" />
+                </button>
+                <button
+                  v-if="entry.password"
+                  class="entry-quick-btn"
+                  type="button"
+                  title="复制密码"
+                  aria-label="复制密码"
+                  @click="emit('copy-password', entry.id)"
+                >
+                  <van-icon name="shield-o" />
+                </button>
+                <button
+                  v-if="entry.domains?.[0]"
+                  class="entry-quick-btn"
+                  type="button"
+                  title="打开网站"
+                  aria-label="打开网站"
+                  @click="emit('open-website', entry.domains[0])"
+                >
+                  <van-icon name="link-o" />
+                </button>
+              </div>
               <button
                 class="entry-favorite-toggle"
                 type="button"
@@ -89,6 +121,36 @@
         </van-cell>
         <template #right>
           <div class="swipe-actions">
+            <button
+              v-if="entry.kind === 'login' && entry.domains?.[0]"
+              class="swipe-icon-action"
+              type="button"
+              aria-label="打开网站"
+              title="打开网站"
+              @click="$emit('open-website', entry.domains[0])"
+            >
+              <van-icon name="link-o" />
+            </button>
+            <button
+              v-if="entry.kind === 'login' && entry.username"
+              class="swipe-icon-action"
+              type="button"
+              aria-label="复制账号"
+              title="复制账号"
+              @click="$emit('copy', entry.username)"
+            >
+              <van-icon name="user-o" />
+            </button>
+            <button
+              v-if="entry.kind === 'login' && entry.password"
+              class="swipe-icon-action"
+              type="button"
+              aria-label="复制密码"
+              title="复制密码"
+              @click="$emit('copy-password', entry.id)"
+            >
+              <van-icon name="shield-o" />
+            </button>
             <button class="swipe-icon-action" type="button" aria-label="创建副本" @click="$emit('duplicate', entry.id)">
               <van-icon name="description-o" />
             </button>
@@ -119,6 +181,9 @@
           @context-menu="$emit('context-menu', $event)"
           @toggle-favorite="$emit('toggle-favorite', $event)"
           @toggle-selection="$emit('toggle-selection', $event)"
+          @open-website="$emit('open-website', $event)"
+          @copy="$emit('copy', $event)"
+          @copy-password="$emit('copy-password', $event)"
         />
       </div>
       </div>
@@ -142,8 +207,8 @@ import type { VaultEntry } from '../types'
 
 defineOptions({ name: 'EntryList' })
 
-const LONG_PRESS_MS = 420
-const LONG_PRESS_MOVE_LIMIT = 18
+const LONG_PRESS_MS = 320
+const LONG_PRESS_MOVE_LIMIT = 14
 
 const props = withDefaults(defineProps<{
   entries: VaultEntry[]
@@ -176,10 +241,17 @@ const emit = defineEmits<{
   'context-menu': [payload: { entry: VaultEntry; x: number; y: number }]
   'toggle-favorite': [entryId: string]
   'toggle-selection': [entryId: string]
+  'open-website': [domain: string]
+  copy: [value: string]
+  'copy-password': [entryId: string]
 }>()
 
 const expanded = ref(new Set<string>())
 const draggingId = ref('')
+let dragGhostEl: HTMLElement | null = null
+let grabOffsetX = 0
+let grabOffsetY = 0
+
 let pointerDrag: {
   entryId: string
   pointerId: number
@@ -231,12 +303,53 @@ function customFieldSummary(entry: VaultEntry) {
   return (entry.customFields || []).find((field) => !field.protected && field.value)?.value || ''
 }
 
+function createDragGhost(source: HTMLElement, clientX: number, clientY: number) {
+  removeDragGhost()
+  const cell = source.querySelector<HTMLElement>('.entry-cell') || source
+  const rect = cell.getBoundingClientRect()
+  grabOffsetX = clientX - rect.left
+  grabOffsetY = clientY - rect.top
+
+  const ghost = cell.cloneNode(true) as HTMLElement
+  ghost.classList.add('entry-drag-ghost')
+  ghost.style.position = 'fixed'
+  ghost.style.left = '0'
+  ghost.style.top = '0'
+  ghost.style.width = `${rect.width}px`
+  ghost.style.height = `${rect.height}px`
+  ghost.style.transform = `translate3d(${clientX - grabOffsetX}px, ${clientY - grabOffsetY}px, 0) scale(1.03)`
+  ghost.style.pointerEvents = 'none'
+  ghost.style.zIndex = '99999'
+  ghost.style.opacity = '0.94'
+  ghost.style.boxShadow = '0 12px 28px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.12)'
+  ghost.style.borderRadius = '12px'
+  ghost.style.overflow = 'hidden'
+  ghost.style.transition = 'transform 0.04s ease-out, box-shadow 0.2s ease'
+  ghost.style.willChange = 'transform'
+
+  document.body.appendChild(ghost)
+  dragGhostEl = ghost
+}
+
+function updateDragGhost(clientX: number, clientY: number) {
+  if (!dragGhostEl) return
+  const x = clientX - grabOffsetX
+  const y = clientY - grabOffsetY
+  dragGhostEl.style.transform = `translate3d(${x}px, ${y}px, 0) scale(1.03)`
+}
+
+function removeDragGhost() {
+  if (dragGhostEl) {
+    dragGhostEl.remove()
+    dragGhostEl = null
+  }
+}
+
 function preparePointerDrag(event: PointerEvent, entryId: string) {
   if (!props.draggableEnabled || event.button > 0) return
   if (isInteractiveTarget(event.target)) return
   cleanupPointerDrag()
   const source = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
-  source?.setPointerCapture?.(event.pointerId)
   pointerDrag = {
     entryId,
     pointerId: event.pointerId,
@@ -259,6 +372,16 @@ function activatePointerDrag() {
   pointerDrag.active = true
   draggingId.value = pointerDrag.entryId
   document.body.classList.add('is-entry-pointer-drag')
+  try {
+    navigator.vibrate?.(25)
+  } catch {}
+
+  if (pointerDrag.source) {
+    try {
+      pointerDrag.source.setPointerCapture?.(pointerDrag.pointerId)
+    } catch {}
+    createDragGhost(pointerDrag.source, pointerDrag.lastX, pointerDrag.lastY)
+  }
   setPointerDropTarget(findPointerDropTarget(pointerDrag.lastX, pointerDrag.lastY))
 }
 
@@ -273,6 +396,7 @@ function movePointerDrag(event: PointerEvent) {
   }
 
   event.preventDefault()
+  updateDragGhost(event.clientX, event.clientY)
   maybeAutoScroll(event.clientY)
   setPointerDropTarget(findPointerDropTarget(event.clientX, event.clientY))
 }
@@ -287,12 +411,13 @@ function finishPointerDrag(event: PointerEvent) {
     suppressNextClick = true
     window.setTimeout(() => {
       suppressNextClick = false
-    }, 0)
+    }, 50)
   }
   if (!wasActive || !target) return
 
   const targetParentId = target.dataset.dropParentId || ''
   const targetIndex = Number(target.dataset.dropIndex || 0)
+  if (entryId === targetParentId) return
   if (targetParentId) {
     const next = new Set(expanded.value)
     next.add(targetParentId)
@@ -306,8 +431,11 @@ function cancelPointerDrag() {
 }
 
 function cleanupPointerDrag() {
+  removeDragGhost()
   if (pointerDrag?.source?.hasPointerCapture?.(pointerDrag.pointerId)) {
-    pointerDrag.source.releasePointerCapture(pointerDrag.pointerId)
+    try {
+      pointerDrag.source.releasePointerCapture(pointerDrag.pointerId)
+    } catch {}
   }
   if (pointerDrag?.target) pointerDrag.target.classList.remove('is-pointer-target')
   if (pointerDrag?.timer) window.clearTimeout(pointerDrag.timer)
@@ -324,25 +452,94 @@ function isInteractiveTarget(target: EventTarget | null) {
   return Boolean(element?.closest('button, input, textarea, select, a, .entry-right, .van-swipe-cell__right'))
 }
 
-function findPointerDropTarget(clientX: number, clientY: number) {
-  for (const element of document.elementsFromPoint(clientX, clientY)) {
-    const target = element.closest<HTMLElement>('[data-drop-parent-id][data-drop-index]')
-    if (target) return target
-  }
+function findPointerDropTarget(clientX: number, clientY: number): HTMLElement | null {
+  if (!pointerDrag) return null
+  const currentDragId = pointerDrag.entryId
 
-  let closest: HTMLElement | null = null
-  let closestDistance = Number.POSITIVE_INFINITY
-  for (const target of document.querySelectorAll<HTMLElement>('[data-drop-parent-id][data-drop-index]')) {
-    const rect = target.getBoundingClientRect()
-    if (rect.width === 0 && rect.height === 0) continue
-    const centerY = rect.top + rect.height / 2
-    const distance = Math.abs(clientY - centerY)
-    if (distance < closestDistance) {
-      closestDistance = distance
-      closest = target
+  const elements = typeof document.elementsFromPoint === 'function'
+    ? document.elementsFromPoint(clientX, clientY)
+    : []
+
+  // 1. Direct hit on an entry-drop-zone line
+  for (const element of elements) {
+    if (element instanceof HTMLElement && element.classList.contains('entry-drop-zone')) {
+      return element
     }
   }
-  return closestDistance <= 72 ? closest : null
+
+  // 2. Direct hit on an entry-block
+  let targetBlock: HTMLElement | null = null
+  for (const element of elements) {
+    if (element instanceof HTMLElement) {
+      const block = element.closest<HTMLElement>('.entry-block')
+      if (block) {
+        targetBlock = block
+        break
+      }
+    }
+  }
+
+  // 3. If no direct hit, find nearest entry-block horizontally close to cursor
+  if (!targetBlock) {
+    let closestBlock: HTMLElement | null = null
+    let closestDist = Number.POSITIVE_INFINITY
+    const allBlocks = document.querySelectorAll<HTMLElement>('.entry-block')
+    for (const block of allBlocks) {
+      const rect = block.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) continue
+      if (clientX < rect.left - 48 || clientX > rect.right + 48) continue
+      const dist = Math.abs(clientY - (rect.top + rect.height / 2))
+      if (dist < closestDist) {
+        closestDist = dist
+        closestBlock = block
+      }
+    }
+    if (closestDist <= 80) {
+      targetBlock = closestBlock
+    }
+  }
+
+  // 4. Resolve drop target relative to the target block
+  if (targetBlock) {
+    const isFolder = targetBlock.classList.contains('is-folder')
+    const isSelf = targetBlock.classList.contains('is-dragging') || targetBlock.dataset.dropParentId === currentDragId
+    const rect = targetBlock.getBoundingClientRect()
+    const relY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5
+
+    // If folder and pointer is in the middle half, drop into folder
+    if (isFolder && !isSelf && relY >= 0.25 && relY <= 0.75) {
+      return targetBlock
+    }
+
+    // Otherwise drop before or after this block
+    const dropAbove = isFolder ? relY < 0.25 : relY < 0.5
+    if (dropAbove) {
+      let prev = targetBlock.previousElementSibling
+      while (prev && !prev.classList.contains('entry-drop-zone')) {
+        prev = prev.previousElementSibling
+      }
+      if (prev instanceof HTMLElement) return prev
+    } else {
+      let next = targetBlock.nextElementSibling
+      while (next && !next.classList.contains('entry-drop-zone')) {
+        next = next.nextElementSibling
+      }
+      if (next instanceof HTMLElement) return next
+    }
+  }
+
+  // 5. Fallback: check if hovering over tail drop zone or within list
+  for (const element of elements) {
+    if (element instanceof HTMLElement) {
+      const list = element.closest<HTMLElement>('.entry-list')
+      if (list) {
+        const tail = list.querySelector<HTMLElement>(':scope > .entry-drop-zone.is-tail')
+        if (tail) return tail
+      }
+    }
+  }
+
+  return null
 }
 
 function setPointerDropTarget(target: HTMLElement | null) {
@@ -354,14 +551,26 @@ function setPointerDropTarget(target: HTMLElement | null) {
 
 function maybeAutoScroll(clientY: number) {
   const margin = 72
-  if (clientY < margin) window.scrollBy({ top: -14 })
-  else if (clientY > window.innerHeight - margin) window.scrollBy({ top: 14 })
+  const maxSpeed = 16
+  let delta = 0
+  if (clientY < margin) {
+    delta = -Math.round(maxSpeed * (1 - Math.max(0, clientY) / margin))
+  } else if (clientY > window.innerHeight - margin) {
+    delta = Math.round(maxSpeed * (1 - Math.max(0, window.innerHeight - clientY) / margin))
+  }
+  if (delta === 0) return
+
+  window.scrollBy({ top: delta })
+  const workspaceGrid = document.querySelector('.workspace-grid-host, .vault-pane, .workspace')
+  if (workspaceGrid && workspaceGrid.scrollHeight > workspaceGrid.clientHeight) {
+    workspaceGrid.scrollBy({ top: delta })
+  }
 }
 
 function dropEntry(event: DragEvent, targetParentId: string, targetIndex: number) {
   const entryId = event.dataTransfer?.getData('text/plain')
   draggingId.value = ''
-  if (!entryId) return
+  if (!entryId || entryId === targetParentId) return
   if (targetParentId) {
     const next = new Set(expanded.value)
     next.add(targetParentId)

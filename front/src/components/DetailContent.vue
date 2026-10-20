@@ -28,24 +28,7 @@
       <span>{{ entry.statusReason || (entry.status === 'disabled' ? '不会出现在正常列表和自动填充中，恢复后回到原位置' : '已从正常列表隐藏') }}</span>
     </div>
 
-    <div v-if="visibleHistory.length" class="detail-view-tabs" role="tablist" aria-label="条目详情视图">
-      <button
-        type="button"
-        role="tab"
-        :aria-selected="activeView === 'details'"
-        :class="{ active: activeView === 'details' }"
-        @click="selectView('details')"
-      >详情</button>
-      <button
-        type="button"
-        role="tab"
-        :aria-selected="activeView === 'history'"
-        :class="{ active: activeView === 'history' }"
-        @click="selectView('history')"
-      >历史 <span>{{ visibleHistory.length }}</span></button>
-    </div>
-
-    <div class="detail-primary" :class="{ 'is-mobile-hidden': activeView === 'history' }">
+    <div class="detail-primary">
     <template v-if="entry.kind === 'login'">
     <div class="detail-row" v-if="entry.domains?.length">
       <small>{{ entry.autofillMatchMode === 'url-prefix' ? 'URL 前缀' : '域名' }}</small>
@@ -203,58 +186,83 @@
       ></textarea>
     </div>
     </div>
-    <section v-if="visibleHistory.length" class="detail-history" :class="{ 'is-mobile-hidden': activeView === 'details' }">
-      <div class="detail-history-head">
-        <strong>历史</strong>
-        <div class="detail-history-head-actions">
-          <span>{{ visibleHistory.length }} 条</span>
-          <button
-            class="detail-history-clear"
-            type="button"
-            aria-label="清空历史记录"
-            title="清空历史记录"
-            @click="$emit('clear-history', entry.id)"
-          >
-            <van-icon name="delete-o" />
-            <span>清空</span>
-          </button>
-        </div>
-      </div>
-      <div v-for="(item, index) in visibleHistory" :key="item.id" class="detail-history-row">
-        <div class="detail-history-main">
-          <div class="detail-history-item-head">
-            <div class="detail-history-meta">
-              <strong>{{ historyActionLabel(item.action) }}</strong>
-              <span>{{ formatHistoryTime(item.at) }}<template v-if="item.note"> · {{ item.note }}</template></span>
-            </div>
-            <van-button
-              v-if="item.snapshot"
-              class="icon-action"
-              size="mini"
-              icon="replay"
-              plain
-              aria-label="恢复此历史版本"
-              @click="$emit('restore-history', entry.id, item.id)"
-            />
+
+    <!-- History Popup Modal -->
+    <van-popup
+      v-model:show="historyModalOpen"
+      position="bottom"
+      round
+      class="detail-history-popup"
+      :duration="0.14"
+      lazy-render
+    >
+      <div class="detail-history-shell">
+        <div class="detail-history-modal-head">
+          <div class="detail-history-modal-title">
+            <van-icon name="clock-o" />
+            <span>历史记录 ({{ visibleHistory.length }})</span>
           </div>
-          <div v-if="historyChanges(item, index).length" class="detail-history-changes">
-            <div v-for="change in historyChanges(item, index)" :key="`${item.id}-${change.field}`" class="detail-history-change">
-              <span class="detail-history-field">{{ entryHistoryFieldLabel(change.field) }}</span>
-              <div class="detail-history-values">
-                <span class="is-before">{{ change.before }}</span>
-                <van-icon name="arrow" aria-hidden="true" />
-                <span class="is-after">{{ change.after }}</span>
+          <div class="detail-history-modal-actions">
+            <button
+              v-if="visibleHistory.length"
+              class="detail-history-clear"
+              type="button"
+              aria-label="清空历史记录"
+              title="清空历史记录"
+              @click="$emit('clear-history', entry.id)"
+            >
+              <van-icon name="delete-o" />
+              <span>清空</span>
+            </button>
+            <button
+              type="button"
+              class="inline-icon-button"
+              aria-label="关闭"
+              @click="historyModalOpen = false"
+            >
+              <van-icon name="cross" />
+            </button>
+          </div>
+        </div>
+
+        <div class="detail-history-modal-body">
+          <div v-for="(item, index) in visibleHistory" :key="item.id" class="detail-history-row">
+            <div class="detail-history-main">
+              <div class="detail-history-item-head">
+                <div class="detail-history-meta">
+                  <strong>{{ historyActionLabel(item.action) }}</strong>
+                  <span>{{ formatHistoryTime(item.at) }}<template v-if="item.note"> · {{ item.note }}</template></span>
+                </div>
+                <van-button
+                  v-if="item.snapshot"
+                  class="icon-action"
+                  size="mini"
+                  icon="replay"
+                  plain
+                  aria-label="恢复此历史版本"
+                  @click="$emit('restore-history', entry.id, item.id)"
+                />
+              </div>
+              <div v-if="historyChanges(item, index).length" class="detail-history-changes">
+                <div v-for="change in historyChanges(item, index)" :key="`${item.id}-${change.field}`" class="detail-history-change">
+                  <span class="detail-history-field">{{ entryHistoryFieldLabel(change.field) }}</span>
+                  <div class="detail-history-values">
+                    <span class="is-before">{{ change.before }}</span>
+                    <van-icon name="arrow" aria-hidden="true" />
+                    <span class="is-after">{{ change.after }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </section>
+    </van-popup>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { AutofillMatchMode, VaultCustomField, VaultEntry, VaultEntryHistory, VaultEntryHistoryChange } from '../types'
 import { buildEntryHistoryChanges, entryHistoryFieldLabel } from '../services/entryHistory'
 import { entryKindLabel } from '../services/entryKinds.ts'
@@ -285,15 +293,14 @@ function autofillMatchModeLabel(mode: AutofillMatchMode | undefined) {
 const visibleHistory = computed(() =>
   (props.entry?.history || []).filter((item) => item.action !== 'created').slice(0, 10)
 )
-const activeView = ref<'details' | 'history'>('details')
-const detailRoot = ref<HTMLElement | null>(null)
+const historyModalOpen = ref(false)
 const revealedCustomFields = ref(new Set<string>())
 const detailMenuOpen = ref(false)
 
 type DetailMenuAction = {
   text: string
   icon: string
-  key: 'duplicate' | 'edit' | 'move' | 'disable' | 'restore' | 'delete' | 'purge'
+  key: 'duplicate' | 'edit' | 'move' | 'disable' | 'restore' | 'delete' | 'purge' | 'history'
   color?: string
 }
 
@@ -311,6 +318,13 @@ const detailMenuActions = computed<DetailMenuAction[]>(() => {
         : []),
     )
   }
+  if (visibleHistory.value.length > 0) {
+    actions.push({
+      text: `修改历史 (${visibleHistory.value.length})`,
+      icon: 'clock-o',
+      key: 'history'
+    })
+  }
   if (entry.status === 'active' || !entry.status) {
     actions.push({ text: '归档', icon: 'closed-eye', key: 'disable', color: '#b45309' })
   }
@@ -326,13 +340,9 @@ const detailMenuActions = computed<DetailMenuAction[]>(() => {
 })
 
 watch(() => props.entry?.id, () => {
-  activeView.value = 'details'
+  historyModalOpen.value = false
   revealedCustomFields.value = new Set()
   detailMenuOpen.value = false
-})
-
-watch(() => visibleHistory.value.length, (length) => {
-  if (length === 0) activeView.value = 'details'
 })
 
 const emit = defineEmits<{
@@ -350,9 +360,9 @@ const emit = defineEmits<{
   'refresh-totp': []
   'open-passkey': [passkeyId: string]
   'unlink-passkey': [passkeyId: string]
-  'add-attachment': [entryId: string, file: File]
   'save-attachment': [entryId: string, attachmentId: string]
   'remove-attachment': [entryId: string, attachmentId: string]
+  'add-attachment': [entryId: string, file: File]
 }>()
 
 const attachmentInput = ref<HTMLInputElement | null>(null)
@@ -374,7 +384,8 @@ function formatAttachmentSize(value: number) {
 function selectDetailAction(action: DetailMenuAction) {
   const entry = props.entry
   if (!entry) return
-  if (action.key === 'duplicate') emit('duplicate', entry.id)
+  if (action.key === 'history') historyModalOpen.value = true
+  else if (action.key === 'duplicate') emit('duplicate', entry.id)
   else if (action.key === 'edit') emit('edit', entry)
   else if (action.key === 'move') emit('move', entry.id)
   else if (action.key === 'disable') emit('disable', entry.id)
@@ -394,12 +405,6 @@ function historyActionLabel(action: string) {
 function formatHistoryTime(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '-'
   return new Date(value * 1000).toLocaleString()
-}
-
-async function selectView(view: 'details' | 'history') {
-  activeView.value = view
-  await nextTick()
-  detailRoot.value?.closest<HTMLElement>('.sheet-inner')?.scrollTo({ top: 0 })
 }
 
 function historyChanges(item: VaultEntryHistory, index: number): VaultEntryHistoryChange[] {

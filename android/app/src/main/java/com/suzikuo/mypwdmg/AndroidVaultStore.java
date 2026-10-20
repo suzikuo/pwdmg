@@ -1401,7 +1401,7 @@ final class AndroidVaultStore {
             .put("accessKeyId", oss.optString("accessKeyId"))
             .put("accessKeySecret", oss.optString("accessKeySecret"))
             .put("region", oss.optString("region"))
-            .put("objectName", oss.optString("objectName", "mypwdmg-vault.json"))
+            .put("objectName", oss.optString("objectName", "pwd/mypwdmg-vault.json"))
             .put("autoSync", oss.optBoolean("autoSync", false))
             .put("autoSyncIntervalMinutes", Math.max(1, Math.min(1440, oss.optInt("autoSyncIntervalMinutes", 1))));
 
@@ -1618,7 +1618,7 @@ final class AndroidVaultStore {
             .put("accessKeyId", "")
             .put("accessKeySecret", "")
             .put("region", "")
-            .put("objectName", "mypwdmg-vault.json")
+            .put("objectName", "pwd/mypwdmg-vault.json")
             .put("autoSync", false)
             .put("autoSyncIntervalMinutes", 1);
         return new JSONObject()

@@ -1,4 +1,4 @@
-export const DEFAULT_OSS_OBJECT_NAME = 'mypwdmg-vault.json'
+export const DEFAULT_OSS_OBJECT_NAME = 'pwd/mypwdmg-vault.json'
 
 export const APIResponseStatus = {
   Success: 1,

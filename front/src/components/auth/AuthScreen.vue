@@ -15,6 +15,24 @@
     </div>
 
     <van-form v-else-if="hasVault" class="auth-card auth-card-compact" @submit="emit('unlock')">
+      <div v-if="deviceUnlockEnabled" class="device-unlock-hero">
+        <button
+          type="button"
+          class="device-unlock-hero-btn"
+          :disabled="busy"
+          @click="emit('quick-unlock')"
+        >
+          <div class="device-unlock-hero-icon">
+            <van-icon name="shield-o" />
+          </div>
+          <span class="device-unlock-hero-title">生物识别 / 设备快速解锁</span>
+          <span class="device-unlock-hero-subtitle">轻触通过指纹、面容或设备 PIN 解锁</span>
+        </button>
+        <div class="auth-divider">
+          <span>或使用主密码解锁</span>
+        </div>
+      </div>
+
       <van-field
         :model-value="password"
         type="password"
@@ -23,17 +41,9 @@
         placeholder="输入主密码，未设置可留空"
         @update:model-value="emit('update:password', String($event))"
       />
-      <van-button block type="primary" native-type="submit" :loading="busy">解锁</van-button>
-      <van-button
-        v-if="deviceUnlockEnabled"
-        block
-        plain
-        type="primary"
-        icon="shield-o"
-        native-type="button"
-        :loading="busy"
-        @click="emit('quick-unlock')"
-      >设备快速解锁</van-button>
+      <van-button block :type="deviceUnlockEnabled ? 'default' : 'primary'" native-type="submit" :loading="busy">
+        {{ deviceUnlockEnabled ? '使用主密码解锁' : '解锁' }}
+      </van-button>
     </van-form>
 
     <van-form v-else class="auth-card" @submit="emit('create')">

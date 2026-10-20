@@ -39,6 +39,9 @@
         @context-menu="emit('context-menu', $event)"
         @toggle-favorite="emit('toggle-favorite', $event)"
         @toggle-selection="emit('toggle-selection', $event)"
+        @open-website="emit('open-website', $event)"
+        @copy="emit('copy', $event)"
+        @copy-password="emit('copy-password', $event)"
       />
     </section>
 
@@ -68,6 +71,7 @@
         :attachment-busy="attachmentBusy"
         :attachment-actions-supported="attachmentActionsSupported"
         @edit="emit('edit', $event)"
+        @move="emit('move', $event)"
         @duplicate="emit('duplicate', $event)"
         @delete="emit('delete', $event)"
         @disable="emit('disable', $event)"
@@ -76,6 +80,7 @@
         @restore-history="(entryId, historyId) => emit('restore-history', entryId, historyId)"
         @clear-history="emit('clear-history', $event)"
         @copy="emit('copy', $event)"
+        @open-website="emit('open-website', $event)"
         @toggle-password="emit('toggle-password')"
         @refresh-totp="emit('refresh-totp')"
         @open-passkey="emit('open-passkey', $event)"
@@ -93,6 +98,7 @@
 import EntryList from '../EntryList.vue'
 import EntryDetailPane from './EntryDetailPane.vue'
 import type { VaultEntry } from '../../types'
+import type { EntryFilterMode } from '../../services/entryWorkspace.ts'
 import type { PasskeyPresentationItem } from '../../services/passkeyPresentation.ts'
 
 type WorkspaceStats = {
@@ -143,6 +149,8 @@ const emit = defineEmits<{
   'restore-history': [entryId: string, historyId: string]
   'clear-history': [entryId: string]
   copy: [value: string]
+  'copy-password': [entryId: string]
+  'open-website': [domain: string]
   'toggle-password': []
   'refresh-totp': []
   'open-passkey': [passkeyId: string]

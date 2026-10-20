@@ -52,7 +52,7 @@
           </van-cell>
         </div>
 
-        <div v-else-if="mode === 'passphrase'" class="generator-controls">
+        <div v-else class="generator-controls">
           <van-cell title="词组数量" :label="`${wordCount} 组可读词`">
             <template #right-icon>
               <van-stepper v-model="wordCount" :min="3" :max="10" integer button-size="24px" @change="regenerate" />
@@ -64,26 +64,6 @@
           </van-cell>
           <van-cell center title="添加随机数字">
             <template #right-icon><van-switch v-model="includeNumber" size="22px" @change="regenerate" /></template>
-          </van-cell>
-        </div>
-
-        <div v-else class="generator-controls">
-          <div class="generator-submode">
-            <button type="button" :class="{ active: usernameMode === 'random' }" @click="setUsernameMode('random')">随机用户名</button>
-            <button type="button" :class="{ active: usernameMode === 'plus-address' }" @click="setUsernameMode('plus-address')">加号邮箱</button>
-          </div>
-          <van-field
-            v-if="usernameMode === 'plus-address'"
-            v-model="baseEmail"
-            type="email"
-            label="基础邮箱"
-            placeholder="name@example.com"
-            autocomplete="email"
-          />
-          <van-cell title="数字长度" :label="`${usernameDigits} 位`">
-            <template #right-icon>
-              <van-stepper v-model="usernameDigits" :min="2" :max="8" integer button-size="24px" @change="regenerate" />
-            </template>
           </van-cell>
         </div>
 
@@ -109,9 +89,7 @@ import { ref, watch } from 'vue'
 import {
   generatePassphrase,
   generatePassword,
-  generateUsername,
-  type GeneratorMode,
-  type UsernameMode
+  type GeneratorMode
 } from '../../services/credentialGenerator.ts'
 
 const props = defineProps<{
@@ -128,8 +106,7 @@ const emit = defineEmits<{
 
 const modeOptions: Array<{ value: GeneratorMode; label: string; icon: string }> = [
   { value: 'password', label: '密码', icon: 'closed-eye' },
-  { value: 'passphrase', label: '口令', icon: 'records-o' },
-  { value: 'username', label: '用户名', icon: 'contact-o' }
+  { value: 'passphrase', label: '口令', icon: 'records-o' }
 ]
 const mode = ref<GeneratorMode>('password')
 const generated = ref('')
@@ -143,9 +120,6 @@ const wordCount = ref(5)
 const separator = ref('-')
 const capitalizeWords = ref(true)
 const includeNumber = ref(true)
-const usernameMode = ref<UsernameMode>('random')
-const baseEmail = ref('')
-const usernameDigits = ref(4)
 
 watch(() => props.open, (open) => {
   if (open && !generated.value) regenerate()
@@ -155,18 +129,11 @@ watch(() => props.resetKey, () => {
   generated.value = ''
   error.value = ''
   history.value = []
-  baseEmail.value = ''
 })
 
 function selectMode(value: GeneratorMode) {
   mode.value = value
   regenerate()
-}
-
-function setUsernameMode(value: UsernameMode) {
-  usernameMode.value = value
-  if (value === 'random' || baseEmail.value.trim()) regenerate()
-  else generated.value = ''
 }
 
 function regenerate() {
@@ -183,18 +150,12 @@ function regenerate() {
         symbols: selected.has('symbols'),
         excludeAmbiguous: excludeAmbiguous.value
       })
-    } else if (mode.value === 'passphrase') {
+    } else {
       value = generatePassphrase({
         words: wordCount.value,
         separator: separator.value,
         capitalize: capitalizeWords.value,
         includeNumber: includeNumber.value
-      })
-    } else {
-      value = generateUsername({
-        mode: usernameMode.value,
-        email: baseEmail.value,
-        digits: usernameDigits.value
       })
     }
     generated.value = value
@@ -202,7 +163,7 @@ function regenerate() {
     history.value = [
       { id: historySequence.value, value, label: modeOptions.find((item) => item.value === mode.value)?.label || '' },
       ...history.value.filter((item) => item.value !== value)
-    ].slice(0, 6)
+    ].slice(0, 4)
   } catch (reason) {
     generated.value = ''
     error.value = reason instanceof Error ? reason.message : '生成失败'
@@ -212,9 +173,9 @@ function regenerate() {
 
 <style scoped>
 .credential-generator-shell {
-  width: min(100vw, 640px);
-  max-height: 88vh;
-  max-height: 88dvh;
+  width: min(100vw, 440px);
+  max-height: 85vh;
+  max-height: 85dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -222,57 +183,54 @@ function regenerate() {
   background: var(--panel-bg);
 }
 
-.generator-mode-tabs,
-.generator-submode {
+.generator-mode-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
-  margin: 10px 12px 0;
+  margin: 8px 12px 0;
   padding: 3px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
 
-.generator-mode-tabs button,
-.generator-submode button {
+.generator-mode-tabs button {
   min-width: 0;
-  min-height: 38px;
+  min-height: 34px;
   border: 0;
   border-radius: 6px;
   color: var(--text-muted);
   background: transparent;
   cursor: pointer;
-}
-
-.generator-mode-tabs button {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
+  font-size: var(--app-font-sm, 13px);
+  font-weight: 500;
+  transition: all 0.15s ease;
 }
 
-.generator-mode-tabs button.active,
-.generator-submode button.active {
+.generator-mode-tabs button.active {
   color: var(--brand-strong);
   background: var(--panel-bg);
-  box-shadow: 0 1px 4px color-mix(in srgb, var(--text-main), transparent 90%);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 .generator-scroll-area {
   min-height: 0;
   display: grid;
-  gap: 12px;
+  gap: 10px;
   padding: 12px;
   overflow-y: auto;
 }
 
 .generator-output {
-  min-height: 64px;
+  min-height: 52px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 36px;
+  grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   background: var(--panel-bg-muted);
@@ -283,8 +241,9 @@ function regenerate() {
   overflow-wrap: anywhere;
   color: var(--text-main);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: var(--app-font-md);
-  line-height: 1.5;
+  font-size: var(--app-font-md, 15px);
+  line-height: 1.4;
+  user-select: all;
 }
 
 .generator-error {
@@ -295,11 +254,12 @@ function regenerate() {
 
 .generator-controls {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
-.generator-controls .van-cell,
-.generator-controls .van-field {
+.generator-controls :deep(.van-cell),
+.generator-controls :deep(.van-field) {
+  padding: 8px 12px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
@@ -307,15 +267,14 @@ function regenerate() {
 .generator-check-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  padding: 12px;
+  gap: 8px;
+  padding: 10px 12px;
   border-radius: 8px;
   background: var(--panel-bg-muted);
 }
 
-.generator-submode {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: 0;
+.generator-check-grid :deep(.van-checkbox__label) {
+  font-size: var(--app-font-sm, 13px);
 }
 
 .generator-history {
@@ -329,7 +288,7 @@ function regenerate() {
 .generator-section-head,
 .generator-history > button {
   min-width: 0;
-  padding: 9px 11px;
+  padding: 6px 10px;
   border: 0;
   background: var(--panel-bg-muted);
 }
@@ -338,6 +297,7 @@ function regenerate() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  font-size: var(--app-font-xs, 12px);
 }
 
 .generator-section-head button {
@@ -364,17 +324,19 @@ function regenerate() {
 .generator-history span {
   color: var(--text-main);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: var(--app-font-xs, 12px);
 }
 
 .generator-history small {
   color: var(--text-muted);
+  font-size: 11px;
 }
 
 .generator-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  padding: 10px 12px max(10px, env(safe-area-inset-bottom));
+  padding: 8px 12px max(8px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--border-soft);
   background: var(--panel-bg);
 }
@@ -382,15 +344,8 @@ function regenerate() {
 @media (max-width: 420px) {
   .credential-generator-shell {
     width: 100vw;
-    max-height: 92vh;
-    max-height: 92dvh;
-  }
-
-  .generator-mode-tabs button {
-    display: grid;
-    place-items: center;
-    gap: 2px;
-    font-size: var(--app-font-sm);
+    max-height: 90vh;
+    max-height: 90dvh;
   }
 }
 </style>

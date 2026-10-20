@@ -20,6 +20,7 @@
     @restore-history="(entryId, historyId) => emit('restore-history', entryId, historyId)"
     @clear-history="emit('clear-history', $event)"
     @copy="emit('copy', $event)"
+    @open-website="emit('open-website', $event)"
     @toggle-password="emit('toggle-password')"
     @refresh-totp="emit('refresh-totp')"
     @open-passkey="emit('open-passkey', $event)"
@@ -58,6 +59,7 @@ const emit = defineEmits<{
   'restore-history': [entryId: string, historyId: string]
   'clear-history': [entryId: string]
   copy: [value: string]
+  'open-website': [domain: string]
   'toggle-password': []
   'refresh-totp': []
   'open-passkey': [passkeyId: string]

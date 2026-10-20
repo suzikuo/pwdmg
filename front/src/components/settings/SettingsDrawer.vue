@@ -34,6 +34,11 @@
           <van-icon name="cluster-o" />
           <span>系统分组</span>
         </button>
+        <div class="drawer-nav-divider" role="separator"></div>
+        <button type="button" class="drawer-exit-button" @click="emit('safe-exit')">
+          <van-icon name="cross" />
+          <span>安全退出</span>
+        </button>
       </nav>
 
       <div class="drawer-detail-head">
@@ -303,7 +308,7 @@
           <van-field :model-value="oss.accessKeyId" label="Key ID" placeholder="AccessKey ID" @update:model-value="updateOss('accessKeyId', $event)" />
           <van-field :model-value="oss.accessKeySecret" label="Key Secret" type="password" placeholder="AccessKey Secret" @update:model-value="updateOss('accessKeySecret', $event)" />
           <van-field :model-value="oss.region" label="Region" placeholder="oss-cn-hangzhou" @update:model-value="updateOss('region', $event)" />
-          <van-field :model-value="oss.objectName" label="文件名" placeholder="mypwdmg-vault.json" @update:model-value="updateOss('objectName', $event)" />
+          <van-field :model-value="oss.objectName" label="文件名" placeholder="pwd/mypwdmg-vault.json" @update:model-value="updateOss('objectName', $event)" />
           <van-cell center title="自动同步数据" label="保存后上传校验，回到前台下载校验">
             <template #right-icon><van-switch :model-value="oss.autoSync" size="18" @update:model-value="emit('update-auto-sync', Boolean($event))" /></template>
           </van-cell>
@@ -632,6 +637,7 @@ const emit = defineEmits<{
   'restore-entries': [entryIds: string[]]
   'trash-entries': [entryIds: string[]]
   'purge-entries': [entryIds: string[]]
+  'safe-exit': []
 }>()
 
 function selectSection(section: DrawerSection) {

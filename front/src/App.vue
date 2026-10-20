@@ -35,6 +35,7 @@
         :more-menu-open="moreMenuOpen"
         :create-menu-actions="createMenuActions"
         :more-actions="moreActions"
+        @create-entry="openCreate('login')"
         @open-drawer="openDrawer"
         @toggle-search="toggleSearch"
         @update:keyword="keyword = $event"
@@ -92,6 +93,8 @@
         @restore-history="restoreEntryHistory"
         @clear-history="clearEntryHistory"
         @copy="copyText"
+        @copy-password="copyEntryPassword"
+        @open-website="openQuickAccessWebsite"
         @toggle-password="showPassword = !showPassword"
         @refresh-totp="refreshTotp()"
         @open-passkey="openPasskeyManager"
@@ -127,6 +130,7 @@
           @restore-history="restoreEntryHistory"
           @clear-history="clearEntryHistory"
           @copy="copyText"
+          @open-website="openQuickAccessWebsite"
           @toggle-password="showPassword = !showPassword"
           @refresh-totp="refreshTotp()"
           @open-passkey="openPasskeyManager"
@@ -146,26 +150,35 @@
       @select="handleCreateAction"
     />
 
-    <van-action-sheet
-      v-model:show="moveSheetOpen"
-      class="move-destination-sheet"
-      title="移动到"
-      :actions="moveDestinationActions"
-      cancel-text="取消"
-      close-on-click-action
-      @select="selectMoveDestination"
-      @closed="moveEntryId = ''"
+    <MoveDestinationModal
+      v-if="moveSheetOpen || batchMoveSheetOpen"
+      :open="moveSheetOpen || batchMoveSheetOpen"
+      :title="batchMoveSheetOpen ? '批量移动到' : '移动到'"
+      :subtitle="moveModalSubtitle"
+      :entries="vault?.entries || []"
+      :moving-entry-ids="moveModalMovingEntryIds"
+      @update:open="handleMoveModalOpenChange"
+      @confirm="handleMoveModalConfirm"
     />
 
-    <van-action-sheet
-      v-model:show="batchMoveSheetOpen"
-      class="move-destination-sheet"
-      title="批量移动到"
-      :actions="batchMoveDestinationActions"
-      cancel-text="取消"
-      close-on-click-action
-      @select="selectBatchMoveDestination"
-    />
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     <QuickAccess
       :open="quickAccessOpen"
@@ -212,7 +225,8 @@
       :login-account-source-options="loginAccountSourceOptions"
       :show-qr-image-picker="isDesktopRuntime || isAndroidRuntime"
       :qr-image-busy="qrImageBusy"
-      @update:open="editorOpen = $event"
+      @update:open="handleEditorOpenChange"
+      @switch-kind="switchEditorKind"
       @update-field="updateEditorField"
       @update-domain="domainText = $event"
       @submit="saveEntry"
@@ -373,6 +387,7 @@
       @restore-entries="restoreEntries"
       @trash-entries="trashEntries"
       @purge-entries="purgeEntries"
+      @safe-exit="safeExit"
     />
 
 
@@ -517,6 +532,12 @@
       @delete="deleteManagedPasskey"
       @open-entry="openPasskeyLinkedEntry"
     />
+    <transition name="van-fade">
+      <div v-if="trashUndoState" class="trash-undo-snackbar" role="alert">
+        <span>已将「{{ trashUndoState.title }}」移入回收站</span>
+        <button type="button" class="trash-undo-btn" @click="handleUndoTrash">撤销</button>
+      </div>
+    </transition>
   </main>
 </template>
 
@@ -531,6 +552,7 @@ const PasskeyManager = defineAsyncComponent(() => import('./components/tools/Pas
 const PasswordHealthCenter = defineAsyncComponent(() => import('./components/tools/PasswordHealthCenter.vue'))
 const CloudPasswordPrompt = defineAsyncComponent(() => import('./components/sync/CloudPasswordPrompt.vue'))
 const CloudSyncReview = defineAsyncComponent(() => import('./components/sync/CloudSyncReview.vue'))
+const MoveDestinationModal = defineAsyncComponent(() => import('./components/workspace/MoveDestinationModal.vue'))
 import EntryDetailPane from './components/workspace/EntryDetailPane.vue'
 import QuickAccess from './components/workspace/QuickAccess.vue'
 const SettingsDrawer = defineAsyncComponent(() => import('./components/settings/SettingsDrawer.vue'))
@@ -916,7 +938,11 @@ const settings = reactive({
 const cloudEncryptionBindingVersion = ref(0)
 const cloudEncryptionBindingLabel = computed(() => {
   void cloudEncryptionBindingVersion.value
-  const binding = readCloudEncryptionBinding(cloudSyncStateKey(settings.oss.objectName))
+  const normalizedName = normalizeObjectName(settings.oss.objectName)
+  let binding = readCloudEncryptionBinding(cloudSyncStateKey(normalizedName))
+  if (!binding && normalizedName.startsWith('pwd/')) {
+    binding = readCloudEncryptionBinding(cloudSyncStateKey(normalizedName.slice('pwd/'.length)))
+  }
   if (!binding) return '未绑定；首次校验云端主密码后会自动绑定'
   const verifiedAt = new Date(binding.verifiedAt).toISOString()
   return `已绑定 · PBKDF2-SHA256 ${binding.kdf.iterations.toLocaleString()} 次 · ${formatDateTime(verifiedAt)}`
@@ -974,6 +1000,8 @@ const {
     recentIds: recentEntryIds.value
   })
 )
+const wasDetailOpenBeforeEdit = ref(false)
+const trashUndoState = ref<{ id: string; title: string; timer: number } | null>(null)
 const visibleBatchEntryIds = computed(() => collectEntryIds(filteredEntries.value))
 const allVisibleBatchEntriesSelected = computed(() => {
   const visibleIds = visibleBatchEntryIds.value
@@ -1007,6 +1035,7 @@ const entryContextActions = computed(() => {
       { name: '新建分组', key: 'create-folder' },
       { name: '创建副本', key: 'duplicate' },
       { name: '编辑分组', key: 'edit' },
+      { name: '移动到', key: 'move' },
       { name: '归档分组', key: 'archive', color: '#ee0a24' },
       { name: '移入回收站', key: 'trash', color: '#ee0a24' }
     )
@@ -1015,6 +1044,7 @@ const entryContextActions = computed(() => {
     actions.push(
       { name: '创建副本', key: 'duplicate' },
       { name: `编辑${label}`, key: 'edit' },
+      { name: '移动到', key: 'move' },
       { name: `归档${label}`, key: 'archive', color: '#ee0a24' },
       { name: '移入回收站', key: 'trash', color: '#ee0a24' }
     )
@@ -1026,9 +1056,9 @@ const entryContextMenuStyle = computed<CssVars>(() => ({
   top: `${entryContextMenuY.value}px`
 }))
 const moreActions = computed(() => [
-  { text: '快速访问', icon: 'search', key: 'quick-access' },
-  { text: '凭据生成器', icon: 'replay', key: 'generator' },
-  { text: '导入数据', icon: 'upgrade', key: 'import' },
+
+
+
   {
     text: batchSelectionMode.value ? '退出批量选择' : '批量选择',
     icon: 'passed',
@@ -1040,9 +1070,9 @@ const moreActions = computed(() => [
     key: 'drag'
   },
   { text: '锁定', icon: 'lock', key: 'lock' },
-  ...(isExternalNativeRuntime
-    ? [{ text: '安全退出', icon: 'cross', key: 'safe-exit', color: '#ee0a24' }]
-    : [])
+
+
+
 ])
 const loginAccountSourceOptions: Array<{ label: string; value: LoginAccountSource }> = [
   { label: '自动', value: 'auto' },
@@ -1322,6 +1352,15 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     openQuickAccess()
     return
   }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+    if (unlocked.value && !editorOpen.value) {
+      event.preventDefault()
+      event.stopPropagation()
+      toggleSearch()
+      return
+    }
+    return
+  }
   if (event.key !== 'Escape' || event.defaultPrevented) return
   if (document.querySelector('.van-dialog')) return
   if (!closeTopLayer()) return
@@ -1373,7 +1412,7 @@ function closeTopLayer() {
   }
   if (editorOpen.value) {
     blurActiveElement()
-    editorOpen.value = false
+    closeEditor()
     return true
   }
   if (entryContextMenuOpen.value) {
@@ -1481,13 +1520,19 @@ function blurActiveElement() {
 function scrollFocusedEditorFieldIntoView(event: FocusEvent) {
   if (!editorOpen.value) return
   const target = event.target as HTMLElement | null
-  const field = target?.closest?.('.van-field') as HTMLElement | null
+  const field = target?.closest?.('.van-field, .autofill-rule-field, .account-source-field') as HTMLElement | null
   const element = field || target
   if (!element) return
   const scroller = element.closest('.editor-form') as HTMLElement | null
   if (!scroller) return
-  window.setTimeout(() => scrollEditorElementIntoView(scroller, element, 'smooth'), 80)
-  window.setTimeout(() => scrollEditorElementIntoView(scroller, element, 'auto'), 260)
+  window.setTimeout(() => {
+    if (document.activeElement !== target && !element.contains(document.activeElement)) return
+    const scrollerRect = scroller.getBoundingClientRect()
+    const elementRect = element.getBoundingClientRect()
+    if (elementRect.top < scrollerRect.top + 24 || elementRect.bottom > scrollerRect.bottom - 48) {
+      scrollEditorElementIntoView(scroller, element, 'smooth')
+    }
+  }, 160)
 }
 
 function beginBusyOperation() {
@@ -1980,7 +2025,35 @@ async function applyTotpQrValue(value: string, targetEditingId: string, targetFo
   showSuccessToast(account ? `已导入 ${account} 的 TOTP` : '已导入 TOTP')
 }
 
+function closeEditor() {
+  editorOpen.value = false
+  if (wasDetailOpenBeforeEdit.value && selectedEntry.value && !isWide.value) {
+    detailOpen.value = true
+  }
+  wasDetailOpenBeforeEdit.value = false
+}
+
+function handleEditorOpenChange(open: boolean) {
+  if (!open) {
+    closeEditor()
+  } else {
+    editorOpen.value = true
+  }
+}
+
+function switchEditorKind(kind: EntryKind) {
+  if (form.kind === kind) return
+  const currentTitle = form.title
+  const currentNote = form.note
+  const template = emptyEntry(kind)
+  form.kind = kind
+  if (currentTitle) form.title = currentTitle
+  if (currentNote) form.note = currentNote
+  if (template.customFields) form.customFields = template.customFields
+}
+
 function openCreate(kind: EntryKind, parentId = '') {
+  wasDetailOpenBeforeEdit.value = false
   createMenuOpen.value = false
   editingId.value = ''
   editingParentId.value = parentId
@@ -2024,6 +2097,7 @@ function openEntryContextMenu(payload: { entry: VaultEntry; x: number; y: number
 
 function handleEntryContextAction(action: { key?: string }) {
   const entry = findEntry(vault.value?.entries || [], contextEntryId.value)
+  const targetId = contextEntryId.value
   entryContextMenuOpen.value = false
   contextEntryId.value = ''
   if (!entry || !action.key) return
@@ -2031,6 +2105,7 @@ function handleEntryContextAction(action: { key?: string }) {
   if (action.key === 'create-folder') return openCreate('folder', entry.id)
   if (action.key === 'duplicate') return duplicateEntry(entry.id)
   if (action.key === 'edit') return openEdit(entry)
+  if (action.key === 'move') return openMoveSheet(targetId)
   if (action.key === 'archive') return archiveEntry(entry.id)
   if (action.key === 'trash') return trashEntry(entry.id)
   if (action.key === 'restore') return restoreEntry(entry.id)
@@ -2043,7 +2118,7 @@ function closeEntryContextMenu() {
 
 function clampEntryContextMenuPosition(x: number, y: number) {
   const menuWidth = 156
-  const menuHeight = 236
+  const menuHeight = 280
   const margin = 8
   return {
     x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
@@ -2095,9 +2170,17 @@ function toggleDragMode() {
 
 async function safeExit() {
   moreMenuOpen.value = false
+  drawerOpen.value = false
   try {
     const result = await api.safeExit()
-    if (!result.ok) showFailToast(result.message || '安全退出失败')
+    if (!result.ok) {
+      showFailToast(result.message || '安全退出失败')
+      return
+    }
+    if (!isExternalNativeRuntime) {
+      await lockVault()
+      showToast('已安全退出并锁定保险库')
+    }
   } catch {
     showFailToast('安全退出失败，请手动关闭应用')
   }
@@ -2348,6 +2431,7 @@ function toggleEntryFavorite(entryId: string) {
 }
 
 function openEdit(entry: VaultEntry) {
+  wasDetailOpenBeforeEdit.value = detailOpen.value || !isWide.value
   editingId.value = entry.id
   editingParentId.value = ''
   resetForm(entry)
@@ -2392,6 +2476,10 @@ async function saveEntry() {
       ignoredHealthFindings.value
     )
     editorOpen.value = false
+    if (!isWide.value) {
+      detailOpen.value = true
+    }
+    wasDetailOpenBeforeEdit.value = false
     scheduleAutoCloudUpload()
     showSuccessToast('已保存')
   } catch {
@@ -2399,6 +2487,12 @@ async function saveEntry() {
   } finally {
     finishBusyOperation(operationId)
   }
+}
+
+async function copyEntryPassword(entryId: string) {
+  const entry = findEntry(vault.value?.entries || [], entryId)
+  if (!entry?.password) return showToast('此条目未保存密码')
+  await copyText(entry.password)
 }
 
 async function addEntryAttachment(entryId: string, file: File) {
@@ -2684,6 +2778,25 @@ async function archiveEntry(entryId: string) {
   showSuccessToast(`${itemLabel}已归档`)
 }
 
+function showTrashUndoToast(id: string, title: string) {
+  if (trashUndoState.value?.timer) {
+    window.clearTimeout(trashUndoState.value.timer)
+  }
+  const timer = window.setTimeout(() => {
+    trashUndoState.value = null
+  }, 5000)
+  trashUndoState.value = { id, title, timer }
+}
+
+async function handleUndoTrash() {
+  if (!trashUndoState.value) return
+  const id = trashUndoState.value.id
+  if (trashUndoState.value.timer) window.clearTimeout(trashUndoState.value.timer)
+  trashUndoState.value = null
+  await restoreEntry(id)
+  showSuccessToast('已撤销删除')
+}
+
 async function trashEntry(entryId: string) {
   if (!vault.value) return
   const target = findEntry(vault.value.entries, entryId)
@@ -2720,9 +2833,9 @@ async function trashEntry(entryId: string) {
     detailOpen.value = false
     stopTotpTimer()
   }
-  drawerSection.value = 'system'
-  systemGroupKey.value = 'trashed'
-  showSuccessToast('已移入回收站')
+  showTrashUndoToast(entryId, title)
+
+
 }
 
 async function restoreEntry(entryId: string) {
@@ -2856,6 +2969,39 @@ function selectMoveDestination(action: MoveDestinationAction) {
     targetParentId: action.targetParentId,
     targetIndex: Number.MAX_SAFE_INTEGER
   })
+}
+
+const moveModalMovingEntryIds = computed<string[]>(() => {
+  if (batchMoveSheetOpen.value) return [...batchSelectedEntryIds.value]
+  if (moveEntryId.value) return [moveEntryId.value]
+  return []
+})
+
+const moveModalSubtitle = computed<string>(() => {
+  if (batchMoveSheetOpen.value) {
+    return `已选 ${batchSelectedEntryIds.value.size} 个条目`
+  }
+  if (moveEntryId.value) {
+    const entry = findEntry(vault.value?.entries || [], moveEntryId.value)
+    if (entry) return `正在移动「${entry.title}」`
+  }
+  return ''
+})
+
+function handleMoveModalOpenChange(open: boolean) {
+  if (!open) {
+    moveSheetOpen.value = false
+    batchMoveSheetOpen.value = false
+    moveEntryId.value = ''
+  }
+}
+
+function handleMoveModalConfirm(targetParentId: string) {
+  if (batchMoveSheetOpen.value) {
+    void selectBatchMoveDestination({ targetParentId, name: '', icon: '' })
+  } else if (moveSheetOpen.value) {
+    selectMoveDestination({ targetParentId, name: '', icon: '' })
+  }
 }
 
 function appendMoveDestinationActions(
@@ -3522,6 +3668,39 @@ async function checkCloudBackupInfo() {
   }
 }
 
+async function loadCloudBackupItems(client: RemoteVaultStore, fixedName: string) {
+  const backupDir = resolveBackupDirectory(fixedName)
+  const v2FixedName = versionedVaultObjectName(fixedName, 2)
+  const listPromises = [
+    client.listObjects(backupDir, 50),
+    client.listObjects(fixedName, 50)
+  ]
+  if (fixedName.startsWith('pwd/')) {
+    listPromises.push(client.listObjects(fixedName.slice('pwd/'.length), 50))
+  }
+  const responses = await Promise.all(listPromises)
+  const allItems: RemoteVaultObjectInfo[] = []
+  for (const res of responses) {
+    if (res.status === RemoteVaultStatus.Success && Array.isArray(res.content)) {
+      allItems.push(...res.content)
+    }
+  }
+  const seen = new Set<string>()
+  return allItems
+    .filter((item) => {
+      if (!item?.name || seen.has(item.name)) return false
+      seen.add(item.name)
+      if (item.name === fixedName || item.name === v2FixedName) return false
+      if (item.name.includes('.sync-v3/') || item.name.includes('.attachments/')) return false
+      if (item.name.startsWith(backupDir)) return true
+      if (item.name.startsWith(`${fixedName}.`)) return true
+      if (fixedName.startsWith('pwd/') && item.name.startsWith(`${fixedName.slice('pwd/'.length)}.`)) return true
+      return false
+    })
+    .map(toCloudBackupInfo)
+    .sort((left, right) => String(right.lastModified).localeCompare(String(left.lastModified)))
+}
+
 async function refreshCloudBackupList() {
   if (!vault.value || cloudBusy.value) return
   if (!validateOssSettings()) return
@@ -3538,24 +3717,8 @@ async function refreshCloudBackupList() {
     }
     markCloudOperation(cloudOperation, 'reading-remote', '正在读取云端备份列表')
     const client = createRemoteVaultStore()
-    const response = await client.listObjects(settings.oss.objectName, 50)
-    if (response.status !== RemoteVaultStatus.Success || !Array.isArray(response.content)) {
-      const message = String(response.content || '读取备份列表失败')
-      finishCloudOperation(cloudOperation, 'error', message)
-      showFailToast(message)
-      return
-    }
     const fixedName = normalizeObjectName(settings.oss.objectName)
-    const v2FixedName = versionedVaultObjectName(fixedName, 2)
-    cloudBackups.value = response.content
-      .map(toCloudBackupInfo)
-      .filter((item) =>
-        item.name !== fixedName &&
-        item.name !== v2FixedName &&
-        !item.name.startsWith(`${fixedName}.sync-v3/`) &&
-        item.name.startsWith(`${fixedName}.`)
-      )
-      .sort((left, right) => String(right.lastModified).localeCompare(String(left.lastModified)))
+    cloudBackups.value = await loadCloudBackupItems(client, fixedName)
     backupStatus.value = cloudBackups.value.length ? `找到 ${cloudBackups.value.length} 个云端日期备份` : '没有找到日期备份'
     showToast(backupStatus.value)
   } catch (error) {
@@ -4712,7 +4875,7 @@ function isCloudSyncPreviewCurrent(preview: CloudSyncPreview) {
     preview.cloudScopeId === currentCloudScopeId()
 }
 
-function syncCloudSyncPreviewAfterLocalApply(preview: CloudSyncPreview, appliedVault: VaultPayload) {
+function syncCloudSyncPreviewAfterDownload(preview: CloudSyncPreview, appliedVault: VaultPayload) {
   if (state.locked || vault.value !== appliedVault) return false
   // Applying a sync result may refresh the active frontend session and OSS
   // settings carried by the local payload. Those changes belong to this
@@ -4721,6 +4884,7 @@ function syncCloudSyncPreviewAfterLocalApply(preview: CloudSyncPreview, appliedV
   preview.cloudScopeId = currentCloudScopeId()
   return true
 }
+const syncCloudSyncPreviewAfterLocalApply = syncCloudSyncPreviewAfterDownload
 
 type CloudSyncApplyContext = {
   preview: CloudSyncPreview
@@ -4867,7 +5031,7 @@ async function applyCloudDownload(context: CloudSyncApplyContext) {
 
   if (!publishVaultPayload(appliedVault)) return false
   void collectLocalAttachmentObjects(appliedVault)
-  if (!syncCloudSyncPreviewAfterLocalApply(preview, appliedVault)) return false
+  if (!syncCloudSyncPreviewAfterDownload(preview, appliedVault)) return false
 
   let passwordAdopted = false
   let deviceUnlockWarning = ''
@@ -5727,13 +5891,17 @@ function syncSettings(nextSettings?: Partial<VaultPayload['settings']>) {
 
 function normalizeSettings(nextSettings?: Partial<VaultPayload['settings']> | typeof settings): VaultPayload['settings'] {
   const oss = (nextSettings?.oss || {}) as Partial<VaultPayload['settings']['oss']>
+  const rawObjectName = String(oss.objectName || '').trim()
+  const objectName = !rawObjectName || rawObjectName === 'mypwdmg-vault.json'
+    ? DEFAULT_OSS_OBJECT_NAME
+    : normalizeObjectName(rawObjectName)
   return {
     oss: {
       bucketName: String(oss.bucketName || '').trim(),
       accessKeyId: String(oss.accessKeyId || '').trim(),
       accessKeySecret: String(oss.accessKeySecret || ''),
       region: String(oss.region || '').trim(),
-      objectName: normalizeObjectName(String(oss.objectName || DEFAULT_OSS_OBJECT_NAME)),
+      objectName,
       autoSync: oss.autoSync === true,
       autoSyncIntervalMinutes: normalizeAutoSyncIntervalMinutes(oss.autoSyncIntervalMinutes)
     }
@@ -5852,7 +6020,14 @@ async function readCloudVaultForSync(
     }
   }
 
-  const legacyObjectNames = [v2LegacyName, configured]
+  const legacyObjectNames = [
+    v2LegacyName,
+    configured,
+    ...(configured.startsWith('pwd/') ? [
+      versionedVaultObjectName(configured.slice('pwd/'.length), 2),
+      configured.slice('pwd/'.length)
+    ] : [])
+  ]
   const appendOnlyRead = await loadAppendOnlyVault(client, configured, { legacyObjectNames })
   if (appendOnlyRead.status === 'success') {
     const head = appendOnlyRead.heads[0]
@@ -5919,8 +6094,21 @@ function cloudSyncClientId() {
   }
 }
 
+function resolveBackupDirectory(objectName: string): string {
+  const normalized = normalizeObjectName(objectName)
+  const lastSlash = normalized.lastIndexOf('/')
+  if (lastSlash >= 0) {
+    const dir = normalized.slice(0, lastSlash)
+    return `${dir}/backup/`
+  }
+  return 'pwd/backup/'
+}
+
 function makeDatedBackupName(fileName: string) {
   const objectName = normalizeObjectName(fileName)
+  const lastSlash = objectName.lastIndexOf('/')
+  const baseName = lastSlash >= 0 ? objectName.slice(lastSlash + 1) : objectName
+  const backupDir = resolveBackupDirectory(objectName)
   const now = new Date()
   const datePart = [
     now.getFullYear(),
@@ -5929,7 +6117,7 @@ function makeDatedBackupName(fileName: string) {
   ].join('-')
   const timePart = [padDatePart(now.getHours()), padDatePart(now.getMinutes()), padDatePart(now.getSeconds())].join('')
   const millisecondPart = String(now.getMilliseconds()).padStart(3, '0')
-  return `${objectName}.${datePart}-${timePart}-${millisecondPart}`
+  return `${backupDir}${baseName}.${datePart}-${timePart}-${millisecondPart}`
 }
 
 function padDatePart(value: number) {

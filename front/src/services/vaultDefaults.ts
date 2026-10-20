@@ -26,7 +26,7 @@ export function defaultVaultPayload(entries: VaultEntry[] = []): VaultPayload {
         accessKeyId: '',
         accessKeySecret: '',
         region: '',
-        objectName: 'mypwdmg-vault.json',
+        objectName: 'pwd/mypwdmg-vault.json',
         autoSync: false,
         autoSyncIntervalMinutes: 1
       }

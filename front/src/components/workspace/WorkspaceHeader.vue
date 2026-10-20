@@ -8,22 +8,9 @@
       <button class="top-icon" type="button" :aria-label="searchActive ? '关闭搜索' : '搜索'" @click="emit('toggle-search')">
         <van-icon :name="searchActive ? 'cross' : 'search'" />
       </button>
-      <van-popover
-        :show="createMenuOpen"
-        class="top-menu-popover top-create-popover"
-        placement="bottom-end"
-        :actions="createMenuActions"
-        close-on-click-action
-        close-on-click-outside
-        @update:show="emit('update:create-menu-open', $event)"
-        @select="emit('select-create', $event)"
-      >
-        <template #reference>
-          <button class="top-icon top-menu-trigger" type="button" aria-label="新建" @click="emit('close-more-menu')">
-            <span class="plus-glyph">+</span>
-          </button>
-        </template>
-      </van-popover>
+      <button class="top-icon" type="button" aria-label="新建" @click="emit('create-entry')">
+        <span class="plus-glyph">+</span>
+      </button>
       <van-popover
         :show="moreMenuOpen"
         class="top-menu-popover top-more-popover"
@@ -74,7 +61,7 @@
       ref="searchInput"
       :model-value="keyword"
       shape="round"
-      placeholder="搜索标题、账号、域名、自定义字段"
+      :placeholder="searchPlaceholder"
       @update:model-value="emit('update:keyword', String($event))"
     />
     <div class="search-filter-segments" role="group" aria-label="条目筛选">
@@ -99,7 +86,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { EntryFilterMode } from '../../services/entryWorkspace.ts'
 import type { EntryKind } from '../../types'
 
@@ -126,8 +113,23 @@ const props = defineProps<{
   moreActions: WorkspaceAction[]
 }>()
 
+const isDesktop = ref(typeof window !== 'undefined' ? window.innerWidth >= 768 : false)
+
+function handleResize() {
+  isDesktop.value = window.innerWidth >= 768
+}
+
+onMounted(() => {
+  window.addEventListener('resize', handleResize)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+})
+
 const searchInput = ref<{ $el?: HTMLElement } | null>(null)
 const searchActive = computed(() => props.searchOpen || Boolean(props.keyword) || props.entryFilter !== 'all')
+const searchPlaceholder = computed(() => isDesktop.value ? '搜索标题、账号、域名、自定义字段 (Ctrl+F)' : '搜索标题、账号、域名、自定义字段')
 const filterOptions: Array<{ label: string; value: EntryFilterMode; icon?: string }> = [
   { label: '全部', value: 'all', icon: 'apps-o' },
   { label: '收藏', value: 'favorites', icon: 'star-o' },
@@ -146,6 +148,7 @@ watch(() => props.searchOpen, async (open) => {
 })
 
 const emit = defineEmits<{
+  'create-entry': []
   'open-drawer': []
   'toggle-search': []
   'update:keyword': [value: string]
