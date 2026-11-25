@@ -28,6 +28,7 @@ export interface RemoteVaultObjectInfo {
 }
 
 export interface RemoteVaultStore {
+  readonly cacheScope?: string
   readObject(objectName: string, maxBytes?: number): Promise<RemoteVaultResult<string>>
   writeObject(
     objectName: string,

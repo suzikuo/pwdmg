@@ -1,11 +1,12 @@
 use crate::crypto::VaultKey;
-use crate::paths::{device_unlock_file, vault_file};
+use crate::paths::{atomic_write_file, device_unlock_file, vault_file};
 use base64::Engine;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::{Zeroize, Zeroizing};
 use windows::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
 };
@@ -91,8 +92,14 @@ pub fn dpapi_unprotect(ciphertext: &[u8], entropy: &[u8]) -> Result<Vec<u8>, Str
             return Err("CryptUnprotectData failed".to_string());
         }
 
-        let slice = std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize);
-        let result = slice.to_vec();
+        let result = if data_out.cbData == 0 {
+            Vec::new()
+        } else {
+            let plaintext = std::slice::from_raw_parts_mut(data_out.pbData, data_out.cbData as usize);
+            let result = plaintext.to_vec();
+            plaintext.zeroize();
+            result
+        };
         let _ = LocalFree(data_out.pbData as _);
         Ok(result)
     }
@@ -100,17 +107,22 @@ pub fn dpapi_unprotect(ciphertext: &[u8], entropy: &[u8]) -> Result<Vec<u8>, Str
 
 pub struct DeviceUnlockStore {
     path: PathBuf,
+    vault_path: PathBuf,
 }
 
 impl Default for DeviceUnlockStore {
     fn default() -> Self {
         Self {
             path: device_unlock_file(),
+            vault_path: vault_file(),
         }
     }
 }
 
 impl DeviceUnlockStore {
+    pub(crate) fn for_vault(vault_path: PathBuf) -> Self {
+        Self { path: vault_path.with_file_name("device_unlock.json"), vault_path }
+    }
     pub fn state(&self) -> Value {
         if !cfg!(target_os = "windows") {
             return json!({ "supported": false, "enabled": false, "expiresAt": 0 });
@@ -146,7 +158,7 @@ impl DeviceUnlockStore {
         }
 
         let expires_at = now_secs() + reauth;
-        let binding = vault_file().to_string_lossy().to_string();
+        let binding = self.vault_path.to_string_lossy();
         let payload = json!({
             "key": base64::prelude::BASE64_STANDARD.encode(vault_key.key),
             "salt": base64::prelude::BASE64_STANDARD.encode(&vault_key.salt),
@@ -154,7 +166,7 @@ impl DeviceUnlockStore {
             "binding": binding,
         });
 
-        let payload_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+        let payload_bytes = Zeroizing::new(serde_json::to_vec(&payload).map_err(|e| e.to_string())?);
         let entropy = b"mypwdmg-device-unlock-v1";
         let protected = dpapi_protect(&payload_bytes, entropy)?;
 
@@ -165,7 +177,7 @@ impl DeviceUnlockStore {
         });
 
         let text = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;
-        fs::write(&self.path, text).map_err(|e| e.to_string())?;
+        atomic_write_file(&self.path, text.as_bytes())?;
 
         Ok(json!({
             "supported": true,
@@ -175,8 +187,10 @@ impl DeviceUnlockStore {
     }
 
     pub fn disable(&self) -> Result<Value, String> {
-        if self.path.exists() {
-            let _ = fs::remove_file(&self.path);
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
         }
         Ok(json!({
             "supported": true,
@@ -202,11 +216,11 @@ impl DeviceUnlockStore {
         let cipher_bytes = base64::prelude::BASE64_STANDARD.decode(cipher_b64).map_err(|e| e.to_string())?;
         let entropy = b"mypwdmg-device-unlock-v1";
 
-        let plaintext = dpapi_unprotect(&cipher_bytes, entropy)?;
+        let plaintext = Zeroizing::new(dpapi_unprotect(&cipher_bytes, entropy)?);
         let key_obj: Value = serde_json::from_slice(&plaintext).map_err(|e| e.to_string())?;
 
         let binding = key_obj.get("binding").and_then(|b| b.as_str()).unwrap_or("");
-        if binding != vault_file().to_string_lossy().to_string() {
+        if binding != self.vault_path.to_string_lossy() {
             return Err("Device unlock file binding mismatch".to_string());
         }
 

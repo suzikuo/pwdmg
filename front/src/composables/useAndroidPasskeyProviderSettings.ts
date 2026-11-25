@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { showConfirmDialog, showFailToast, showSuccessToast, showToast } from 'vant'
+import { showConfirmDialog, showFailToast, showSuccessToast, showToast } from '../services/uiFeedback'
 import { api } from '../services/api'
 import type { AndroidPasskeyProviderState } from '../types'
 

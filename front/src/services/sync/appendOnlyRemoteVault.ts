@@ -3,14 +3,19 @@ import {
   type RemoteVaultObjectInfo,
   type RemoteVaultStore
 } from '../cloud/remoteVaultStore.ts'
+import { sha256Hex } from '../shared/encoding.ts'
 import { canonicalJson } from './canonicalJson.ts'
+import { createPersistentCommitCache } from './commitCacheStore.ts'
 
 const PROTOCOL = 'mypwdmg-sync-v3'
 const MAX_COMMIT_RECORD_BYTES = 64 * 1024
 const MAX_HISTORY_ITEMS = 10_000
 const MAX_EPOCH_MILLISECONDS = 9_999_999_999_999
+const MAX_COMMIT_CACHE_ENTRIES = 2_000
 const COMMIT_ID_RE = /^\d{13}-[A-Za-z0-9-]{8,64}$/
 const SHA256_RE = /^[a-f0-9]{64}$/
+
+export const DEFAULT_COMMIT_FETCH_CONCURRENCY = 6
 
 export type RemoteVaultHead = {
   id: string
@@ -34,18 +39,7 @@ export type AppendOnlyVaultWrite = {
   message: string
 }
 
-export type AppendOnlyVaultOptions = {
-  legacyObjectNames?: string[]
-}
-
-export type AppendOnlyVaultWriteOptions = AppendOnlyVaultOptions & {
-  expectedHeadIds?: string[]
-  clientId?: string
-  now?: () => number
-  randomId?: () => string
-}
-
-type RemoteCommit = {
+export type RemoteCommit = {
   protocol: typeof PROTOCOL
   id: string
   generationObjectName: string
@@ -56,15 +50,62 @@ type RemoteCommit = {
   clientId: string
 }
 
+export type CommitCache = {
+  get(key: string): RemoteCommit | undefined | Promise<RemoteCommit | undefined>
+  set(key: string, commit: RemoteCommit): void | Promise<void>
+}
+
+export type AppendOnlyVaultOptions = {
+  legacyObjectNames?: string[]
+  commitCache?: CommitCache
+  cacheScope?: string
+  commitFetchConcurrency?: number
+}
+
+export type AppendOnlyVaultWriteOptions = AppendOnlyVaultOptions & {
+  expectedHeadIds?: string[]
+  clientId?: string
+  now?: () => number
+  randomId?: () => string
+}
+
+const scopedCommitCache = createPersistentCommitCache({ maxEntries: MAX_COMMIT_CACHE_ENTRIES })
+const storeCommitCaches = new WeakMap<RemoteVaultStore, CommitCache>()
+
+export function createMemoryCommitCache(maxEntries = MAX_COMMIT_CACHE_ENTRIES): CommitCache {
+  const capacity = Math.max(1, Math.floor(maxEntries))
+  const entries = new Map<string, RemoteCommit>()
+  return {
+    get(key: string): RemoteCommit | undefined {
+      const hit = entries.get(key)
+      if (!hit) return undefined
+      entries.delete(key)
+      entries.set(key, hit)
+      return hit
+    },
+    set(key: string, commit: RemoteCommit): void {
+      if (entries.has(key)) entries.delete(key)
+      entries.set(key, commit)
+      while (entries.size > capacity) {
+        const oldestKey = entries.keys().next().value
+        if (oldestKey === undefined) break
+        entries.delete(oldestKey)
+      }
+    }
+  }
+}
+
 export async function loadAppendOnlyVault(
   store: RemoteVaultStore,
   baseObjectName: string,
   options: AppendOnlyVaultOptions = {}
 ): Promise<AppendOnlyVaultRead> {
   try {
-    const commits = await loadCommitHistory(store, baseObjectName)
-    const legacyNames = normalizeLegacyNames(baseObjectName, options.legacyObjectNames)
-    const legacy = await loadLegacyHeads(store, legacyNames)
+    const commits = await loadCommitHistory(store, baseObjectName, options)
+    const legacyNames = normalizeLegacyNames(options.legacyObjectNames)
+    const legacy: AppendOnlyVaultRead = legacyNames.length
+      ? await loadLegacyHeads(store, legacyNames)
+      : { status: 'not-found', heads: [], protocolCommitIds: [], message: '' }
     if (legacy.status === 'error') return legacy
 
     if (!commits.length) return collapseHeads(legacy.heads, [])
@@ -120,7 +161,7 @@ export async function appendRemoteVaultCommit(
   const commitId = `${String(MAX_EPOCH_MILLISECONDS - Math.max(0, Math.min(MAX_EPOCH_MILLISECONDS, Math.floor(now)))).padStart(13, '0')}-${randomId}`
   const generationObjectName = `${generationPrefix(baseObjectName)}${commitId}.vault`
   const commitObjectName = `${commitPrefix(baseObjectName)}${commitId}.json`
-  const contentSha256 = await sha256Text(content)
+  const contentSha256 = await sha256Hex(content)
 
   const generationWrite = await store.writeObject(
     generationObjectName,
@@ -139,15 +180,15 @@ export async function appendRemoteVaultCommit(
   if (
     generationVerification.status !== RemoteVaultStatus.Success ||
     typeof generationVerification.content !== 'string' ||
-    await sha256Text(generationVerification.content) !== contentSha256
+    await sha256Hex(generationVerification.content) !== contentSha256
   ) {
     return { status: 'error', message: '远端代际写入后校验失败；原始代际已保留用于恢复' }
   }
 
-  const legacyFingerprints = await snapshotLegacyFingerprints(
-    store,
-    normalizeLegacyNames(baseObjectName, options.legacyObjectNames)
-  )
+  const legacyNames = normalizeLegacyNames(options.legacyObjectNames)
+  const legacyFingerprints = legacyNames.length
+    ? await snapshotLegacyFingerprints(store, legacyNames)
+    : {}
   if (typeof legacyFingerprints === 'string') return { status: 'error', message: legacyFingerprints }
 
   const commit: RemoteCommit = {
@@ -182,6 +223,9 @@ export async function appendRemoteVaultCommit(
     return { status: 'error', message: '远端提交记录写入后校验失败；代际已保留用于恢复' }
   }
 
+  const { cache, keyFor } = resolveCommitCache(store, options)
+  await safeCacheSet(cache, keyFor(commitObjectName), parseCommit(commitText, baseObjectName, commitId))
+
   return { status: 'success', commitId, revision: contentSha256, message: '远端不可变提交已创建' }
 }
 
@@ -192,18 +236,48 @@ export function appendOnlyObjectPrefixes(baseObjectName: string) {
   }
 }
 
-async function loadCommitHistory(store: RemoteVaultStore, baseObjectName: string): Promise<RemoteCommit[]> {
+async function loadCommitHistory(
+  store: RemoteVaultStore,
+  baseObjectName: string,
+  options: AppendOnlyVaultOptions = {}
+): Promise<RemoteCommit[]> {
   const objects = await listAllObjects(store, commitPrefix(baseObjectName))
-  const commits: RemoteCommit[] = []
-  for (const object of objects) {
+  const entries = objects.map((object) => {
     const id = commitIdFromObjectName(baseObjectName, object.name)
     if (!id) throw new Error(`远端提交记录名称无效: ${object.name}`)
-    const response = await store.readObject(object.name, MAX_COMMIT_RECORD_BYTES)
-    if (response.status !== RemoteVaultStatus.Success || typeof response.content !== 'string') {
-      throw new Error(`无法读取远端提交记录: ${object.name}`)
+    return { objectName: object.name, id }
+  })
+  if (!entries.length) return []
+
+  const { cache, keyFor } = resolveCommitCache(store, options)
+  const commits = new Array<RemoteCommit>(entries.length)
+  const uncached: Array<{ index: number; objectName: string; id: string; cacheKey: string }> = []
+
+  const cachedResults = await Promise.all(
+    entries.map(({ objectName }) => safeCacheGet(cache, keyFor(objectName)))
+  )
+  for (let index = 0; index < entries.length; index += 1) {
+    const { objectName, id } = entries[index]
+    const cacheKey = keyFor(objectName)
+    const cached = cachedResults[index]
+    if (isValidCachedCommit(cached, baseObjectName, id)) {
+      commits[index] = cached
+    } else {
+      uncached.push({ index, objectName, id, cacheKey })
     }
-    commits.push(parseCommit(response.content, baseObjectName, id))
   }
+
+  const concurrency = normalizeCommitFetchConcurrency(options.commitFetchConcurrency)
+  await runWithConcurrency(uncached, concurrency, async (item) => {
+    const response = await store.readObject(item.objectName, MAX_COMMIT_RECORD_BYTES)
+    if (response.status !== RemoteVaultStatus.Success || typeof response.content !== 'string') {
+      throw new Error(`无法读取远端提交记录: ${item.objectName}`)
+    }
+    const commit = parseCommit(response.content, baseObjectName, item.id)
+    commits[item.index] = commit
+    await safeCacheSet(cache, item.cacheKey, commit)
+  })
+
   const duplicateIds = commits.length !== new Set(commits.map((commit) => commit.id)).size
   if (duplicateIds) throw new Error('远端提交历史包含重复标识')
   return commits
@@ -227,18 +301,50 @@ async function listAllObjects(store: RemoteVaultStore, prefix: string): Promise<
   return objects
 }
 
+function minimalPrefixes(objectNames: string[]): string[] {
+  const sorted = [...new Set(objectNames)].sort((a, b) => a.length - b.length)
+  const prefixes: string[] = []
+  for (const name of sorted) {
+    if (prefixes.some((prefix) => name.startsWith(prefix))) continue
+    prefixes.push(name)
+  }
+  return prefixes
+}
+
+async function findExistingLegacyObjects(
+  store: RemoteVaultStore,
+  objectNames: string[]
+): Promise<Set<string> | string> {
+  if (!objectNames.length) return new Set()
+  const wanted = new Set(objectNames)
+  const existing = new Set<string>()
+  for (const prefix of minimalPrefixes(objectNames)) {
+    const response = await store.listObjects(prefix, 20)
+    if (response.status !== RemoteVaultStatus.Success || !Array.isArray(response.content)) {
+      return String(response.content || `无法检查旧版远端对象 ${prefix}`)
+    }
+    for (const item of response.content) {
+      if (wanted.has(item.name)) existing.add(item.name)
+    }
+  }
+  return existing
+}
+
 async function loadLegacyHeads(
   store: RemoteVaultStore,
   objectNames: string[]
 ): Promise<AppendOnlyVaultRead> {
+  const existing = await findExistingLegacyObjects(store, objectNames)
+  if (typeof existing === 'string') return errorRead(existing)
   const heads: RemoteVaultHead[] = []
   for (const objectName of objectNames) {
+    if (!existing.has(objectName)) continue
     const response = await store.readObject(objectName)
     if (response.status === RemoteVaultStatus.NotFound) continue
     if (response.status !== RemoteVaultStatus.Success || typeof response.content !== 'string') {
       return errorRead(String(response.content || `无法读取旧版远端对象 ${objectName}`))
     }
-    const revision = response.revision || await sha256Text(response.content)
+    const revision = response.revision || await sha256Hex(response.content)
     heads.push({
       id: `legacy:${objectName}:${revision}`,
       content: response.content,
@@ -261,7 +367,7 @@ async function loadGeneration(
   if (response.status !== RemoteVaultStatus.Success || typeof response.content !== 'string') {
     return `远端提交 ${commit.id} 的代际对象不可读`
   }
-  if (await sha256Text(response.content) !== commit.contentSha256) {
+  if (await sha256Hex(response.content) !== commit.contentSha256) {
     return `远端提交 ${commit.id} 的代际摘要不匹配`
   }
   return {
@@ -277,12 +383,18 @@ async function snapshotLegacyFingerprints(
   store: RemoteVaultStore,
   objectNames: string[]
 ): Promise<Record<string, string> | string> {
+  const existing = await findExistingLegacyObjects(store, objectNames)
+  if (typeof existing === 'string') return existing
   const result: Record<string, string> = {}
   for (const objectName of objectNames) {
+    if (!existing.has(objectName)) {
+      result[objectName] = 'missing'
+      continue
+    }
     const response = await store.readObject(objectName)
     if (response.status === RemoteVaultStatus.NotFound) result[objectName] = 'missing'
     else if (response.status === RemoteVaultStatus.Success && typeof response.content === 'string') {
-      result[objectName] = response.revision || await sha256Text(response.content)
+      result[objectName] = response.revision || await sha256Hex(response.content)
     } else return String(response.content || `无法检查旧版远端对象 ${objectName}`)
   }
   return result
@@ -357,8 +469,9 @@ function errorRead(message: string): AppendOnlyVaultRead {
   return { status: 'error', heads: [], protocolCommitIds: [], message }
 }
 
-function normalizeLegacyNames(baseObjectName: string, values?: string[]): string[] {
-  return [...new Set((values?.length ? values : [baseObjectName]).map((value) => value.trim()).filter(Boolean))]
+function normalizeLegacyNames(values?: string[]): string[] {
+  if (!values?.length) return []
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
 }
 
 function commitPrefix(baseObjectName: string): string {
@@ -395,7 +508,100 @@ function sameStringSet(left: string[], right: string[]): boolean {
   return left.length === right.length && [...left].sort().every((value, index) => value === [...right].sort()[index])
 }
 
-async function sha256Text(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+function resolveCommitCache(
+  store: RemoteVaultStore,
+  options: AppendOnlyVaultOptions
+): { cache: CommitCache; keyFor: (objectName: string) => string } {
+  const scope = (options.cacheScope ?? store.cacheScope ?? '').trim()
+  if (options.commitCache) {
+    return {
+      cache: options.commitCache,
+      keyFor: (objectName: string) => (scope ? `${scope}::${objectName}` : objectName)
+    }
+  }
+  if (scope) {
+    return {
+      cache: scopedCommitCache,
+      keyFor: (objectName: string) => `${scope}::${objectName}`
+    }
+  }
+  let cache = storeCommitCaches.get(store)
+  if (!cache) {
+    cache = createMemoryCommitCache(MAX_COMMIT_CACHE_ENTRIES)
+    storeCommitCaches.set(store, cache)
+  }
+  return {
+    cache,
+    keyFor: (objectName: string) => objectName
+  }
+}
+
+async function safeCacheGet(cache: CommitCache, key: string): Promise<RemoteCommit | undefined> {
+  try {
+    return await cache.get(key)
+  } catch {
+    return undefined
+  }
+}
+
+async function safeCacheSet(cache: CommitCache, key: string, commit: RemoteCommit): Promise<void> {
+  try {
+    await cache.set(key, commit)
+  } catch {
+    // Cache persistence failures must not block sync reads or writes.
+  }
+}
+
+function isValidCachedCommit(
+  commit: RemoteCommit | undefined,
+  baseObjectName: string,
+  expectedId: string
+): commit is RemoteCommit {
+  return Boolean(
+    commit &&
+    commit.protocol === PROTOCOL &&
+    commit.id === expectedId &&
+    typeof commit.generationObjectName === 'string' &&
+    commit.generationObjectName.startsWith(generationPrefix(baseObjectName)) &&
+    typeof commit.contentSha256 === 'string' &&
+    SHA256_RE.test(commit.contentSha256) &&
+    Array.isArray(commit.parentCommitIds)
+  )
+}
+
+function normalizeCommitFetchConcurrency(value?: number): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_COMMIT_FETCH_CONCURRENCY
+  return Math.max(1, Math.min(32, Math.floor(value)))
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  if (!items.length) return
+  const workerCount = Math.min(Math.max(1, Math.floor(concurrency)), items.length)
+  let cursor = 0
+  let firstError: unknown = null
+  let hasError = false
+
+  const runWorker = async () => {
+    while (!hasError) {
+      const currentIndex = cursor
+      if (currentIndex >= items.length) return
+      cursor += 1
+      try {
+        await worker(items[currentIndex])
+      } catch (error) {
+        if (!hasError) {
+          hasError = true
+          firstError = error
+        }
+        return
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
+  if (hasError) throw firstError
 }

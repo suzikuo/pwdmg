@@ -1,14 +1,21 @@
 <template>
   <section class="custom-field-editor">
     <div class="custom-field-head">
-      <div><strong>自定义字段</strong><span>{{ modelValue.length }} 项</span></div>
-      <button type="button" class="custom-field-add" @click="addField"><van-icon name="plus" />添加</button>
+      <div class="custom-field-title-group">
+        <strong class="custom-field-title">自定义字段</strong>
+        <UiBadge tone="neutral" size="sm">{{ modelValue.length }} 项</UiBadge>
+      </div>
+      <UiButton variant="subtle" size="sm" @click="addField">
+        <UiIcon name="plus" :size="14" />
+        <span>添加字段</span>
+      </UiButton>
     </div>
 
     <div v-if="modelValue.length" class="custom-field-list">
-      <div v-for="(field, index) in modelValue" :key="field.id" class="custom-field-item">
+      <div v-for="(field, index) in modelValue" :key="field.id" class="custom-field-card">
         <div class="custom-field-meta">
           <input
+            class="custom-field-control"
             :value="field.label"
             type="text"
             autocomplete="off"
@@ -17,23 +24,40 @@
             placeholder="字段名称"
             @input="updateField(index, 'label', inputValue($event))"
           />
-          <select :value="field.type" aria-label="字段类型" @change="updateType(index, inputValue($event))">
+          <select
+            class="custom-field-select"
+            :value="field.type"
+            aria-label="字段类型"
+            @change="updateType(index, inputValue($event))"
+          >
             <option v-for="option in typeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
           </select>
           <button
             type="button"
-            class="inline-icon-button"
-            :class="{ active: field.protected }"
+            class="custom-field-icon-btn"
+            :class="{ 'is-active': field.protected }"
             :aria-label="field.protected ? '取消保护字段' : '保护字段'"
+            :aria-pressed="field.protected"
             :title="field.protected ? '取消保护字段' : '保护字段'"
             @click="updateField(index, 'protected', !field.protected)"
-          ><van-icon :name="field.protected ? 'closed-eye' : 'eye-o'" /></button>
-          <button type="button" class="inline-icon-button is-danger" aria-label="删除字段" title="删除字段" @click="removeField(index)">
-            <van-icon name="delete-o" />
+          >
+            <UiIcon :name="field.protected ? 'lock' : 'unlock'" :size="15" />
+          </button>
+          <button
+            type="button"
+            class="custom-field-icon-btn is-danger"
+            aria-label="删除字段"
+            title="删除字段"
+            @click="removeField(index)"
+          >
+            <UiIcon name="trash" :size="15" />
           </button>
         </div>
+
         <div class="custom-field-value">
           <input
+            class="custom-field-control"
+            :class="{ 'is-mono': field.type === 'secret' || field.protected }"
             :value="field.value"
             :type="fieldInputType(field)"
             :autocomplete="field.type === 'secret' ? 'new-password' : 'off'"
@@ -45,11 +69,13 @@
           <button
             v-if="field.protected || field.type === 'secret'"
             type="button"
-            class="inline-icon-button"
+            class="custom-field-icon-btn"
             :aria-label="revealed.has(field.id) ? '隐藏字段' : '显示字段'"
             :title="revealed.has(field.id) ? '隐藏字段' : '显示字段'"
             @click="toggleReveal(field.id)"
-          ><van-icon :name="revealed.has(field.id) ? 'closed-eye' : 'eye-o'" /></button>
+          >
+            <UiIcon :name="revealed.has(field.id) ? 'eye-off' : 'eye'" :size="15" />
+          </button>
         </div>
       </div>
     </div>
@@ -58,6 +84,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { UiBadge, UiButton, UiIcon } from '../ui'
 import { secureRandomId } from '../../services/secureRandom.ts'
 import type { VaultCustomField, VaultCustomFieldType } from '../../types.ts'
 
@@ -125,106 +152,141 @@ function inputValue(event: Event) {
 
 <style scoped>
 .custom-field-editor {
-  display: grid;
-  gap: 8px;
-  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
   border-top: 1px solid var(--border-soft);
 }
 
-.custom-field-head,
+.custom-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.custom-field-title-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.custom-field-title {
+  font-size: var(--app-font-sm);
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.custom-field-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.custom-field-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background-color: var(--surface-container-low);
+}
+
 .custom-field-meta,
 .custom-field-value {
   display: flex;
   align-items: center;
-  min-width: 0;
   gap: 6px;
+  min-width: 0;
 }
 
-.custom-field-head {
-  justify-content: space-between;
-}
-
-.custom-field-head > div {
-  display: grid;
-  gap: 2px;
-}
-
-.custom-field-head strong {
-  font-size: var(--app-font-base);
-}
-
-.custom-field-head span {
-  color: var(--text-muted);
+.custom-field-control,
+.custom-field-select {
+  height: var(--control-height-sm);
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--panel-bg);
+  color: var(--text-main);
+  font-family: inherit;
   font-size: var(--app-font-sm);
+  outline: none;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
 }
 
-.custom-field-add {
-  min-height: 32px;
+.custom-field-control:focus,
+.custom-field-select:focus {
+  border-color: var(--brand);
+  box-shadow: var(--focus-ring);
+}
+
+.custom-field-control {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.custom-field-control.is-mono {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+}
+
+.custom-field-select {
+  width: 78px;
+  flex: 0 0 78px;
+}
+
+.custom-field-icon-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  border: 1px solid var(--panel-border);
-  border-radius: 7px;
-  padding: 0 9px;
-  color: var(--brand-strong);
-  background: var(--panel-bg);
+  justify-content: center;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--text-secondary);
   cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
 }
 
-.custom-field-list {
-  display: grid;
-  gap: 8px;
-}
-
-.custom-field-item {
-  display: grid;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  background: var(--panel-bg-muted);
-}
-
-.custom-field-meta input {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.custom-field-meta select {
-  width: 76px;
-  flex: 0 0 76px;
-}
-
-.custom-field-item input,
-.custom-field-item select {
-  height: 34px;
-  border: 1px solid var(--panel-border);
-  border-radius: 6px;
-  padding: 0 8px;
+.custom-field-icon-btn:hover {
+  background-color: var(--surface-container-high);
   color: var(--text-main);
-  background: var(--panel-bg);
-  font: inherit;
-  font-size: var(--app-font-sm);
 }
 
-.custom-field-value input {
-  min-width: 0;
-  flex: 1 1 auto;
+.custom-field-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
-.inline-icon-button.active {
-  color: var(--brand-strong);
-  background: color-mix(in srgb, var(--brand), transparent 88%);
+.custom-field-icon-btn.is-active {
+  background-color: var(--brand-soft);
+  border-color: color-mix(in srgb, var(--brand) 36%, transparent);
+  color: var(--brand);
 }
 
-.inline-icon-button.is-danger {
-  color: var(--danger, #dc2626);
+.custom-field-icon-btn.is-danger {
+  color: var(--danger);
 }
 
-@media (max-width: 360px) {
+.custom-field-icon-btn.is-danger:hover {
+  background-color: var(--danger-soft);
+  color: var(--danger);
+}
+
+@media (max-width: 420px) {
   .custom-field-meta {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 76px 32px 32px;
+    grid-template-columns: minmax(0, 1fr) 74px var(--control-height-sm) var(--control-height-sm);
   }
 }
 </style>

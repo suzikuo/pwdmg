@@ -1,7 +1,5 @@
 import type { EntryKind, VaultCustomField } from '../types.ts'
 
-export const CONTENT_ENTRY_KINDS: EntryKind[] = ['login', 'secure-note', 'card', 'identity', 'api-key']
-
 export const ENTRY_KIND_OPTIONS: Array<{
   kind: EntryKind
   label: string

@@ -1,5 +1,6 @@
 import type { EntryStatus, LoginAccountSource, VaultEntry, VaultPayload } from '../../types.ts'
 import { normalizeAutofillMatchMode } from '../autofillRules.ts'
+import { findEntryById } from '../shared/entryTree.ts'
 import {
   CLOUD_SYNC_CHANGE_LABELS,
   CLOUD_SYNC_ENTRY_CHANGE_FIELDS,
@@ -65,7 +66,7 @@ export function applyCloudSyncDiffItem(targetEntries: VaultEntry[], sourceEntrie
     return
   }
 
-  const sourceEntry = findEntry(sourceEntries, item.id)
+  const sourceEntry = findEntryById(sourceEntries, item.id)
   if (!sourceEntry) return
   if (item.changeType === 'added') {
     removeEntryCopies(targetEntries, item.id)
@@ -73,7 +74,7 @@ export function applyCloudSyncDiffItem(targetEntries: VaultEntry[], sourceEntrie
     return
   }
 
-  const currentEntry = findEntry(targetEntries, item.id)
+  const currentEntry = findEntryById(targetEntries, item.id)
   if (!currentEntry) return
   for (const detail of item.details) {
     if (detail.checked && detail.key !== 'position') {
@@ -89,8 +90,8 @@ export function applyCloudSyncDiffItem(targetEntries: VaultEntry[], sourceEntrie
 export function applyCloudSyncPositionChanges(targetEntries: VaultEntry[], sourceEntries: VaultEntry[]) {
   const sourceIndex = indexEntries(sourceEntries)
   for (const sourceMeta of sourceIndex.values()) {
-    if (!findEntry(targetEntries, sourceMeta.entry.id)) continue
-    if (sourceMeta.parentId && !findEntry(targetEntries, sourceMeta.parentId)) continue
+    if (!findEntryById(targetEntries, sourceMeta.entry.id)) continue
+    if (sourceMeta.parentId && !findEntryById(targetEntries, sourceMeta.parentId)) continue
     const moved = takeEntry(targetEntries, sourceMeta.entry.id)
     if (!moved) continue
     insertEntryAt(targetEntries, sourceMeta.parentId, moved.entry, sourceMeta.index)
@@ -435,15 +436,6 @@ function insertEntryAtParent(entries: VaultEntry[], parentId: string, entry: Vau
 
 function clampIndex(index: number, length: number) {
   return Math.min(Math.max(0, index), length)
-}
-
-function findEntry(entries: VaultEntry[], entryId: string): VaultEntry | null {
-  for (const entry of entries) {
-    if (entry.id === entryId) return entry
-    const child = findEntry(entry.children || [], entryId)
-    if (child) return child
-  }
-  return null
 }
 
 function formatUnixTime(value: number) {

@@ -1,0 +1,57 @@
+export {
+  ALLOWED_SKIN_TOKEN_KEYS,
+  DEFAULT_SKIN_LAYOUT,
+  type SkinDensity,
+  type SkinLayoutConfig,
+  type SkinLayoutMode,
+  type SkinLayoutOverride,
+  type SkinListStyle,
+  type SkinPlugin,
+  type SkinPreviewColors,
+  type SkinTokenKey,
+  type SkinTokenMap,
+  type SkinValidationResult
+} from './types.ts'
+export { BUILTIN_SKINS, DEFAULT_SKIN_ID } from './builtinSkins.ts'
+export {
+  ACTIVE_SKIN_STORAGE_KEY,
+  CUSTOM_SKINS_STORAGE_KEY,
+  LAYOUT_OVERRIDE_STORAGE_KEY,
+  applySkinToDocument,
+  exportSkinTemplate,
+  getSkin,
+  installCustomSkin,
+  listSkins,
+  loadActiveSkinId,
+  loadLayoutOverride,
+  resolveEffectiveLayout,
+  resolveSkinLayout,
+  saveActiveSkinId,
+  saveLayoutOverride,
+  uninstallCustomSkin,
+  validateSkinPlugin,
+  type WallpaperApplyOptions
+} from './skinRegistry.ts'
+export {
+  DEFAULT_WALLPAPER_SETTINGS,
+  WALLPAPER_BLUR_DEFAULT,
+  WALLPAPER_BLUR_MAX,
+  WALLPAPER_BLUR_MIN,
+  WALLPAPER_DIM_DEFAULT,
+  WALLPAPER_DIM_MAX,
+  WALLPAPER_DIM_MIN,
+  WALLPAPER_MAX_DIMENSION,
+  WALLPAPER_MAX_FILE_BYTES,
+  WALLPAPER_OPACITY_DEFAULT,
+  WALLPAPER_OPACITY_MAX,
+  WALLPAPER_OPACITY_MIN,
+  WALLPAPER_SETTINGS_STORAGE_KEY,
+  clearWallpaperImage,
+  loadWallpaperImage,
+  loadWallpaperSettings,
+  prepareWallpaperImageFile,
+  sanitizeWallpaperSettings,
+  saveWallpaperImage,
+  saveWallpaperSettings,
+  type WallpaperSettings
+} from './wallpaperStore.ts'

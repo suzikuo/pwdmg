@@ -25,6 +25,9 @@ const PASSKEY_PROXY_RECOVERY_DELAY_MS = 10000
 const EXTENSION_PAGE_ONLY_MESSAGES = new Set([
   'MYPWDMG_UNLOCK',
   'MYPWDMG_LOCK',
+  'MYPWDMG_DEVICE_UNLOCK_STATE',
+  'MYPWDMG_ENABLE_DEVICE_UNLOCK',
+  'MYPWDMG_DISABLE_DEVICE_UNLOCK',
   'MYPWDMG_LIST_SAVE_TARGETS',
   'MYPWDMG_STATE',
   'MYPWDMG_SET_AUTO_SETTINGS'
@@ -40,6 +43,7 @@ const fillAuthorizations = new Map()
 const queryCache = new Map()
 const inflightQueryMatches = new Map()
 let queryCacheVersion = 0
+let lockVersion = 0
 let passkeyProxyBinding = null
 let passkeyProxyOperationActive = false
 let passkeyProxyRecoveryTimer = null
@@ -55,6 +59,11 @@ function ensurePort() {
     const pendingRequest = pending.get(id)
     if (!pendingRequest) return
 
+    if (response?.code === 'NATIVE_HOST_ERROR') {
+      // Older hosts wrap these vault failures in a generic error code.
+      if (response.message === 'Vault is locked') response = { ...response, code: 'LOCKED' }
+      if (response.message === 'Wrong password or corrupted vault') response = { ...response, code: 'BAD_PASSWORD' }
+    }
     clearTimeout(pendingRequest.timer)
     pending.delete(id)
     pendingRequest.resolve(response)
@@ -787,7 +796,9 @@ async function authorizeFill(entryId, sender, acknowledgedRisks = []) {
   const context = senderWebContext(sender)
   if (!context) return contextError()
 
+  const requestLockVersion = lockVersion
   const matches = await queryMatchesCached(context.hostname, context.url)
+  if (requestLockVersion !== lockVersion) return contextError('FILL_AUTH_REQUIRED')
   if (!matches?.ok) return matches
   const matchedEntry = matchingEntry(matches, entryId, context.hostname, context.url)
   if (!matchedEntry) {
@@ -826,7 +837,9 @@ async function getAuthorizedFill(entryId, token, sender) {
     return contextError('FILL_AUTH_CONTEXT_MISMATCH')
   }
 
+  const requestLockVersion = lockVersion
   const matches = await queryMatchesWithParentFallback(context.hostname, context.url)
+  if (requestLockVersion !== lockVersion) return contextError('FILL_AUTH_REQUIRED')
   if (!matches?.ok) return matches
   const matchedEntry = matchingEntry(matches, entryId, context.hostname, context.url)
   if (!matchedEntry) {
@@ -855,7 +868,7 @@ async function getAuthorizedFill(entryId, token, sender) {
     return contextError('ENTRY_ID_MISMATCH')
   }
   await rememberRecentFill(context, entryId)
-  return response
+  return requestLockVersion === lockVersion ? response : contextError('FILL_AUTH_REQUIRED')
 }
 
 function forgetPromptToken(token) {
@@ -890,14 +903,15 @@ function applyCaptureOverrides(capture = {}, overrides = {}) {
   return next
 }
 
-async function prepareCapturedLogin(capture, context, placement = null) {
+async function prepareCapturedLogin(capture, context, placement = null, requestLockVersion = lockVersion) {
   prunePendingCaptures()
   if (!context) return contextError()
   const settings = await getAutoSettings()
-  if (isHostIgnored(capture?.hostname || '', settings.ignoredSites)) {
+  if (requestLockVersion !== lockVersion || isHostIgnored(capture?.hostname || '', settings.ignoredSites)) {
     return { ok: true, data: { shouldPrompt: false } }
   }
   const previewResponse = await nativeCall('previewCapturedLogin', { capture })
+  if (requestLockVersion !== lockVersion) return { ok: true, data: { shouldPrompt: false } }
   if (!previewResponse?.ok && (previewResponse?.code === 'LOCKED' || previewResponse?.code === 'BAD_PASSWORD')) {
     pendingLockedCapturesByContext.set(contextKey(context), {
       capture,
@@ -947,9 +961,11 @@ async function prepareLockedCapturesForTab(tabId = 0) {
   prunePendingCaptures()
   const items = [...pendingLockedCapturesByContext.entries()]
     .filter(([, item]) => item.context?.tabId === tabId)
+  const requestLockVersion = lockVersion
   for (const [key, item] of items) {
+    if (requestLockVersion !== lockVersion) break
     pendingLockedCapturesByContext.delete(key)
-    await prepareCapturedLogin(item.capture, item.context, item.placement)
+    await prepareCapturedLogin(item.capture, item.context, item.placement, requestLockVersion)
   }
 }
 
@@ -1127,13 +1143,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return
     }
     if (message?.type === 'MYPWDMG_LOCK') {
-      const response = await nativeCall('lock')
-      if (response?.ok) {
-        clearQueryCache()
-        fillAuthorizations.clear()
-        schedulePendingCapturePrune()
-      }
-      sendResponse(response)
+      lockVersion += 1
+      clearQueryCache()
+      fillAuthorizations.clear()
+      pendingCaptures.clear()
+      pendingPromptsByContext.clear()
+      pendingLockedCapturesByContext.clear()
+      schedulePendingCapturePrune()
+      sendResponse(await nativeCall('lock'))
       return
     }
     if (message?.type === 'MYPWDMG_AUTHORIZE_FILL') {
@@ -1150,13 +1167,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(contextError())
         return
       }
+      const requestLockVersion = lockVersion
       const capture = { ...(message.capture || {}), hostname: context.hostname }
       const settings = await getAutoSettings()
       if (!settings.autoSaveEnabled || isHostIgnored(context.hostname, settings.ignoredSites)) {
         sendResponse({ ok: true, data: { shouldPrompt: false } })
         return
       }
-      sendResponse(await prepareCapturedLogin(capture, context, message.placement || null))
+      sendResponse(await prepareCapturedLogin(capture, context, message.placement || null, requestLockVersion))
       return
     }
     if (message?.type === 'MYPWDMG_SAVE_CAPTURE') {

@@ -32,7 +32,7 @@ export interface PasswordStrengthAssessment {
 export interface PasswordAgeAssessment {
   changedAt: number
   ageDays: number
-  source: 'history-change' | 'history-created' | 'provided'
+  source: 'history-change' | 'history-created' | 'entry-timestamp' | 'provided'
   stale: boolean
 }
 
@@ -297,8 +297,9 @@ export function estimatePasswordStrength(
     }
   }
 
-  const inputTruncated = password.length > MAX_PASSWORD_CODE_UNITS
-  const characters = Array.from(password.slice(0, MAX_PASSWORD_CODE_UNITS)).slice(0, MAX_ANALYZED_CODE_POINTS)
+  const boundedCharacters = Array.from(password.slice(0, MAX_PASSWORD_CODE_UNITS))
+  const inputTruncated = password.length > MAX_PASSWORD_CODE_UNITS || boundedCharacters.length > MAX_ANALYZED_CODE_POINTS
+  const characters = boundedCharacters.slice(0, MAX_ANALYZED_CODE_POINTS)
   const length = characters.length
   const normalized = characters.join('').toLocaleLowerCase('en-US')
   const uniqueCount = new Set(characters).size
@@ -360,7 +361,7 @@ export function estimatePasswordStrength(
     score,
     estimatedEntropyBits: round(entropy, 1),
     analyzedLength: length,
-    inputTruncated: inputTruncated || characters.length >= MAX_ANALYZED_CODE_POINTS,
+    inputTruncated,
     weak: score <= 1,
     reasons: orderedReasons
   }
@@ -646,8 +647,8 @@ function assessPasswordAge(
 function inferPasswordChangedAtFromHistory(
   entry: VaultEntry
 ): Pick<PasswordAgeAssessment, 'changedAt' | 'source'> | undefined {
-  if (!Array.isArray(entry.history) || typeof entry.password !== 'string') return undefined
-  const history = entry.history
+  if (typeof entry.password !== 'string') return undefined
+  const history = (Array.isArray(entry.history) ? entry.history : [])
     .map((item) => ({ item, at: normalizeHistoryTimestamp(item?.at) }))
     .filter((value): value is { item: NonNullable<VaultEntry['history']>[number]; at: number } => value.at !== undefined)
     .sort((left, right) => right.at - left.at || String(left.item.id).localeCompare(String(right.item.id)))
@@ -660,7 +661,15 @@ function inferPasswordChangedAtFromHistory(
   const created = history.find(({ item }) =>
     item.action === 'created' && item.snapshot?.password === entry.password
   )
-  return created ? { changedAt: created.at, source: 'history-created' } : undefined
+  if (created) return { changedAt: created.at, source: 'history-created' }
+  if (Array.isArray(entry.history) && entry.history.some((item) => item?.action === 'updated')) return undefined
+
+  const createdAt = normalizeHistoryTimestamp(entry.createdAt)
+  // An explicitly empty history may have been cleared. A status change
+  // alone cannot establish the age of a password in that case.
+  const statusUpdatedAt = Array.isArray(entry.history) ? undefined : normalizeHistoryTimestamp(entry.statusUpdatedAt)
+  const changedAt = createdAt ?? statusUpdatedAt
+  return changedAt === undefined ? undefined : { changedAt, source: 'entry-timestamp' }
 }
 
 function containsAccountData(

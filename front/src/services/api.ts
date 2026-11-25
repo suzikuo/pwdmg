@@ -1,15 +1,15 @@
-import type { ApiResult, AppState, AttachmentObjectRetention, AttachmentStorageState, DesktopTraySettings, DeviceUnlockState, PluginListenerState, PortableBackupExport, PortableBackupImport, PortableBackupSelection, VaultAttachment, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types'
-import { androidStorageAdapter, exportAndroidAttachmentFile, exportAndroidVaultFile } from './androidStorageAdapter'
-import { fail, ok, type AttachmentCreateResult, type CreateVaultResult, type PasswordManagerApiAdapter, type StartupData } from './apiTypes'
-import { callDesktopApi, desktopStorageAdapter, showDesktopWindow as showDesktopWindowAdapter } from './desktopStorageAdapter'
-import { decryptAttachmentObject, encryptAttachmentObject, generateAttachmentKey, importAttachmentKey, verifyAttachmentCiphertext } from './attachmentCrypto'
-import { migrateLegacyStorageText } from './legacyWeb'
-import { removePasskeyWithTombstone } from './passkeyManagement'
-import { SessionGeneration } from './sessionGeneration'
-import type { VaultStorageAdapter } from './storageTypes'
-import { cloneVaultPayload, defaultVaultPayload, normalizeVaultPayload, nowSeconds } from './vaultDefaults'
-import { decryptPayload, decryptPayloadWithKey, encryptPayload, encryptPayloadWithKey, importVaultKeyMaterial, setEnvelopePasswordless, validateEnvelope, type VaultKey } from './vaultCrypto'
-import { webStorageAdapter } from './webStorageAdapter'
+import type { ApiResult, AppState, DesktopTraySettings, DeviceUnlockState, PortableBackupExport, PortableBackupImport, PortableBackupSelection, VaultAttachment, VaultBackupExport, VaultBackupImport, VaultPayload } from '../types.ts'
+import { androidStorageAdapter, exportAndroidAttachmentFile, exportAndroidVaultFile } from './androidStorageAdapter.ts'
+import { fail, ok, type AttachmentCreateResult, type CreateVaultResult, type PasswordManagerApiAdapter, type StartupData } from './apiTypes.ts'
+import { callDesktopApi, desktopStorageAdapter, showDesktopWindow as showDesktopWindowAdapter, subscribeDesktopVaultLocked } from './desktopStorageAdapter.ts'
+import { decryptAttachmentObject, encryptAttachmentObject, generateAttachmentKey, importAttachmentKey, verifyAttachmentCiphertext } from './attachmentCrypto.ts'
+import { migrateLegacyStorageText } from './legacyWeb.ts'
+import { removePasskeyWithTombstone } from './passkeyManagement.ts'
+import { SessionGeneration } from './sessionGeneration.ts'
+import type { VaultStorageAdapter } from './storageTypes.ts'
+import { cloneVaultPayload, defaultVaultPayload, normalizeVaultPayload, nowSeconds } from './vaultDefaults.ts'
+import { decryptPayload, decryptPayloadWithKey, encryptPayload, encryptPayloadWithKey, setEnvelopePasswordless, validateEnvelope, type VaultKey } from './vaultCrypto.ts'
+import { webStorageAdapter } from './webStorageAdapter.ts'
 
 const SESSION_TIMEOUT_MS = 15 * 60 * 1000
 const MAX_VAULT_ENVELOPE_TEXT_LENGTH = 24 * 1024 * 1024
@@ -25,9 +25,15 @@ const sessionGeneration = new SessionGeneration()
 export const api: PasswordManagerApiAdapter = {
   getAppInfo: () => selectedStorage().getAppInfo(),
   getStartupData: () => getStartupData(),
-  getState: () => nativeVaultCall('getState', () => guard(getState)),
-  createVault: (password, importLegacy) => nativeVaultCall('createVault', () => guard(() => createVault(password, importLegacy)), password, importLegacy),
-  unlock: (password) => nativeVaultCall('unlock', () => guard(() => unlock(password)), password),
+  getState: () => useDesktopNativeApi()
+    ? callDesktopVaultApi<AppState>('getState')
+    : nativeVaultCall('getState', () => guard(getState)),
+  createVault: (password, importLegacy) => useDesktopNativeApi()
+    ? desktopCreateVault(password, importLegacy)
+    : nativeVaultCall('createVault', () => guard(() => createVault(password, importLegacy)), password, importLegacy),
+  unlock: (password) => useDesktopNativeApi()
+    ? desktopUnlock(password)
+    : nativeVaultCall('unlock', () => guard(() => unlock(password)), password),
   getDeviceUnlockState: () => getDeviceUnlockState(),
   enableDeviceUnlock: (password, reauthSeconds) => enableDeviceUnlock(password, reauthSeconds),
   disableDeviceUnlock: () => disableDeviceUnlock(),
@@ -40,23 +46,43 @@ export const api: PasswordManagerApiAdapter = {
   writeAttachmentCiphertext: (reference, objectText) => writeAttachmentCiphertext(reference, objectText),
   retainAttachmentObject: (attachmentId) => selectedStorage().retainAttachmentObject(attachmentId),
   collectAttachmentObjects: (referencedIds) => selectedStorage().collectAttachmentObjects(referencedIds),
-  lock: () => nativeVaultCall('lock', () => guard(lock)),
-  getVault: () => nativeVaultCall('getVault', () => guard(getVault)),
-  saveVault: (nextPayload) => nativeVaultCall('saveVault', () => guard(() => saveVault(nextPayload)), nextPayload),
-  deletePasskey: (passkeyId) => nativeVaultCall('deletePasskey', () => guard(() => deletePasskey(passkeyId)), passkeyId),
-  changePassword: (newPassword) => nativeVaultCall('changePassword', () => guard(() => changePassword(newPassword)), newPassword),
-  adoptVaultEncryptionFromEnvelope: (envelopeText, password) => nativeVaultCall(
-    'adoptVaultEncryptionFromEnvelope',
-    () => guard(() => adoptVaultEncryptionFromEnvelope(envelopeText, password)),
-    envelopeText,
-    password
-  ),
-  exportVaultBackup: () => nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
+  lock: () => lockVault(),
+  getVault: () => useDesktopNativeApi()
+    ? desktopGetVault()
+    : nativeVaultCall('getVault', () => guard(getVault)),
+  saveVault: (nextPayload) => useDesktopNativeApi()
+    ? desktopSaveVault(nextPayload)
+    : nativeVaultCall('saveVault', () => guard(() => saveVault(nextPayload)), nextPayload),
+  deletePasskey: (passkeyId) => useDesktopNativeApi()
+    ? desktopDeletePasskey(passkeyId)
+    : nativeVaultCall('deletePasskey', () => guard(() => deletePasskey(passkeyId)), passkeyId),
+  changePassword: (newPassword, currentPassword) => useDesktopNativeApi()
+    ? desktopChangePassword(newPassword, currentPassword)
+    : nativeVaultCall('changePassword', () => guard(() => changePassword(newPassword)), newPassword),
+  adoptVaultEncryptionFromEnvelope: (envelopeText, password) => useDesktopNativeApi()
+    ? desktopAdoptVaultEncryptionFromEnvelope(envelopeText, password)
+    : nativeVaultCall(
+      'adoptVaultEncryptionFromEnvelope',
+      () => guard(() => adoptVaultEncryptionFromEnvelope(envelopeText, password)),
+      envelopeText,
+      password
+    ),
+  exportVaultBackup: () => useDesktopNativeApi()
+    ? desktopExportVaultBackup()
+    : nativeVaultCall('exportVaultBackup', () => guard(exportVaultBackup)),
   exportAndroidVaultFile: (displayName, contentText) => exportAndroidVaultFile(displayName, contentText),
-  exportVaultBackupForPayload: (nextPayload) => nativeVaultCall('exportVaultBackupForPayload', () => guard(() => exportVaultBackupForPayload(nextPayload)), nextPayload),
-  previewVaultBackup: (envelopeText) => nativeVaultCall('previewVaultBackup', () => guard(() => previewVaultBackup(envelopeText)), envelopeText),
-  previewVaultBackupWithPassword: (envelopeText, password) => nativeVaultCall('previewVaultBackupWithPassword', () => guard(() => previewVaultBackupWithPassword(envelopeText, password)), envelopeText, password),
-  importVaultBackup: (envelopeText) => nativeVaultCall('importVaultBackup', () => guard(() => importVaultBackup(envelopeText)), envelopeText),
+  exportVaultBackupForPayload: (nextPayload) => useDesktopNativeApi()
+    ? desktopExportVaultBackupForPayload(nextPayload)
+    : nativeVaultCall('exportVaultBackupForPayload', () => guard(() => exportVaultBackupForPayload(nextPayload)), nextPayload),
+  previewVaultBackup: (envelopeText) => useDesktopNativeApi()
+    ? desktopPreviewVaultBackup(envelopeText)
+    : nativeVaultCall('previewVaultBackup', () => guard(() => previewVaultBackup(envelopeText)), envelopeText),
+  previewVaultBackupWithPassword: (envelopeText, password) => useDesktopNativeApi()
+    ? desktopPreviewVaultBackupWithPassword(envelopeText, password)
+    : nativeVaultCall('previewVaultBackupWithPassword', () => guard(() => previewVaultBackupWithPassword(envelopeText, password)), envelopeText, password),
+  importVaultBackup: (envelopeText) => useDesktopNativeApi()
+    ? desktopImportVaultBackup(envelopeText)
+    : nativeVaultCall('importVaultBackup', () => guard(() => importVaultBackup(envelopeText)), envelopeText),
   exportPortableBackupPackage: () => exportPortableBackupPackage(),
   selectPortableBackupPackage: () => selectPortableBackupPackage(),
   importPortableBackupPackage: (selectionToken, password) => importPortableBackupPackage(selectionToken, password),
@@ -79,8 +105,15 @@ export const api: PasswordManagerApiAdapter = {
   downloadAppUpdate: (manifestUrl, onProgress) => selectedStorage().downloadAppUpdate(manifestUrl, onProgress),
   applyAppUpdate: (packagePath) => selectedStorage().applyAppUpdate(packagePath),
   openExternalUrl: (url) => openExternalUrl(url),
+  copySensitiveText: (text, clearAfterSeconds) => useDesktopStorage()
+    ? callDesktopApi<{ copied: boolean; clearAfterSeconds: number }>('copySensitiveText', text, clearAfterSeconds)
+    : Promise.resolve(fail('DESKTOP_ONLY', '原生安全剪贴板仅在桌面端可用。')),
+  clearSensitiveClipboard: () => useDesktopStorage()
+    ? callDesktopApi<{ cleared: boolean }>('clearSensitiveClipboard')
+    : Promise.resolve(fail('DESKTOP_ONLY', '原生安全剪贴板仅在桌面端可用。')),
   safeExit: () => selectedStorage().safeExit(),
-  showDesktopWindow: () => showDesktopWindow()
+  showDesktopWindow: () => showDesktopWindow(),
+  subscribeNativeLock: (handler) => subscribeNativeLock(handler)
 }
 
 export async function showDesktopWindow(): Promise<void> {
@@ -89,34 +122,44 @@ export async function showDesktopWindow(): Promise<void> {
   }
 }
 
+function subscribeNativeLock(handler: (reason: string) => void): () => void {
+  if (!useDesktopNativeApi()) return () => {}
+  return subscribeDesktopVaultLocked((reason) => {
+    clearLocalSession()
+    handler(reason)
+  })
+}
+
 async function createAttachmentObject(name: string, mimeType: string, bytes: Uint8Array): Promise<ApiResult<AttachmentCreateResult>> {
   return guard(async () => {
-    let current = await requirePayload()
+    const generation = sessionGeneration.capture()
+    let current = await requireAttachmentPayload()
     let currentKey: CryptoKey
     if (!current.attachmentKey) {
       const generated = await generateAttachmentKey()
       current = { ...cloneVaultPayload(current), attachmentKey: generated.encoded }
-      attachmentObjectKey = generated.key
-      attachmentKeyMaterial = generated.encoded
       currentKey = generated.key
     } else {
       currentKey = await requireAttachmentObjectKey(current)
     }
     if (!globalThis.crypto?.randomUUID) throw new Error('Secure attachment IDs are unavailable')
     const encrypted = await encryptAttachmentObject(currentKey, crypto.randomUUID(), bytes, name, mimeType)
+    sessionGeneration.requireCurrent(generation)
     unwrap(await selectedStorage().writeAttachmentObject(encrypted.reference.id, encrypted.objectText))
-    refreshSession()
+    sessionGeneration.requireCurrent(generation)
     return { reference: encrypted.reference, vault: cloneVaultPayload(current) }
   })
 }
 
 async function readAttachmentBytes(reference: VaultAttachment): Promise<ApiResult<Uint8Array>> {
   return guard(async () => {
-    const current = await requirePayload()
+    const generation = sessionGeneration.capture()
+    const current = await requireAttachmentPayload()
     const currentKey = await requireAttachmentObjectKey(current)
+    sessionGeneration.requireCurrent(generation)
     const objectText = unwrap(await selectedStorage().readAttachmentObject(reference.id))
     const bytes = await decryptAttachmentObject(currentKey, reference, objectText)
-    refreshSession()
+    sessionGeneration.requireCurrent(generation)
     return bytes
   })
 }
@@ -152,17 +195,22 @@ async function saveAttachmentToFile(reference: VaultAttachment): Promise<ApiResu
 
 async function readAttachmentCiphertext(reference: VaultAttachment): Promise<ApiResult<string>> {
   return guard(async () => {
-    await requirePayload()
+    const generation = sessionGeneration.capture()
+    await requireAttachmentPayload()
+    sessionGeneration.requireCurrent(generation)
     const objectText = unwrap(await selectedStorage().readAttachmentObject(reference.id))
     await verifyAttachmentCiphertext(reference, objectText)
+    sessionGeneration.requireCurrent(generation)
     return objectText
   })
 }
 
 async function writeAttachmentCiphertext(reference: VaultAttachment, objectText: string): Promise<ApiResult<null>> {
   return guard(async () => {
-    await requirePayload()
+    const generation = sessionGeneration.capture()
+    await requireAttachmentPayload()
     await verifyAttachmentCiphertext(reference, objectText)
+    sessionGeneration.requireCurrent(generation)
     unwrap(await selectedStorage().writeAttachmentObject(reference.id, objectText))
     return null
   })
@@ -196,25 +244,10 @@ async function quickUnlock(): Promise<ApiResult<VaultPayload>> {
     }
     return fail(result.code || 'DEVICE_UNLOCK_FAILED', result.message || '设备快速解锁失败')
   }
-  if (!useDesktopStorage()) return fail('UNSUPPORTED_PLATFORM', '设备快速解锁仅支持桌面端与移动端。')
-  try {
-    const material = await callDesktopApi<{ key: string; salt: string; iterations: number }>('readDeviceUnlockKey')
-    if (!material.ok || !material.data) {
-      return fail(material.code || 'DEVICE_UNLOCK_FAILED', material.message || '设备快速解锁失败')
-    }
-    const envelopeText = unwrap(await selectedStorage().readVaultEnvelope())
-    const envelope = validateEnvelope(JSON.parse(envelopeText))
-    const importedKey = await importVaultKeyMaterial(material.data.key, material.data.salt, material.data.iterations)
-    const unlockedPayload = normalizeVaultPayload(await decryptPayloadWithKey(importedKey, envelope))
-    payload = unlockedPayload
-    vaultKey = importedKey
-    passwordless = false
-    refreshSession()
-    return ok(cloneVaultPayload(unlockedPayload))
-  } catch {
-    await callDesktopApi<DeviceUnlockState>('disableDeviceUnlock')
-    return fail('DEVICE_UNLOCK_FAILED', '设备解锁已失效，请使用主密码解锁后重新启用。')
+  if (useDesktopNativeApi()) {
+    return desktopQuickUnlock()
   }
+  return fail('UNSUPPORTED_PLATFORM', '设备快速解锁仅支持桌面端与移动端。')
 }
 
 async function openExternalUrl(value: string): Promise<ApiResult<null>> {
@@ -237,6 +270,21 @@ async function getStartupData(): Promise<ApiResult<StartupData>> {
     const response = await callAndroidApi<AppState>('getState')
     if (!response.ok || !response.data) return fail(response.code || 'ERROR', response.message || '读取启动状态失败')
     return ok({ state: response.data })
+  }
+  if (useDesktopNativeApi()) {
+    const response = await callDesktopVaultApi<AppState>('getState')
+    if (!response.ok || !response.data) return fail(response.code || 'ERROR', response.message || '读取启动状态失败')
+    const currentState = response.data
+    if (currentState.hasVault && currentState.locked && currentState.passwordless) {
+      const unlocked = await desktopUnlock('')
+      if (unlocked.ok && unlocked.data) {
+        return ok({
+          state: { ...currentState, locked: false },
+          vault: unlocked.data
+        })
+      }
+    }
+    return ok({ state: currentState })
   }
   return guard(async () => {
     const state = await getState()
@@ -357,7 +405,28 @@ async function unlock(password: string): Promise<VaultPayload> {
   return cloneVaultPayload(unlockedPayload)
 }
 
+function lockVault(): Promise<ApiResult<AppState>> {
+  if (useAndroidNativeApi()) {
+    clearLocalSession()
+    return callAndroidApi('lock')
+  }
+  if (useDesktopNativeApi()) {
+    clearLocalSession()
+    return callDesktopVaultApi<AppState>('lock')
+  }
+  return guard(lock)
+}
+
 async function lock(): Promise<AppState> {
+  clearLocalSession()
+  if (useDesktopNativeApi()) {
+    return unwrap(await callDesktopVaultApi<AppState>('lock'))
+  }
+  await clearNativeSession()
+  return getState()
+}
+
+function clearLocalSession() {
   sessionGeneration.invalidate()
   payload = null
   vaultKey = null
@@ -365,15 +434,23 @@ async function lock(): Promise<AppState> {
   attachmentKeyMaterial = ''
   passwordless = false
   expiresAt = 0
-  await clearNativeSession()
-  return getState()
+}
+
+async function requireAttachmentPayload(): Promise<VaultPayload> {
+  if (useAndroidNativeApi()) return unwrap(await callAndroidApi<VaultPayload>('getVault'))
+  if (useDesktopNativeApi()) return unwrap(await desktopGetVault())
+  return requirePayload()
 }
 
 async function requireAttachmentObjectKey(current: VaultPayload) {
   const material = String(current.attachmentKey || '')
   if (!material) throw new Error('Vault attachment key is missing')
+  if (useAndroidNativeApi() || useDesktopNativeApi()) return importAttachmentKey(material)
   if (!attachmentObjectKey || attachmentKeyMaterial !== material) {
-    attachmentObjectKey = await importAttachmentKey(material)
+    const generation = sessionGeneration.capture()
+    const key = await importAttachmentKey(material)
+    sessionGeneration.requireCurrent(generation)
+    attachmentObjectKey = key
     attachmentKeyMaterial = material
   }
   return attachmentObjectKey
@@ -558,19 +635,22 @@ async function importVaultBackup(envelopeText: string): Promise<VaultBackupImpor
 
 async function exportPortableBackupPackage() {
   if (!useDesktopStorage()) return fail('UNSUPPORTED', 'Portable backup packages are currently available on desktop only.')
-  await requirePayload()
+  const active = await desktopGetVault()
+  if (!active.ok) return fail(active.code || 'LOCKED', active.message || 'Vault is locked')
   return callDesktopApi<PortableBackupExport>('exportPortableBackupPackage')
 }
 
 async function selectPortableBackupPackage() {
   if (!useDesktopStorage()) return fail('UNSUPPORTED', 'Portable backup packages are currently available on desktop only.')
-  await requirePayload()
+  const active = await desktopGetVault()
+  if (!active.ok) return fail(active.code || 'LOCKED', active.message || 'Vault is locked')
   return callDesktopApi<PortableBackupSelection>('selectPortableBackupPackage')
 }
 
 async function importPortableBackupPackage(selectionToken: string, password: string) {
   if (!useDesktopStorage()) return fail('UNSUPPORTED', 'Portable backup packages are currently available on desktop only.')
-  await requirePayload()
+  const active = await desktopGetVault()
+  if (!active.ok) return fail(active.code || 'LOCKED', active.message || 'Vault is locked')
   const result = await callDesktopApi<PortableBackupImport>('importPortableBackupPackage', selectionToken, password)
   if (result.ok) await lock()
   return result
@@ -612,6 +692,169 @@ function selectedStorage(): VaultStorageAdapter {
   return androidStorageAdapter
 }
 
+type DesktopPayloadResult =
+  | { state?: AppState; payload?: Partial<VaultPayload>; saved?: boolean; revision?: number }
+  | Partial<VaultPayload>
+
+type DesktopStateResult =
+  | { state?: AppState; payload?: Partial<VaultPayload>; passwordChanged?: boolean }
+  | AppState
+
+function useDesktopNativeApi() {
+  return useDesktopStorage()
+}
+
+async function callDesktopVaultApi<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
+  const result = await callDesktopApi<T>(method, ...args)
+  if (!result.ok && result.code === 'ERROR' && errorCode(result.message) === 'CONFLICT') {
+    return { ...result, code: 'CONFLICT' }
+  }
+  return result
+}
+
+function extractDesktopPayload(data: DesktopPayloadResult): Partial<VaultPayload> {
+  if (data && typeof data === 'object' && 'payload' in data && data.payload && typeof data.payload === 'object') {
+    return data.payload
+  }
+  return data as Partial<VaultPayload>
+}
+
+function extractDesktopState(data: DesktopStateResult): AppState {
+  if (data && typeof data === 'object' && 'state' in data && data.state && typeof data.state === 'object') {
+    return data.state
+  }
+  return data as AppState
+}
+
+async function desktopCreateVault(password: string, importLegacy: boolean): Promise<ApiResult<CreateVaultResult>> {
+  const result = await callDesktopVaultApi<{
+    state?: AppState
+    payload?: Partial<VaultPayload>
+    vault?: Partial<VaultPayload>
+    migrated?: number
+    legacyCleanupPending?: boolean
+  }>('createVault', password || '', importLegacy)
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'ERROR', result.message || '创建保险库失败')
+  }
+  const rawPayload = result.data.payload ?? result.data.vault
+  if (!rawPayload) return fail('DESKTOP_API_ERROR', '创建保险库返回数据不完整')
+  return ok({
+    vault: cloneVaultPayload(normalizeVaultPayload(rawPayload)),
+    migrated: Number(result.data.migrated || 0),
+    legacyCleanupPending: Boolean(result.data.legacyCleanupPending)
+  })
+}
+
+async function desktopUnlock(password: string): Promise<ApiResult<VaultPayload>> {
+  const result = await callDesktopVaultApi<DesktopPayloadResult>('unlock', password || '')
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'BAD_PASSWORD', result.message || '解锁失败')
+  }
+  return ok(cloneVaultPayload(normalizeVaultPayload(extractDesktopPayload(result.data))))
+}
+
+async function desktopQuickUnlock(): Promise<ApiResult<VaultPayload>> {
+  const result = await callDesktopVaultApi<DesktopPayloadResult>('quickUnlock')
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'DEVICE_UNLOCK_FAILED', result.message || '设备快速解锁失败')
+  }
+  return ok(cloneVaultPayload(normalizeVaultPayload(extractDesktopPayload(result.data))))
+}
+
+async function desktopGetVault(): Promise<ApiResult<VaultPayload>> {
+  const result = await callDesktopVaultApi<Partial<VaultPayload>>('getVault')
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'LOCKED', result.message || 'Vault is locked')
+  }
+  return ok(cloneVaultPayload(normalizeVaultPayload(result.data)))
+}
+
+async function desktopSaveVault(nextPayload: VaultPayload): Promise<ApiResult<VaultPayload>> {
+  const expectedRevision = Math.max(1, Math.floor(Number(nextPayload.revision || 1)))
+  const normalized = normalizeVaultPayload(nextPayload)
+  const result = await callDesktopVaultApi<DesktopPayloadResult>('saveVault', normalized, expectedRevision)
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'ERROR', result.message || '保存保险库失败')
+  }
+  return ok(cloneVaultPayload(normalizeVaultPayload(extractDesktopPayload(result.data))))
+}
+
+async function desktopDeletePasskey(passkeyId: string): Promise<ApiResult<VaultPayload>> {
+  return guard(async () => {
+    const current = cloneVaultPayload(unwrap(await desktopGetVault()))
+    if (!removePasskeyWithTombstone(current, passkeyId, nowSeconds())) {
+      throw new Error('通行密钥不存在')
+    }
+    return unwrap(await desktopSaveVault(current))
+  })
+}
+
+async function desktopChangePassword(newPassword: string, currentPassword?: string): Promise<ApiResult<AppState>> {
+  const result = currentPassword !== undefined
+    ? await callDesktopVaultApi<DesktopStateResult>('changePasswordVerified', currentPassword, newPassword || '')
+    : await callDesktopVaultApi<DesktopStateResult>('changePassword', newPassword || '')
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'ERROR', result.message || '修改主密码失败')
+  }
+  return ok(extractDesktopState(result.data))
+}
+
+async function desktopAdoptVaultEncryptionFromEnvelope(envelopeText: string, password: string): Promise<ApiResult<AppState>> {
+  const result = await callDesktopVaultApi<DesktopStateResult>('adoptEncryptionFromEnvelope', envelopeText, password || '')
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'ERROR', result.message || '同步云端加密参数失败')
+  }
+  return ok(extractDesktopState(result.data))
+}
+
+async function desktopExportVaultBackup(): Promise<ApiResult<VaultBackupExport>> {
+  const result = await callDesktopVaultApi<VaultBackupExport>('exportBackup')
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'ERROR', result.message || '导出备份失败')
+  }
+  return ok({
+    content: result.data.content,
+    vaultPath: result.data.vaultPath,
+    updatedAt: result.data.updatedAt
+  })
+}
+
+async function desktopExportVaultBackupForPayload(nextPayload: VaultPayload): Promise<ApiResult<VaultBackupExport>> {
+  const normalized = normalizeVaultPayload(nextPayload)
+  const result = await callDesktopVaultApi<VaultBackupExport>('exportBackupForPayload', normalized)
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'ERROR', result.message || '生成备份数据失败')
+  }
+  return ok({
+    content: result.data.content,
+    vaultPath: result.data.vaultPath,
+    updatedAt: result.data.updatedAt
+  })
+}
+
+async function desktopPreviewVaultBackup(envelopeText: string): Promise<ApiResult<VaultPayload>> {
+  const result = await callDesktopVaultApi<DesktopPayloadResult>('previewBackup', envelopeText)
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'BAD_PASSWORD', result.message || '预览备份失败')
+  }
+  return ok(cloneVaultPayload(normalizeVaultPayload(extractDesktopPayload(result.data))))
+}
+
+async function desktopPreviewVaultBackupWithPassword(envelopeText: string, password: string): Promise<ApiResult<VaultPayload>> {
+  const result = await callDesktopVaultApi<DesktopPayloadResult>('previewBackupWithPassword', envelopeText, password || '')
+  if (!result.ok || !result.data) {
+    return fail(result.code || 'BAD_PASSWORD', result.message || '预览备份失败')
+  }
+  return ok(cloneVaultPayload(normalizeVaultPayload(extractDesktopPayload(result.data))))
+}
+
+async function desktopImportVaultBackup(envelopeText: string): Promise<ApiResult<VaultBackupImport>> {
+  const result = await callDesktopVaultApi<VaultBackupImport>('importBackup', envelopeText)
+  if (result.ok) clearLocalSession()
+  return result
+}
+
 function useAndroidNativeApi() {
   return !useDesktopStorage() && !useWebStorage() && Boolean(window.androidPasswordApi)
 }
@@ -620,7 +863,11 @@ async function callAndroidApi<T>(method: string, ...args: unknown[]): Promise<Ap
   const nativeApi = window.androidPasswordApi
   if (!nativeApi?.[method]) return fail('ANDROID_API_NOT_READY', 'Android 本地 API 未就绪。')
   try {
-    return JSON.parse(String(nativeApi[method](...args))) as ApiResult<T>
+    const result = JSON.parse(String(nativeApi[method](...args))) as ApiResult<T>
+    if (!result.ok && result.code === 'ERROR' && errorCode(result.message) === 'CONFLICT') {
+      return { ...result, code: 'CONFLICT' }
+    }
+    return result
   } catch (error) {
     return fail('ANDROID_API_ERROR', error instanceof Error ? error.message : String(error))
   }
@@ -637,7 +884,11 @@ function useDesktopStorage() {
 }
 
 function storageMode() {
-  return String(import.meta.env.VITE_STORAGE_MODE || import.meta.env.VITE_API_MODE || import.meta.env.MODE || '').toLowerCase()
+  try {
+    return String(import.meta.env.VITE_STORAGE_MODE || import.meta.env.VITE_API_MODE || import.meta.env.MODE || '').toLowerCase()
+  } catch {
+    return ''
+  }
 }
 
 function isUnlocked() {
@@ -676,8 +927,11 @@ async function guard<T>(fn: () => Promise<T> | T): Promise<ApiResult<T>> {
   try {
     return ok(await fn())
   } catch (error) {
-    if (error instanceof ApiResultError) return fail(error.code, error.message)
-    return fail(errorCode(error), error instanceof Error ? error.message : String(error))
+    const code = errorCode(error)
+    if (error instanceof ApiResultError && (error.code !== 'ERROR' || code !== 'CONFLICT')) {
+      return fail(error.code, error.message)
+    }
+    return fail(code, error instanceof Error ? error.message : String(error))
   }
 }
 
@@ -720,7 +974,10 @@ function parseEnvelopeText(value: string) {
 }
 
 class ApiResultError extends Error {
-  constructor(public code: string, message: string) {
+  code: string
+
+  constructor(code: string, message: string) {
     super(message)
+    this.code = code
   }
 }

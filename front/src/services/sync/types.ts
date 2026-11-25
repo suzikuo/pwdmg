@@ -80,8 +80,7 @@ export type CloudSyncPreview = {
   remoteEnvelopeText: string
   /** The remote envelope whose password-derived KDF parameters are canonical for this sync. */
   remoteEncryptionEnvelopeText: string
-  /** True when a verified remote KDF was adopted before the review was shown. */
-  encryptionBindingAdopted?: boolean
+  usedAlternatePassword?: boolean
   deviceUnlockWarning?: string
   remoteNeedsSessionKeyRewrite?: boolean
   alternatePassword?: string
@@ -120,7 +119,6 @@ export const CLOUD_SYNC_ENTRY_CHANGE_FIELDS: CloudSyncEntryChangeField[] = [
   'password',
   'phone',
   'loginAccountSource',
-  'autofillMatchMode',
   'note',
   'totpSecret',
   'customFields',

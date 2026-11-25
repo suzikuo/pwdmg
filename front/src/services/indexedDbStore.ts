@@ -1,5 +1,3 @@
-import { requireCurrentRevision, requireNextRevision } from './revisionGuards'
-
 const DB_NAME = 'mypwdmg-web-vault'
 const DB_VERSION = 1
 const KV_STORE = 'kv'
@@ -21,35 +19,6 @@ export async function idbGet<T>(key: string): Promise<T | null> {
   return withStore('readonly', async (store) => {
     const record = await requestToPromise<KvRecord<T> | undefined>(store.get(key))
     return record?.value ?? null
-  })
-}
-
-export async function idbSet<T>(key: string, value: T): Promise<void> {
-  await withStore('readwrite', async (store) => {
-    store.put({ key, value })
-  })
-}
-
-export async function idbSetIfRevision<T>(key: string, value: T, expectedRevision: number): Promise<void> {
-  await withStore('readwrite', async (store) => {
-    const record = await requestToPromise<KvRecord<unknown> | undefined>(store.get(key))
-    const currentRevision = requireCurrentRevision(record?.value, Boolean(record), expectedRevision)
-    requireNextRevision(value, currentRevision)
-    store.put({ key, value })
-  })
-}
-
-export async function idbSetIfCurrentRevision<T>(key: string, value: T, expectedRevision: number): Promise<void> {
-  await withStore('readwrite', async (store) => {
-    const record = await requestToPromise<KvRecord<unknown> | undefined>(store.get(key))
-    requireCurrentRevision(record?.value, Boolean(record), expectedRevision)
-    store.put({ key, value })
-  })
-}
-
-export async function idbDelete(key: string): Promise<void> {
-  await withStore('readwrite', async (store) => {
-    store.delete(key)
   })
 }
 

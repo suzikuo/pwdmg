@@ -19,7 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 pwdmg-core = { path = "crates/core" }
-tauri = { version = "2", features = ["tray-icon", "custom-protocol", "devtools"] }
+tauri = { version = "2", features = ["tray-icon", "custom-protocol"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
@@ -37,6 +37,9 @@ uuid = { version = "1.10", features = ["v4"] }
 directories = "5.0"
 base64 = "0.22"
 sha2 = "0.10"
+url = "2.5"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+tempfile = "3"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

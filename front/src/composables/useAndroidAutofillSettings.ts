@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { showFailToast, showToast } from 'vant'
+import { showFailToast, showToast } from '../services/uiFeedback'
 import { api } from '../services/api'
 import type { AndroidAutofillState } from '../types'
 

@@ -23,10 +23,10 @@ const FIELD_LABELS: Record<EntryHistoryField, string> = {
   status: '状态'
 }
 
-const OPTIONAL_SNAPSHOT_FIELDS: Array<keyof VaultEntrySnapshot> = [
+const OPTIONAL_SNAPSHOT_FIELDS = [
   'status', 'statusReason', 'statusUpdatedAt', 'deletedAt', 'username', 'email',
   'password', 'phone', 'autofillMatchMode', 'loginAccountSource', 'note', 'totpSecret', 'customFields', 'attachments'
-]
+] as const satisfies readonly (keyof VaultEntrySnapshot)[]
 
 export function createEntrySnapshot(entry: VaultEntry): VaultEntrySnapshot {
   const copy = JSON.parse(JSON.stringify(entry)) as VaultEntry
@@ -36,14 +36,17 @@ export function createEntrySnapshot(entry: VaultEntry): VaultEntrySnapshot {
 }
 
 export function restoreEntrySnapshot(entry: VaultEntry, snapshot: VaultEntrySnapshot): void {
+  const target = entry as unknown as Record<string, unknown>
   for (const field of OPTIONAL_SNAPSHOT_FIELDS) {
     if (!(field in snapshot)) delete entry[field]
+    else {
+      const value = snapshot[field]
+      target[field] = Array.isArray(value) ? value.map((item) => ({ ...item })) : value
+    }
   }
+  if (snapshot.kind !== undefined) entry.kind = snapshot.kind
   entry.title = snapshot.title
   entry.domains = [...(snapshot.domains || [])]
-  for (const field of OPTIONAL_SNAPSHOT_FIELDS) {
-    if (field in snapshot) (entry as unknown as Record<string, unknown>)[field] = snapshot[field]
-  }
 }
 
 export function entryHistoryFieldLabel(field: EntryHistoryField): string {

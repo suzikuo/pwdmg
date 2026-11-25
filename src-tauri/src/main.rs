@@ -2,15 +2,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod desktop_config;
+mod desktop_update;
+mod updater;
 
 use bridge::{
     configured_close_behavior, handle_api_call, read_desktop_config, save_window_state, DesktopState,
+    TRAY_ID,
 };
 use serde_json::Value;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };
 
 const SHIM_SCRIPT: &str = r#"
@@ -59,12 +63,6 @@ fn desktop_api(
 }
 
 fn main() {
-    // Optimize WebView2 startup performance by disabling unused background services and telemetry
-    std::env::set_var(
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--disable-background-networking --disable-component-update --disable-sync --disable-default-apps --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
-    );
-
     let app_state = DesktopState::default();
 
     tauri::Builder::default()
@@ -90,7 +88,7 @@ fn main() {
                 let exit_item = MenuItem::with_id(app, "exit", "退出", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show_item, &reset_item, &lock_item, &exit_item])?;
 
-                let tray_builder = TrayIconBuilder::new()
+                let tray_builder = TrayIconBuilder::with_id(TRAY_ID)
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
@@ -112,9 +110,19 @@ fn main() {
                         }
                         "lock" => {
                             let state: State<DesktopState> = app.state();
-                            state.vault.lock();
+                            state.clipboard.clear_if_owned();
+                            let locked_state = state.vault.lock();
+                            let _ = app.emit(
+                                "vault-locked",
+                                serde_json::json!({
+                                    "reason": "tray",
+                                    "state": locked_state,
+                                }),
+                            );
                         }
                         "exit" => {
+                            let state: State<DesktopState> = app.state();
+                            state.clipboard.clear_if_owned();
                             if let Some(window) = app.get_webview_window("main") {
                                 save_window_state(&window);
                             }
@@ -176,10 +184,13 @@ fn main() {
                 .inner_size(width, height)
                 .min_inner_size(360.0, 480.0)
                 .resizable(true)
-                .devtools(true)
                 .visible(false)
                 .background_color(tauri::utils::config::Color(17, 24, 39, 255))
                 .initialization_script(SHIM_SCRIPT);
+            #[cfg(debug_assertions)]
+            {
+                builder = builder.devtools(true);
+            }
 
             if is_maximized {
                 builder = builder.maximized(true);

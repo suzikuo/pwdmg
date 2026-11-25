@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { showFailToast } from 'vant'
+import { showFailToast } from '../services/uiFeedback'
 import { api } from '../services/api'
 import type { DesktopCloseBehavior, DesktopTraySettings } from '../types'
 

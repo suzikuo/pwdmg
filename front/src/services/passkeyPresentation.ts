@@ -1,4 +1,5 @@
 import type { PasskeyTransport, VaultEntry, VaultPasskey } from '../types'
+import { walkEntries } from './shared/entryTree.ts'
 
 export type PasskeyPresentationItem = {
   id: string
@@ -38,7 +39,9 @@ export function buildPasskeyPresentationItems(
   entries: readonly VaultEntry[]
 ): PasskeyPresentationItem[] {
   const entryTitles = new Map<string, string>()
-  collectEntryTitles(entries, entryTitles)
+  walkEntries(entries, (entry) => {
+    if (entry.kind === 'login') entryTitles.set(entry.id, entry.title || '未命名登录')
+  })
 
   return passkeys.map((passkey) => ({
     id: passkey.id,
@@ -67,13 +70,6 @@ export function buildPasskeyLoginOptions(entries: readonly VaultEntry[]): Passke
   const options: PasskeyLoginOption[] = []
   collectActiveLoginOptions(entries, [], options)
   return options
-}
-
-function collectEntryTitles(entries: readonly VaultEntry[], titles: Map<string, string>) {
-  for (const entry of entries) {
-    if (entry.kind === 'login') titles.set(entry.id, entry.title || '未命名登录')
-    if (entry.children?.length) collectEntryTitles(entry.children, titles)
-  }
 }
 
 function collectActiveLoginOptions(

@@ -51,6 +51,24 @@ test('Bitwarden JSON keeps structured login, secure note, card, and identity can
   assert.equal(preview.records[3].customFields.find((field) => field.label === '邮箱')?.type, 'email')
 })
 
+test('Bitwarden JSON maps folder IDs to names and omits unknown folders', () => {
+  const folderId = 'e8688d8c-b4ec-4666-9f84-db69d4f89999'
+  const preview = parseVaultImport(JSON.stringify({
+    folders: [{ id: folderId, name: 'Work/Accounts' }],
+    items: [{ name: 'Mapped', folderId }, { name: 'Unknown', folderId: 'missing-id' }]
+  }), 'vault.json')
+  assert.deepEqual(preview.records.map((record) => record.folderPath), ['Work/Accounts', ''])
+})
+
+test('CSV keeps the first non-empty duplicate column and separates URL lists', () => {
+  const preview = parseVaultImport(
+    'name,password,password,url\nExample,first,,"https://one.example/path,a;param https://two.example;https://three.example\nhttps://four.example,https://five.example"\nFallback,,second,',
+    'vault.csv'
+  )
+  assert.deepEqual(preview.records.map((record) => record.password), ['first', 'second'])
+  assert.deepEqual(preview.records[0].domains, ['one.example', 'two.example', 'three.example', 'four.example', 'five.example'])
+})
+
 test('encrypted and malformed exports fail without partial records', () => {
   assert.throws(() => parseVaultImport('{"encrypted":true,"items":[]}', 'vault.json'), /暂不支持加密/)
   assert.throws(() => parseVaultImport('name,note\n"open,value', 'bad.csv'), /未闭合/)

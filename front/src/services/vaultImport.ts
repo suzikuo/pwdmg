@@ -1,4 +1,5 @@
 import type { VaultEntry } from '../types.ts'
+import { walkEntries } from './shared/entryTree.ts'
 
 export type ImportItemKind = 'login' | 'secure-note' | 'card' | 'identity' | 'api-key'
 export type ImportFieldType = 'text' | 'secret' | 'date' | 'url' | 'email' | 'phone'
@@ -110,32 +111,26 @@ export function importRecordFingerprint(record: Omit<ImportedVaultRecord, 'impor
 
 export function existingImportFingerprints(entries: readonly VaultEntry[]) {
   const result = new Set<string>()
-  const visit = (items: readonly VaultEntry[]) => {
-    for (const entry of items) {
-      if (entry.kind === 'folder') {
-        visit(entry.children || [])
-        continue
-      }
-      result.add(importRecordFingerprint({
-        kind: importKind(entry.kind),
-        title: entry.title,
-        domains: entry.domains || [],
-        username: entry.username || '',
-        email: entry.email || '',
-        password: entry.password || '',
-        phone: entry.phone || '',
-        note: entry.note || '',
-        totpSecret: entry.totpSecret || '',
-        customFields: (entry.customFields || []).map((field) => ({
-          label: field.label,
-          value: field.value,
-          type: field.type,
-          protected: field.protected
-        }))
+  walkEntries(entries, (entry) => {
+    if (entry.kind === 'folder') return
+    result.add(importRecordFingerprint({
+      kind: importKind(entry.kind),
+      title: entry.title,
+      domains: entry.domains || [],
+      username: entry.username || '',
+      email: entry.email || '',
+      password: entry.password || '',
+      phone: entry.phone || '',
+      note: entry.note || '',
+      totpSecret: entry.totpSecret || '',
+      customFields: (entry.customFields || []).map((field) => ({
+        label: field.label,
+        value: field.value,
+        type: field.type,
+        protected: field.protected
       }))
-    }
-  }
-  visit(entries)
+    }))
+  })
   return result
 }
 
@@ -153,6 +148,13 @@ function parseJsonImport(text: string): VaultImportPreview {
   }
   const items = Array.isArray(root.items) ? root.items : null
   if (!items) throw new Error('未识别到 Bitwarden items 数组。')
+
+  const folderMap = new Map<string, string>()
+  for (const raw of Array.isArray(root.folders) ? root.folders : []) {
+    const folder = objectValue(raw)
+    const id = cleanText(folder.id)
+    if (id) folderMap.set(id, cleanText(folder.name))
+  }
 
   const warnings: string[] = []
   const records: ImportedVaultRecord[] = []
@@ -181,7 +183,7 @@ function parseJsonImport(text: string): VaultImportPreview {
       importId: `bitwarden-${index}`,
       kind,
       title: cleanText(item.name),
-      folderPath: cleanText(item.folderId),
+      folderPath: folderMap.get(cleanText(item.folderId)) || '',
       urls: urlValues,
       username: cleanText(login.username),
       password: cleanText(login.password),
@@ -203,7 +205,10 @@ function parseCsvImport(text: string): VaultImportPreview {
   const records: ImportedVaultRecord[] = []
 
   rows.slice(1).forEach((values, rowIndex) => {
-    const row = Object.fromEntries(headers.map((header, index) => [header, cleanText(values[index])]))
+    const row: Record<string, string> = Object.create(null)
+    headers.forEach((header, index) => {
+      if (header && !row[header]) row[header] = cleanText(values[index])
+    })
     const title = firstValue(row, ['name', 'title'])
     const username = firstValue(row, ['username', 'loginusername', 'login_username'])
     const email = firstValue(row, ['email']) || (username.includes('@') ? username : '')
@@ -356,7 +361,9 @@ function countUnquoted(value: string, delimiter: string) {
 }
 
 function splitUrls(value: string) {
-  return value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean)
+  // Commas and semicolons can occur in paths and queries. Split adjacent
+  // URLs on punctuation only when the next token has a URL scheme.
+  return value.split(/[,;]+(?=\s|[a-z][a-z\d+.-]*:\/\/)|\s+/i).filter(Boolean)
 }
 
 function domainFromUrl(value: string) {

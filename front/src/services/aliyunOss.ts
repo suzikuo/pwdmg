@@ -1,3 +1,5 @@
+import { bytesToBase64, sha256Hex } from './shared/encoding.ts'
+
 export const DEFAULT_OSS_OBJECT_NAME = 'pwd/mypwdmg-vault.json'
 
 export const APIResponseStatus = {
@@ -70,34 +72,26 @@ export class AliyunOSSAPI {
     return new Date().toUTCString()
   }
 
-  private request(input: RequestInfo | URL, init: RequestInit = {}) {
+  private async request(input: RequestInfo | URL, init: RequestInit = {}) {
+    const signal = this.signal
     const controller = new AbortController()
-    const abortFromParent = () => controller.abort()
-    let timedOut = false
-    if (this.signal?.aborted) controller.abort()
-    else this.signal?.addEventListener('abort', abortFromParent, { once: true })
-    let rejectTimeout: ((reason?: unknown) => void) | null = null
-    const timeoutPromise = new Promise<Response>((_, reject) => {
-      rejectTimeout = reject
+    const abortFromParent = () => controller.abort(signal?.reason)
+    if (signal?.aborted) abortFromParent()
+    else signal?.addEventListener('abort', abortFromParent, { once: true })
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = globalThis.setTimeout(() => {
+        const error = new Error('云端请求超时（30 秒）')
+        reject(error)
+        controller.abort(error)
+      }, OSS_REQUEST_TIMEOUT_MS)
     })
-    const timeoutId = globalThis.setTimeout(() => {
-      timedOut = true
-      controller.abort()
-      rejectTimeout?.(new Error('云端请求超时（30 秒）'))
-    }, OSS_REQUEST_TIMEOUT_MS)
-    const requestSignal = this.signal || controller.signal
-    const request = fetch(input, { ...init, signal: requestSignal })
-      .catch((error) => {
-        if (timedOut) throw new Error('云端请求超时（30 秒）')
-        throw error
-      })
-    return Promise.race([
-      request,
-      timeoutPromise
-    ]).finally(() => {
+    try {
+      return await Promise.race([fetch(input, { ...init, signal: controller.signal }), timeout])
+    } finally {
       globalThis.clearTimeout(timeoutId)
-      this.signal?.removeEventListener('abort', abortFromParent)
-    })
+      signal?.removeEventListener('abort', abortFromParent)
+    }
   }
 
   async generateSignature(
@@ -153,8 +147,7 @@ export class AliyunOSSAPI {
       const response = await this.request(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'PUT',
         headers,
-        body: fileContent,
-        signal: this.signal
+        body: fileContent
       })
 
       if (response.ok) {
@@ -194,7 +187,6 @@ export class AliyunOSSAPI {
       const signature = await this.generateSignature('GET', '', '', date, ossHeaders, resource)
       const response = await this.request(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'GET',
-        signal: this.signal,
         headers: {
           'x-oss-date': date,
           Authorization: `OSS ${this.accessKeyId}:${signature}`
@@ -212,7 +204,7 @@ export class AliyunOSSAPI {
           content,
           etag: response.headers.get('ETag') || '',
           versionId: response.headers.get('x-oss-version-id') || '',
-          revision: typeof content === 'string' ? await sha256Text(content) : ''
+          revision: typeof content === 'string' ? await sha256Hex(content) : ''
         }
       }
       if (response.status === 404) return { status: APIResponseStatus.FileNotExist, content: '文件未找到' }
@@ -224,13 +216,6 @@ export class AliyunOSSAPI {
     }
   }
 
-  async checkFileExists(fileName: string): Promise<OSSApiResponse<boolean>> {
-    const info = await this.getFileInfo(fileName)
-    return {
-      status: info.status,
-      content: Boolean(info.content && typeof info.content !== 'string' && info.content.exists)
-    }
-  }
 
   async getFileInfo(fileName: string): Promise<OSSApiResponse<OSSFileInfo | string>> {
     if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
@@ -243,7 +228,6 @@ export class AliyunOSSAPI {
       const signature = await this.generateSignature('HEAD', '', '', date, ossHeaders, resource)
       const response = await this.request(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
         method: 'HEAD',
-        signal: this.signal,
         headers: {
           'x-oss-date': date,
           Authorization: `OSS ${this.accessKeyId}:${signature}`
@@ -285,7 +269,7 @@ export class AliyunOSSAPI {
     if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
 
     try {
-      const normalizedPrefix = normalizeObjectName(prefix).replace(/\/?$/, '')
+      const normalizedPrefix = prefix.trim().replace(/^\/+/, '')
       const query = [
         `prefix=${encodeURIComponent(normalizedPrefix)}`,
         `max-keys=${Math.max(1, Math.min(100, Math.round(maxKeys)))}`,
@@ -297,7 +281,6 @@ export class AliyunOSSAPI {
       const signature = await this.generateSignature('GET', '', '', date, ossHeaders, resource)
       const response = await this.request(`${this.getEndpoint()}/?${query}`, {
         method: 'GET',
-        signal: this.signal,
         headers: {
           'x-oss-date': date,
           Authorization: `OSS ${this.accessKeyId}:${signature}`
@@ -327,9 +310,6 @@ export class AliyunOSSAPI {
     }
   }
 
-  async downloadFileByName(fileName: string, fileType = 'text/plain') {
-    return this.downloadFile(fileName, fileType)
-  }
 }
 
 export function normalizeObjectName(fileName = DEFAULT_OSS_OBJECT_NAME) {
@@ -341,19 +321,6 @@ function encodeObjectName(fileName: string) {
   return fileName.split('/').map(encodeURIComponent).join('/')
 }
 
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = ''
-  const chunkSize = 0x8000
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
-  }
-  return btoa(binary)
-}
-
-async function sha256Text(value: string) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
-}
 
 async function readTextResponseLimited(response: Response, maxBytes: number) {
   const bytes = await readResponseBytesLimited(response, maxBytes)

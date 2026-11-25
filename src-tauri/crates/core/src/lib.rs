@@ -1,4 +1,6 @@
+pub mod api_error;
 pub mod attachment;
+pub mod clipboard;
 pub mod crypto;
 pub mod device_unlock;
 pub mod domain;

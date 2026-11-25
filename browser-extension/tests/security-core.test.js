@@ -208,6 +208,9 @@ test('background rejects foreign senders and keeps vault controls extension-page
   for (const message of [
     { type: 'MYPWDMG_UNLOCK', password: 'must-not-cross' },
     { type: 'MYPWDMG_LOCK' },
+    { type: 'MYPWDMG_DEVICE_UNLOCK_STATE' },
+    { type: 'MYPWDMG_ENABLE_DEVICE_UNLOCK', password: 'test-password', reauthSeconds: 60 },
+    { type: 'MYPWDMG_DISABLE_DEVICE_UNLOCK' },
     { type: 'MYPWDMG_LIST_SAVE_TARGETS' },
     { type: 'MYPWDMG_STATE' },
     { type: 'MYPWDMG_SET_AUTO_SETTINGS', settings: { autoFillEnabled: false } }
@@ -221,7 +224,15 @@ test('background rejects foreign senders and keeps vault controls extension-page
   assert.equal(settings.ok, true)
   const state = await background.dispatch({ type: 'MYPWDMG_STATE' }, popupSender)
   assert.equal(state.ok, true)
-  assert.deepEqual(calls.map((call) => call.method), ['getState'])
+  for (const type of [
+    'MYPWDMG_DEVICE_UNLOCK_STATE', 'MYPWDMG_ENABLE_DEVICE_UNLOCK', 'MYPWDMG_DISABLE_DEVICE_UNLOCK'
+  ]) {
+    const response = await background.dispatch({ type }, popupSender)
+    assert.equal(response.ok, true)
+  }
+  assert.deepEqual(calls.map((call) => call.method), [
+    'getState', 'getDeviceUnlockState', 'enableDeviceUnlock', 'disableDeviceUnlock'
+  ])
 })
 
 test('background cleans up a synchronous native send failure and does not expose its exception', async () => {
@@ -748,6 +759,67 @@ test('failed capture saves remain retryable and prompts never cross origins', as
   }, redirectedSender)
   assert.equal(retried.ok, true)
   assert.equal(saveAttempts, 2)
+})
+
+test('locking clears pending capture credentials and discards in-flight previews', async () => {
+  const calls = []
+  let resolvePreview
+  let previewStarted
+  const waitingForPreview = new Promise((resolve) => { previewStarted = resolve })
+  const background = loadBackground((method, params) => {
+    calls.push(method)
+    if (method !== 'previewCapturedLogin') return { ok: true, data: {} }
+    const { username, hostname } = params.capture
+    if (username === 'locked') return { ok: false, code: 'LOCKED', message: 'Vault is locked.' }
+    if (username === 'invalid') return { ok: false, code: 'INVALID_INPUT', message: 'Invalid capture.' }
+    const response = { ok: true, data: { shouldPrompt: true, hostname, folders: [] } }
+    if (username === 'in-flight') {
+      return new Promise((resolve) => {
+        resolvePreview = () => resolve(response)
+        previewStarted()
+      })
+    }
+    return response
+  })
+  const sender = {
+    tab: { id: 7, url: 'https://login.example.com/' },
+    frameId: 0,
+    documentId: 'doc-lock',
+    url: 'https://login.example.com/form'
+  }
+  const popupSender = { url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html' }
+  const prepare = (username) => background.dispatch({
+    type: 'MYPWDMG_PREPARE_CAPTURE',
+    capture: { username, password: 'test-password' }
+  }, sender)
+  const prepared = await prepare('ready')
+  assert.ok(prepared.data.token)
+  assert.equal((await prepare('locked')).code, 'LOCKED_CAPTURE_PENDING')
+  assert.equal((await prepare('invalid')).code, 'INVALID_INPUT')
+  const inFlight = prepare('in-flight')
+  await waitingForPreview
+
+  assert.equal((await background.dispatch({ type: 'MYPWDMG_LOCK' }, popupSender)).ok, true)
+  resolvePreview()
+  assert.equal((await inFlight).data.shouldPrompt, false)
+  assert.equal((await background.dispatch({ type: 'MYPWDMG_TAKE_SAVE_PROMPT' }, sender)).data, null)
+  assert.equal((await background.dispatch({ type: 'MYPWDMG_SAVE_CAPTURE', token: prepared.data.token }, sender)).code, 'CAPTURE_EXPIRED')
+  assert.equal((await background.dispatch({ type: 'MYPWDMG_UNLOCK', password: 'test-password' }, popupSender)).ok, true)
+  assert.equal(calls.filter((method) => method === 'previewCapturedLogin').length, 4)
+  assert.equal(calls.includes('saveCapturedLogin'), false)
+})
+
+test('background preserves structured BAD_PASSWORD and recognizes the legacy vault error', async () => {
+  let code = 'BAD_PASSWORD'
+  const message = 'Wrong password or corrupted vault'
+  const background = loadBackground(() => ({ ok: false, code, message }))
+  const popupSender = { url: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html' }
+  for (const nativeCode of ['BAD_PASSWORD', 'NATIVE_HOST_ERROR']) {
+    code = nativeCode
+    const response = await background.dispatch({ type: 'MYPWDMG_UNLOCK', password: 'incorrect' }, popupSender)
+    assert.equal(response.code, 'BAD_PASSWORD')
+    assert.equal(response.message, message)
+  }
 })
 
 test('pending password captures expire on schedule without a follow-up message', async () => {

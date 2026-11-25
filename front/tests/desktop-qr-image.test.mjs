@@ -5,6 +5,7 @@ import { getQrDecodeDimensions, validateQrImageMetadata } from '../src/services/
 
 const serviceSource = readFileSync(new URL('../src/services/desktopQrImage.ts', import.meta.url), 'utf8')
 const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
+const vaultStoreSource = readFileSync(new URL('../src/stores/vaultStore.ts', import.meta.url), 'utf8')
 const editorSource = readFileSync(new URL('../src/components/editor/EntryEditor.vue', import.meta.url), 'utf8')
 
 test('desktop QR image validation rejects unsafe files and scales bounded images', () => {
@@ -31,10 +32,10 @@ test('desktop QR image service bounds bytes, dimensions, pixels, and decoded pay
 
 test('QR image action supports desktop and Android image selection', () => {
   assert.match(appSource, /:show-qr-image-picker="isDesktopRuntime \|\| isAndroidRuntime"/)
-  assert.match(appSource, /@import-totp-qr-image="importTotpQrImage"/)
-  assert.match(appSource, /if \(\(!isDesktopRuntime && !isAndroidRuntime\) \|\| qrImageBusy\.value\) return/)
-  assert.match(appSource, /await applyTotpQrValue\(value, targetEditingId, targetFormId\)/)
-  assert.match(appSource, /editingId\.value !== targetEditingId \|\| form\.id !== targetFormId/)
+  assert.match(appSource, /@import-totp-qr-image="vaultStore\.importTotpQrImage"/)
+  assert.match(vaultStoreSource, /if \(\(!isDesktopRuntime && !isAndroidRuntime\) \|\| qrImageBusy\.value\) return/)
+  assert.match(vaultStoreSource, /await applyTotpQrValue\(value, targetEditingId, targetFormId\)/)
+  assert.match(vaultStoreSource, /editingId\.value !== targetEditingId \|\| form\.id !== targetFormId/)
   assert.match(editorSource, /showQrImagePicker: boolean/)
   assert.match(editorSource, /accept="image\/png,image\/jpeg,image\/webp,image\/bmp/)
   assert.match(editorSource, /input\.value = ''/)

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { CLOUD_SYNC_ENTRY_CHANGE_FIELDS } from '../src/services/sync/types.ts'
 
 import { defaultVaultPayload } from '../src/services/vaultDefaults.ts'
 import {
@@ -261,6 +262,23 @@ test('builds one selected download target and recognizes idempotent convergence'
     targetPayload: target,
     fingerprint
   }), false)
+})
+
+test('sync entry change fields are unique', () => {
+  assert.equal(new Set(CLOUD_SYNC_ENTRY_CHANGE_FIELDS).size, CLOUD_SYNC_ENTRY_CHANGE_FIELDS.length)
+})
+
+test('keeps base ordering for a partial field selection and applies source ordering with all changes selected', async () => {
+  const local = payload([login('a'), login('b'), login('c')])
+  const remote = payload([login('c', 'Changed C'), login('b', 'Changed B'), login('a')])
+  const { plan } = await createCloudSyncPlan({
+    requestedDirection: 'download', localPayload: local, remotePayload: remote, ancestorPayload: null, fingerprint
+  })
+  const [first, second] = plan.items
+  const partial = buildCloudSyncTargetPayload(plan, [first], local.settings)
+  assert.deepEqual(partial.entries.map(({ id, title }) => [id, title]), [['a', 'a'], ['b', 'b'], ['c', 'Changed C']])
+  const complete = buildCloudSyncTargetPayload(plan, [first, second], local.settings)
+  assert.deepEqual(complete.entries.map(({ id, title }) => [id, title]), [['c', 'Changed C'], ['b', 'Changed B'], ['a', 'a']])
 })
 
 function payload(entries) {

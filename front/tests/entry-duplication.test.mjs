@@ -50,6 +50,21 @@ test('duplicates a folder beside its source with fresh recursive identity and cl
   assert.equal(entries[0].children.length, 2)
 })
 
+test('duplicates custom fields and attachment references without sharing mutable objects', () => {
+  const source = {
+    id: 'login-1', kind: 'login', title: 'A', domains: [],
+    customFields: [{ id: 'field-1', label: 'Label', value: 'original' }],
+    attachments: [{ id: 'object-1', name: 'original.txt' }]
+  }
+  const duplicate = insertDuplicateEntry([source], source.id, () => 'login-2')
+  duplicate.customFields[0].value = 'changed'
+  duplicate.attachments[0].name = 'changed.txt'
+  duplicate.customFields.push({ id: 'field-2' })
+  duplicate.attachments.push({ id: 'object-2' })
+  assert.deepEqual(source.customFields, [{ id: 'field-1', label: 'Label', value: 'original' }])
+  assert.deepEqual(source.attachments, [{ id: 'object-1', name: 'original.txt' }])
+})
+
 test('refuses generated IDs that collide with source entries', () => {
   const entries = [{ id: 'login-1', kind: 'login', title: 'A', domains: [], children: [] }]
   const ids = ['login-1', 'login-2']

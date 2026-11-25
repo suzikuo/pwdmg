@@ -50,7 +50,7 @@ export function hasLocalCloudChanges(input: {
 }
 
 export function buildCloudSyncTargetPayload(
-  preview: Pick<CloudSyncPreview, 'basePayload' | 'sourcePayload' | 'resolvedPasskeyState'>,
+  preview: Pick<CloudSyncPreview, 'basePayload' | 'sourcePayload' | 'resolvedPasskeyState' | 'items'>,
   selectedItems: CloudSyncDiffItem[],
   settings: VaultPayload['settings']
 ): VaultPayload {
@@ -60,7 +60,10 @@ export function buildCloudSyncTargetPayload(
   for (const item of selectedItems) {
     applyCloudSyncDiffItem(target.entries, preview.sourcePayload.entries, item)
   }
-  applyCloudSyncPositionChanges(target.entries, preview.sourcePayload.entries)
+  const allChangesSelected = selectedItems.length === preview.items.length && selectedItems.every((item) =>
+    item.changeType === 'modified' ? item.details.every((detail) => detail.checked) : item.checked
+  )
+  if (allChangesSelected) applyCloudSyncPositionChanges(target.entries, preview.sourcePayload.entries)
   const attachmentKey = preview.sourcePayload.attachmentKey || preview.basePayload.attachmentKey
   if (attachmentKey) target.attachmentKey = attachmentKey
   else delete target.attachmentKey

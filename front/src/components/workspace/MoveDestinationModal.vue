@@ -1,76 +1,62 @@
 <template>
-  <van-popup
-    :show="open"
-    position="bottom"
-    round
-    class="move-destination-popup"
-    :duration="0.14"
-    lazy-render
-    @update:show="emit('update:open', $event)"
+  <UiModal
+    :open="open"
+    :title="title || '移动到'"
+    :subtitle="subtitle || undefined"
+    size="md"
+    @close="emit('update:open', false)"
   >
-    <div class="move-tree-shell">
-      <!-- Header -->
-      <div class="move-tree-header">
-        <div class="move-tree-title-group">
-          <div class="move-tree-title-row">
-            <h3 class="move-tree-title">{{ title || '移动到' }}</h3>
-            <span v-if="subtitle" class="move-tree-subtitle">{{ subtitle }}</span>
-          </div>
-          <div class="move-tree-target-bar">
-            <span class="preview-label">目标位置：</span>
-            <span class="preview-path" :class="{ 'is-selected': selectedTargetId !== null }">
-              {{ targetPathText }}
-            </span>
-          </div>
-        </div>
-        <div class="move-tree-header-actions">
-          <button
-            v-if="hasFolders"
-            type="button"
-            class="tree-expand-toggle-btn"
-            :title="isAllExpanded ? '折叠全部' : '展开全部'"
-            @click="toggleAllExpanded"
-          >
-            <van-icon :name="isAllExpanded ? 'arrow-up' : 'arrow-down'" />
-            <span>{{ isAllExpanded ? '折叠' : '展开' }}</span>
-          </button>
-          <button
-            type="button"
-            class="inline-icon-button move-tree-close-btn"
-            aria-label="关闭"
-            @click="emit('update:open', false)"
-          >
-            <van-icon name="cross" />
-          </button>
-        </div>
+    <template #header-extra>
+      <UiButton
+        v-if="hasFolders"
+        variant="subtle"
+        size="xs"
+        :title="isAllExpanded ? '折叠全部' : '展开全部'"
+        @click="toggleAllExpanded"
+      >
+        <UiIcon :name="isAllExpanded ? 'chevron-down' : 'chevron-right'" :size="13" />
+        <span>{{ isAllExpanded ? '折叠' : '展开' }}</span>
+      </UiButton>
+    </template>
+
+    <div class="move-tree-body">
+      <div class="move-tree-target-bar">
+        <span class="preview-label">目标位置：</span>
+        <span class="preview-path" :class="{ 'is-selected': selectedTargetId !== null }">
+          {{ targetPathText }}
+        </span>
       </div>
 
-      <!-- Search filter -->
       <div v-if="totalFolderCount > 4" class="move-tree-search-bar">
-        <van-search
+        <UiInput
           v-model="searchKeyword"
-          placeholder="搜索分组名称..."
+          type="search"
           clearable
-          shape="round"
-        />
+          placeholder="搜索分组名称…"
+        >
+          <template #prefix>
+            <UiIcon name="search" :size="15" />
+          </template>
+        </UiInput>
       </div>
 
-      <!-- Tree content area -->
-      <div class="move-tree-container">
-        <!-- Root node (根目录) -->
+      <div class="move-tree-container" role="tree" aria-label="目标分组列表">
         <div
           class="tree-node tree-root-node"
           :class="{
             'is-selected': selectedTargetId === '',
             'is-current': isRootCurrent
           }"
-          role="button"
+          role="treeitem"
           tabindex="0"
+          :aria-selected="selectedTargetId === ''"
           @click="handleNodeClick('')"
+          @keydown.enter.prevent="handleNodeClick('')"
+          @keydown.space.prevent="handleNodeClick('')"
         >
-          <div class="tree-chevron-placeholder"></div>
-          <span class="tree-node-icon root-icon">
-            <van-icon name="wap-home-o" />
+          <span class="tree-chevron-placeholder" aria-hidden="true" />
+          <span class="tree-node-icon" aria-hidden="true">
+            <UiIcon name="folder-open" :size="16" />
           </span>
           <div class="tree-node-content">
             <div class="tree-node-title-row">
@@ -79,24 +65,22 @@
             </div>
           </div>
           <div class="tree-node-badges">
-            <van-tag v-if="isRootCurrent" plain type="primary">当前位置</van-tag>
-            <van-icon
-              class="tree-select-radio"
-              :name="selectedTargetId === '' ? 'checked' : 'circle'"
-              :class="{ 'is-checked': selectedTargetId === '' }"
-            />
+            <UiBadge v-if="isRootCurrent" tone="brand" size="sm">当前位置</UiBadge>
+            <span class="tree-radio-dot" :class="{ 'is-checked': selectedTargetId === '' }" aria-hidden="true">
+              <UiIcon v-if="selectedTargetId === ''" name="check" :size="12" />
+            </span>
           </div>
         </div>
 
-        <div class="tree-divider" role="separator"></div>
+        <div class="tree-divider" role="separator" />
 
-        <!-- Empty state -->
-        <div v-if="flatVisibleNodes.length === 0" class="move-tree-empty">
-          <span v-if="searchKeyword">没有匹配的分组</span>
-          <span v-else>暂无其他子分组，可直接移入根目录</span>
-        </div>
+        <UiEmpty
+          v-if="flatVisibleNodes.length === 0"
+          icon="folder"
+          :title="searchKeyword ? '没有匹配的分组' : '暂无其他子分组'"
+          :description="searchKeyword ? '尝试更换关键词' : '可直接移入根目录'"
+        />
 
-        <!-- Folder tree nodes -->
         <div
           v-for="node in flatVisibleNodes"
           :key="node.id"
@@ -107,37 +91,39 @@
             'is-disabled': node.disabled
           }"
           :style="{ paddingLeft: `${node.depth * 20 + 8}px` }"
-          role="button"
+          role="treeitem"
           tabindex="0"
+          :aria-selected="selectedTargetId === node.id"
           :aria-disabled="node.disabled"
           @click="handleNodeClick(node.id, node.disabled)"
+          @keydown.enter.prevent="handleNodeClick(node.id, node.disabled)"
+          @keydown.space.prevent="handleNodeClick(node.id, node.disabled)"
         >
-          <!-- Tree vertical guide lines based on depth -->
           <span
             v-for="d in node.depth"
             :key="d"
             class="tree-guide-line"
             :style="{ left: `${(d - 1) * 20 + 17}px` }"
-          ></span>
+            aria-hidden="true"
+          />
 
-          <!-- Expand/collapse chevron -->
           <button
             v-if="node.hasChildren"
             type="button"
             class="tree-chevron-btn"
             :aria-label="isExpanded(node.id) ? '折叠' : '展开'"
             @click.stop="toggleExpand(node.id)"
+            @keydown.enter.stop.prevent="toggleExpand(node.id)"
+            @keydown.space.stop.prevent="toggleExpand(node.id)"
           >
-            <van-icon :name="isExpanded(node.id) ? 'arrow-down' : 'arrow'" />
+            <UiIcon :name="isExpanded(node.id) ? 'chevron-down' : 'chevron-right'" :size="14" />
           </button>
-          <span v-else class="tree-chevron-placeholder"></span>
+          <span v-else class="tree-chevron-placeholder" aria-hidden="true" />
 
-          <!-- Folder Icon -->
-          <span class="tree-node-icon folder-icon">
-            <van-icon :name="isExpanded(node.id) ? 'folder-open-o' : 'folder-o'" />
+          <span class="tree-node-icon" aria-hidden="true">
+            <UiIcon :name="isExpanded(node.id) ? 'folder-open' : 'folder'" :size="16" />
           </span>
 
-          <!-- Title & subtitle -->
           <div class="tree-node-content">
             <div class="tree-node-title-row">
               <span class="tree-node-title">{{ node.title }}</span>
@@ -148,44 +134,43 @@
             </small>
           </div>
 
-          <!-- Badges & Selection radio -->
           <div class="tree-node-badges">
-            <van-tag v-if="node.isCurrentLocation" plain type="primary">当前位置</van-tag>
-            <van-tag v-else-if="node.disabled" plain type="default">{{ node.disabledReason || '不可选' }}</van-tag>
-            <van-icon
+            <UiBadge v-if="node.isCurrentLocation" tone="brand" size="sm">当前位置</UiBadge>
+            <UiBadge v-else-if="node.disabled" tone="neutral" size="sm">
+              {{ node.disabledReason || '不可选' }}
+            </UiBadge>
+            <span
               v-if="!node.disabled"
-              class="tree-select-radio"
-              :name="selectedTargetId === node.id ? 'checked' : 'circle'"
+              class="tree-radio-dot"
               :class="{ 'is-checked': selectedTargetId === node.id }"
-            />
+              aria-hidden="true"
+            >
+              <UiIcon v-if="selectedTargetId === node.id" name="check" :size="12" />
+            </span>
           </div>
         </div>
       </div>
-
-      <!-- Footer action bar -->
-      <div class="move-tree-footer">
-        <van-button
-          plain
-          class="move-tree-cancel-btn"
-          @click="emit('update:open', false)"
-        >
-          取消
-        </van-button>
-        <van-button
-          type="primary"
-          class="move-tree-confirm-btn"
-          :disabled="isConfirmDisabled"
-          @click="handleConfirm"
-        >
-          {{ confirmButtonText }}
-        </van-button>
-      </div>
     </div>
-  </van-popup>
+
+    <template #footer>
+      <UiButton variant="secondary" @click="emit('update:open', false)">
+        取消
+      </UiButton>
+      <UiButton
+        variant="primary"
+        :disabled="isConfirmDisabled"
+        @click="handleConfirm"
+      >
+        <UiIcon name="move" :size="15" />
+        <span>{{ confirmButtonText }}</span>
+      </UiButton>
+    </template>
+  </UiModal>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { UiBadge, UiButton, UiEmpty, UiIcon, UiInput, UiModal } from '../ui'
 import type { VaultEntry } from '../../types'
 import { isEntryInsideAny } from '../../services/entryBatchOperations'
 
@@ -304,10 +289,7 @@ function buildFolderTree(
   return result
 }
 
-const folderTree = computed<TreeNode[]>(() => {
-  return buildFolderTree(props.entries)
-})
-
+const folderTree = computed<TreeNode[]>(() => buildFolderTree(props.entries))
 const hasFolders = computed(() => folderTree.value.length > 0)
 
 const totalFolderCount = computed(() => {
@@ -320,9 +302,9 @@ const totalFolderCount = computed(() => {
   return count
 })
 
-const isAllExpanded = computed(() => {
-  return totalFolderCount.value > 0 && expandedSet.value.size >= totalFolderCount.value
-})
+const isAllExpanded = computed(
+  () => totalFolderCount.value > 0 && expandedSet.value.size >= totalFolderCount.value
+)
 
 function toggleAllExpanded() {
   if (isAllExpanded.value) {
@@ -356,7 +338,9 @@ const flatVisibleNodes = computed<TreeNode[]>(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
 
   function hasMatchingDescendant(node: TreeNode, query: string): boolean {
-    return node.children.some((child) => child.title.toLowerCase().includes(query) || hasMatchingDescendant(child, query))
+    return node.children.some(
+      (child) => child.title.toLowerCase().includes(query) || hasMatchingDescendant(child, query)
+    )
   }
 
   function flatten(nodes: TreeNode[]) {
@@ -401,7 +385,7 @@ const targetPathText = computed<string>(() => {
   if (selectedTargetId.value === null) return '请在下方选择目标分组'
   if (selectedTargetId.value === '') return '根目录'
   if (!selectedTargetNode.value) return ''
-  return ['根目录', ...selectedTargetNode.value.path].join('  /  ')
+  return ['根目录', ...selectedTargetNode.value.path].join(' / ')
 })
 
 const isConfirmDisabled = computed<boolean>(() => {
@@ -421,7 +405,12 @@ const confirmButtonText = computed<string>(() => {
 function handleNodeClick(targetId: string, disabled = false) {
   if (disabled) return
   const now = Date.now()
-  if (selectedTargetId.value === targetId && lastClickId === targetId && now - lastClickTime < 350 && targetId !== currentParentId.value) {
+  if (
+    selectedTargetId.value === targetId &&
+    lastClickId === targetId &&
+    now - lastClickTime < 350 &&
+    targetId !== currentParentId.value
+  ) {
     handleConfirm()
     return
   }
@@ -444,7 +433,6 @@ watch(
       selectedTargetId.value = null
       lastClickTime = 0
       lastClickId = ''
-      // Expand all folders by default
       const all = new Set<string>()
       function collect(nodes: TreeNode[]) {
         for (const n of nodes) {
@@ -461,56 +449,21 @@ watch(
 </script>
 
 <style scoped>
-.move-tree-shell {
+.move-tree-body {
   display: flex;
   flex-direction: column;
-  max-height: min(80vh, 700px);
-  max-height: min(80dvh, 700px);
-  background: var(--panel-bg);
-  color: var(--text-main);
-}
-
-.move-tree-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
   gap: 12px;
-  padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.move-tree-title-group {
-  flex: 1;
-  min-width: 0;
-}
-
-.move-tree-title-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.move-tree-title {
-  margin: 0;
-  font-size: var(--app-font-lg, 17px);
-  font-weight: 600;
-  line-height: 1.25;
-}
-
-.move-tree-subtitle {
-  font-size: var(--app-font-xs, 12px);
-  color: var(--text-muted);
 }
 
 .move-tree-target-bar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 6px;
-  padding: 4px 8px;
-  border-radius: var(--shape-xs, 6px);
-  background: var(--panel-bg-muted);
-  font-size: var(--app-font-xs, 12px);
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-container-low);
+  border: 1px solid var(--border-soft);
+  font-size: var(--app-font-xs);
   min-width: 0;
 }
 
@@ -520,68 +473,30 @@ watch(
 }
 
 .preview-path {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .preview-path.is-selected {
-  color: var(--brand-strong, var(--brand));
+  color: var(--brand);
   font-weight: 600;
 }
 
-.move-tree-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.tree-expand-toggle-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 4px 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--shape-xs, 6px);
-  background: var(--panel-bg);
-  color: var(--text-muted);
-  font-size: var(--app-font-xs, 12px);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.tree-expand-toggle-btn:hover {
-  color: var(--brand);
-  border-color: var(--brand);
-}
-
-.move-tree-close-btn {
-  color: var(--text-muted);
-}
-
-.move-tree-search-bar {
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border-soft);
-  background: var(--panel-bg-muted);
-}
-
 .move-tree-container {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 8px 10px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-height: 180px;
-  max-height: calc(80vh - 170px);
+  max-height: 380px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 2px;
 }
 
 .tree-divider {
   height: 1px;
-  background: var(--border-soft);
+  background-color: var(--border-soft);
   margin: 6px 4px;
 }
 
@@ -592,24 +507,32 @@ watch(
   gap: 8px;
   min-height: 40px;
   padding: 6px 10px;
-  border-radius: var(--shape-sm, 8px);
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   cursor: pointer;
   user-select: none;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+
+.tree-root-node {
+  padding-left: 10px;
+  font-weight: 500;
 }
 
 .tree-node:hover:not(.is-disabled) {
-  background: var(--panel-bg-muted);
+  background-color: var(--surface-container-low);
+}
+
+.tree-node:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .tree-node.is-selected {
-  background: color-mix(in srgb, var(--brand), transparent 88%);
+  background-color: var(--brand-soft);
   border-color: var(--brand);
-}
-
-:root[data-theme='dark'] .tree-node.is-selected {
-  background: color-mix(in srgb, var(--brand), transparent 80%);
 }
 
 .tree-node.is-disabled {
@@ -617,58 +540,47 @@ watch(
   cursor: not-allowed;
 }
 
-.tree-root-node {
-  padding-left: 10px !important;
-  font-weight: 500;
-}
-
 .tree-guide-line {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 1px;
-  background: var(--border-soft);
+  background-color: var(--border-soft);
   pointer-events: none;
 }
 
 .tree-chevron-btn {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 22px;
   height: 22px;
   min-width: 22px;
   padding: 0;
   border: 0;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  border-radius: 4px;
-  transition: transform 0.15s ease, color 0.15s ease;
 }
 
 .tree-chevron-btn:hover {
+  background-color: var(--surface-container-high);
   color: var(--brand);
-  background: color-mix(in srgb, var(--brand), transparent 90%);
 }
 
 .tree-chevron-placeholder {
   width: 22px;
   min-width: 22px;
-}
-
-.tree-node-icon {
-  display: grid;
-  place-items: center;
-  font-size: 18px;
   flex-shrink: 0;
 }
 
-.tree-node-icon.root-icon {
+.tree-node-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--brand);
-}
-
-.tree-node-icon.folder-icon {
-  color: var(--brand);
+  flex-shrink: 0;
 }
 
 .tree-node-content {
@@ -686,7 +598,7 @@ watch(
 }
 
 .tree-node-title {
-  font-size: var(--app-font-md, 14px);
+  font-size: var(--app-font-base);
   color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -695,24 +607,18 @@ watch(
 
 .tree-node.is-selected .tree-node-title {
   font-weight: 600;
-  color: var(--brand-strong, var(--brand));
+  color: var(--brand);
 }
 
-.tree-node-subtitle {
-  font-size: var(--app-font-xs, 12px);
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.tree-child-count {
-  font-size: var(--app-font-xs, 11px);
+.tree-node-subtitle,
+.tree-child-count,
+.tree-node-parent-hint {
+  font-size: var(--app-font-xs);
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
 .tree-node-parent-hint {
-  font-size: 11px;
-  color: var(--text-muted);
   margin-top: 2px;
 }
 
@@ -723,40 +629,24 @@ watch(
   flex-shrink: 0;
 }
 
-.tree-select-radio {
-  font-size: 18px;
-  color: var(--text-muted);
-  transition: color 0.15s ease;
-}
-
-.tree-select-radio.is-checked {
-  color: var(--brand);
-}
-
-.move-tree-empty {
-  padding: 32px 16px;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: var(--app-font-sm, 13px);
-}
-
-.move-tree-footer {
-  display: flex;
+.tree-radio-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid var(--border-strong);
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px max(12px, env(safe-area-inset-bottom));
-  border-top: 1px solid var(--border-soft);
-  background: var(--panel-bg);
+  justify-content: center;
+  background-color: var(--panel-bg);
+  color: var(--on-brand);
+  flex-shrink: 0;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
 }
 
-.move-tree-cancel-btn {
-  flex: 0 0 76px;
-  border-radius: var(--shape-sm, 8px);
-}
-
-.move-tree-confirm-btn {
-  flex: 1 1 auto;
-  border-radius: var(--shape-sm, 8px);
-  font-weight: 600;
+.tree-radio-dot.is-checked {
+  background-color: var(--brand);
+  border-color: var(--brand);
 }
 </style>

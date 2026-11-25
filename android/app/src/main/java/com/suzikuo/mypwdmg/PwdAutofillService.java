@@ -58,23 +58,29 @@ public class PwdAutofillService extends AutofillService {
             fields.finish();
 
             String target = fields.hostnameOrPackage();
-            Log.d(TAG, "Fill request for: " + target);
-            Log.d(TAG, "Fields found - Username: " + (fields.usernameId != null)
-                + ", Password: " + (fields.passwordId != null)
-                + ", OTP: " + (fields.otpId != null)
-                + ", Candidates: " + fields.candidateCount()
-                + ", UsernameScore: " + fields.usernameScore
-                + ", PasswordScore: " + fields.passwordScore
-                + ", OtpScore: " + fields.otpScore);
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Fill request for: " + target);
+                Log.d(TAG, "Fields found - Username: " + (fields.usernameId != null)
+                    + ", Password: " + (fields.passwordId != null)
+                    + ", OTP: " + (fields.otpId != null)
+                    + ", Candidates: " + fields.candidateCount()
+                    + ", UsernameScore: " + fields.usernameScore
+                    + ", PasswordScore: " + fields.passwordScore
+                    + ", OtpScore: " + fields.otpScore);
+            }
 
             if (fields.isOwnPackage(getPackageName())) {
-                Log.d(TAG, "Skipping autofill for own app");
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "Skipping autofill for own app");
+                }
                 callback.onSuccess(null);
                 return;
             }
 
             if (!fields.shouldOfferAutofill()) {
-                Log.d(TAG, "No safely fillable credential fields detected");
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "No safely fillable credential fields detected");
+                }
                 callback.onSuccess(buildSaveOnlyResponse(fields));
                 return;
             }
@@ -82,7 +88,9 @@ public class PwdAutofillService extends AutofillService {
             AndroidVaultStore store = new AndroidVaultStore(this);
             JSONObject payload = store.tryUnlockWithEmptyPasswordForAutofill();
             if (payload == null) {
-                Log.d(TAG, "Vault locked, showing unlock suggestion");
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "Vault locked, showing unlock suggestion");
+                }
                 callback.onSuccess(buildUnlockResponse(fields, request));
                 return;
             }
@@ -90,18 +98,24 @@ public class PwdAutofillService extends AutofillService {
             boolean includeAll = fields.shouldFallbackToAllMatches();
             JSONArray matches = store.queryMatchesFromPayload(payload, target, includeAll);
             if (matches.length() == 0) {
-                Log.d(TAG, "No matches found for: " + target + ", includeAll=" + includeAll);
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "No matches found for: " + target + ", includeAll=" + includeAll);
+                }
                 callback.onSuccess(buildSaveOnlyResponse(fields));
                 return;
             }
 
-            Log.d(TAG, "Found " + matches.length() + " matches");
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Found " + matches.length() + " matches");
+            }
             FillResponse.Builder response = new FillResponse.Builder();
             int datasetCount = addDirectDatasets(response, store, payload, fields, matches);
             Dataset pickerDataset = buildPickerDataset(fields, target, includeAll);
             if (pickerDataset != null) response.addDataset(pickerDataset);
             if (datasetCount == 0) {
-                Log.d(TAG, "No fillable datasets built");
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "No fillable datasets built");
+                }
                 if (pickerDataset != null) {
                     configureSaveInfo(response, fields);
                     callback.onSuccess(response.build());
@@ -138,7 +152,9 @@ public class PwdAutofillService extends AutofillService {
 
             JSONObject capture = captureLogin(structure, fields);
             if (capture.optString("password").isEmpty()) {
-                Log.d(TAG, "Skipping save request without password");
+                if (BuildConfig.DEBUG) {
+                    Log.d(TAG, "Skipping save request without password");
+                }
                 callback.onSuccess();
                 return;
             }
@@ -146,10 +162,14 @@ public class PwdAutofillService extends AutofillService {
             AndroidVaultStore store = new AndroidVaultStore(this);
             store.tryUnlockWithEmptyPasswordForAutofill();
             JSONObject saved = store.saveCapturedLogin(capture);
-            Log.d(TAG, "Saved captured login: " + saved.optString("action"));
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Saved captured login: " + saved.optString("action"));
+            }
             callback.onSuccess();
         } catch (AndroidVaultStore.LockedException locked) {
-            Log.d(TAG, "Skipping save request because vault is locked");
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Skipping save request because vault is locked");
+            }
             callback.onSuccess();
         } catch (Exception error) {
             Log.e(TAG, "Error in onSaveRequest", error);
@@ -234,19 +254,23 @@ public class PwdAutofillService extends AutofillService {
                 JSONObject match = matches.getJSONObject(index);
                 String entryId = match.optString("id");
                 if (entryId.isEmpty()) {
-                    Log.d(TAG, "Skipping match without id");
+                    if (BuildConfig.DEBUG) {
+                        Log.d(TAG, "Skipping match without id");
+                    }
                     continue;
                 }
 
                 JSONObject fill = store.getFillPayloadFromPayload(payload, entryId);
                 Dataset dataset = buildDataset(this, fields, match, fill, labelFor(match));
                 if (dataset == null) {
-                    Log.d(TAG, "Skipping empty dataset. usernameId=" + (fields.usernameId != null)
-                        + ", passwordId=" + (fields.passwordId != null)
-                        + ", hasUsername=" + !fill.optString("username").isEmpty()
-                        + ", hasEmail=" + !fill.optString("email").isEmpty()
-                        + ", hasPhone=" + !fill.optString("phone").isEmpty()
-                        + ", hasPassword=" + !fill.optString("password").isEmpty());
+                    if (BuildConfig.DEBUG) {
+                        Log.d(TAG, "Skipping empty dataset. usernameId=" + (fields.usernameId != null)
+                            + ", passwordId=" + (fields.passwordId != null)
+                            + ", hasUsername=" + !fill.optString("username").isEmpty()
+                            + ", hasEmail=" + !fill.optString("email").isEmpty()
+                            + ", hasPhone=" + !fill.optString("phone").isEmpty()
+                            + ", hasPassword=" + !fill.optString("password").isEmpty());
+                    }
                     continue;
                 }
 
@@ -256,7 +280,9 @@ public class PwdAutofillService extends AutofillService {
                 Log.w(TAG, "Could not build dataset for match " + index, error);
             }
         }
-        Log.d(TAG, "Added " + added + " direct autofill datasets");
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "Added " + added + " direct autofill datasets");
+        }
         return added;
     }
 
@@ -428,12 +454,14 @@ public class PwdAutofillService extends AutofillService {
         String username = resolveAccountValue(fill, fields.usernameKind);
         String pwd = fill.optString("password");
 
-        Log.d(TAG, "Build dataset: usernameId=" + (fields.usernameId != null)
-            + ", passwordTargets=" + fields.passwordIds().size()
-            + ", otpId=" + (fields.otpId != null)
-            + ", usernameKind=" + fields.usernameKind
-            + ", usernameLen=" + username.length()
-            + ", passwordLen=" + pwd.length());
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "Build dataset: usernameId=" + (fields.usernameId != null)
+                + ", passwordTargets=" + fields.passwordIds().size()
+                + ", otpId=" + (fields.otpId != null)
+                + ", usernameKind=" + fields.usernameKind
+                + ", usernameLen=" + username.length()
+                + ", passwordLen=" + pwd.length());
+        }
 
         if (fields.usernameId != null) {
             if (!username.isEmpty()) {
@@ -475,14 +503,16 @@ public class PwdAutofillService extends AutofillService {
         String[] hints = node.getAutofillHints();
         int type = node.getAutofillType();
         
-        if (idEntry != null || hint != null || hints != null) {
-            Log.v(TAG, String.format("Node: id=%s, hint=%s, hints=%s, type=%d", 
+        if (BuildConfig.DEBUG && (idEntry != null || hint != null || hints != null)) {
+            Log.v(TAG, String.format("Node: id=%s, hint=%s, hints=%s, type=%d",
                 idEntry, hint, Arrays.toString(hints), type));
         }
 
         if (fields.hostname == null && node.getWebDomain() != null) {
             fields.hostname = node.getWebDomain();
-            Log.d(TAG, "Found web domain: " + fields.hostname);
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Found web domain: " + fields.hostname);
+            }
         }
 
         boolean visibleAndEnabled = ancestorsEligible
@@ -510,11 +540,13 @@ public class PwdAutofillService extends AutofillService {
             );
             fields.addCandidate(autofillId, decision);
             if (textCandidate) fields.clearRecentLabel();
-            Log.d(TAG, "Field role: " + idEntry
-                + ", role=" + decision.role
-                + ", accountScore=" + decision.accountScore
-                + ", passwordScore=" + decision.passwordScore
-                + ", otpScore=" + decision.otpScore);
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Field role: " + idEntry
+                    + ", role=" + decision.role
+                    + ", accountScore=" + decision.accountScore
+                    + ", passwordScore=" + decision.passwordScore
+                    + ", otpScore=" + decision.otpScore);
+            }
         }
 
         for (int index = 0; index < node.getChildCount(); index += 1) {
@@ -570,42 +602,6 @@ public class PwdAutofillService extends AutofillService {
             append(builder, attr.first);
             append(builder, attr.second);
         }
-    }
-
-    private static int usernameFieldScore(String text, String[] hints, int inputType) {
-        int score = 0;
-        if (isUsernameHint(hints)) score += 80;
-        if (isEmailInputType(inputType) || isPhoneInputType(inputType)) score += 70;
-        if (containsEmail(text) || containsPhone(text) || containsSpecificUsername(text)) score += 55;
-        else if (containsUsername(text)) score += 35;
-        if (containsLoginIdentifier(text)) score += 30;
-        if (containsSearch(text)) score -= 40;
-        if (containsPassword(text)) score -= 70;
-        if (containsOtp(text)) score -= 60;
-        return Math.max(score, 0);
-    }
-
-    private static int passwordFieldScore(String text, String[] hints, int inputType) {
-        int score = 0;
-        if (isPasswordInputType(inputType)) score += 100;
-        if (isPasswordHint(hints)) score += 85;
-        if (containsPassword(text)) score += 65;
-        if (containsSecret(text)) score += 35;
-        if (containsPin(text)) score += 30;
-        if (containsOtp(text)) score -= 55;
-        if (containsSearch(text)) score -= 45;
-        return Math.max(score, 0);
-    }
-
-    private static int otpFieldScore(String text, String[] hints, int inputType) {
-        int score = 0;
-        if (isOtpHint(hints)) score += 85;
-        if (containsStrongOtp(text)) score += 70;
-        else if (containsOtp(text)) score += 45;
-        if (containsCaptcha(text)) score -= 80;
-        if (containsPassword(text)) score -= 50;
-        if (isPasswordInputType(inputType)) score -= 90;
-        return Math.max(score, 0);
     }
 
     private static boolean isUsernameHint(String[] hints) {
@@ -782,7 +778,7 @@ public class PwdAutofillService extends AutofillService {
             || text.contains("loginfmt")
             || text.contains("邮箱")
             || text.contains("郵箱")
-            || text.contains("閭");
+            || text.contains("電子郵件");
     }
 
     private static boolean containsPhone(String text) {
@@ -799,7 +795,7 @@ public class PwdAutofillService extends AutofillService {
             || text.contains("手机")
             || text.contains("手机号")
             || text.contains("手机号码")
-            || text.contains("鎵嬫満");
+            || text.contains("手機");
     }
 
     private static boolean containsSpecificUsername(String text) {
@@ -820,7 +816,7 @@ public class PwdAutofillService extends AutofillService {
             || text.contains("uid")
             || text.contains("用户名")
             || text.contains("用户")
-            || text.contains("鐢ㄦ埛鍚?");
+            || text.contains("使用者名稱");
     }
 
     private static boolean containsOtp(String text) {
@@ -859,37 +855,10 @@ public class PwdAutofillService extends AutofillService {
             || text.contains("安全码");
     }
 
-    private static boolean containsLoginIdentifier(String text) {
-        return text.contains("identifier")
-            || text.contains("loginfmt")
-            || text.contains("credential")
-            || text.contains("principal")
-            || text.contains("accountid")
-            || text.contains("account_id")
-            || text.contains("loginid")
-            || text.contains("login_id")
-            || text.contains("membername")
-            || text.contains("customerid")
-            || text.contains("customer_id");
-    }
-
     private static boolean containsSecret(String text) {
         return text.contains("secret")
             || text.contains("passphrase")
             || text.contains("口令");
-    }
-
-    private static boolean containsPin(String text) {
-        return containsWord(text, "pin")
-            || text.contains("pin码")
-            || text.contains("支付密码");
-    }
-
-    private static boolean containsCaptcha(String text) {
-        return text.contains("captcha")
-            || text.contains("recaptcha")
-            || text.contains("图形验证码")
-            || text.contains("图片验证码");
     }
 
     private static boolean containsSearch(String text) {

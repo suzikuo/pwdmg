@@ -1,6 +1,15 @@
 import { ref, type Ref } from 'vue'
 
-export type DrawerSection = 'settings' | 'updates' | 'backup' | 'system'
+export type DrawerSection =
+  | 'appearance'
+  | 'security'
+  | 'sync'
+  | 'storage'
+  | 'system'
+  | 'about'
+  | 'settings'
+  | 'updates'
+  | 'backup'
 export type SystemGroupKey = 'archived' | 'trashed'
 
 export type SettingsPanelState = {

@@ -9,8 +9,6 @@ export type EntryWorkspaceState = {
   entryFilter: Ref<EntryFilterMode>
   editorOpen: Ref<boolean>
   detailOpen: Ref<boolean>
-  createSheetOpen: Ref<boolean>
-  createMenuOpen: Ref<boolean>
   moreMenuOpen: Ref<boolean>
   dragMode: Ref<boolean>
   editingId: Ref<string>
@@ -28,8 +26,6 @@ export function useEntryWorkspace(
   const entryFilter = ref<EntryFilterMode>('all')
   const editorOpen = ref(false)
   const detailOpen = ref(false)
-  const createSheetOpen = ref(false)
-  const createMenuOpen = ref(false)
   const moreMenuOpen = ref(false)
   const dragMode = ref(false)
   const editingId = ref('')
@@ -51,8 +47,6 @@ export function useEntryWorkspace(
     entryFilter,
     editorOpen,
     detailOpen,
-    createSheetOpen,
-    createMenuOpen,
     moreMenuOpen,
     dragMode,
     editingId,

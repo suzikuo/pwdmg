@@ -1,76 +1,7 @@
 import { createApp } from 'vue'
-import {
-  ActionSheet,
-  Button,
-  Cell,
-  Checkbox,
-  CheckboxGroup,
-  Empty,
-  Field,
-  Form,
-  Icon,
-  Loading,
-  NavBar,
-  Popover,
-  Popup,
-  Radio,
-  RadioGroup,
-  Search,
-  Slider,
-  Stepper,
-  SwipeCell,
-  Switch,
-  Tag
-} from 'vant'
-import 'vant/es/action-sheet/style'
-import 'vant/es/button/style'
-import 'vant/es/cell/style'
-import 'vant/es/checkbox/style'
-import 'vant/es/checkbox-group/style'
-import 'vant/es/dialog/style'
-import 'vant/es/empty/style'
-import 'vant/es/field/style'
-import 'vant/es/form/style'
-import 'vant/es/icon/style'
-import 'vant/es/loading/style'
-import 'vant/es/nav-bar/style'
-import 'vant/es/popover/style'
-import 'vant/es/popup/style'
-import 'vant/es/radio/style'
-import 'vant/es/radio-group/style'
-import 'vant/es/search/style'
-import 'vant/es/slider/style'
-import 'vant/es/stepper/style'
-import 'vant/es/swipe-cell/style'
-import 'vant/es/switch/style'
-import 'vant/es/tag/style'
-import 'vant/es/toast/style'
 import App from './App.vue'
-import './styles/app.css'
-
-const vantComponents = [
-  ActionSheet,
-  Button,
-  Cell,
-  Checkbox,
-  CheckboxGroup,
-  Empty,
-  Field,
-  Form,
-  Icon,
-  Loading,
-  NavBar,
-  Popover,
-  Popup,
-  Radio,
-  RadioGroup,
-  Search,
-  Slider,
-  Stepper,
-  SwipeCell,
-  Switch,
-  Tag
-]
+import './styles/tokens.css'
+import './styles/base.css'
 
 let appMounted = false
 
@@ -121,7 +52,6 @@ window.addEventListener('unhandledrejection', (event) => {
 
 try {
   const app = createApp(App)
-  for (const component of vantComponents) app.use(component)
   app.mount('#app')
   appMounted = true
 } catch (error) {

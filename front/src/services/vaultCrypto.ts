@@ -1,4 +1,5 @@
 import type { VaultPayload } from '../types'
+import { base64ToBytes, bytesToBase64, toArrayBuffer } from './shared/encoding.ts'
 
 export type VaultEnvelope = {
   format: 'mypwdmg-vault'
@@ -25,7 +26,7 @@ const AAD_BY_VERSION = {
   1: new TextEncoder().encode('mypwdmg-vault-v1'),
   2: new TextEncoder().encode('mypwdmg-vault-v2')
 } as const
-const DEFAULT_ITERATIONS = 390_000
+const DEFAULT_ITERATIONS = 600_000
 const MIN_ITERATIONS = 10_000
 const MAX_ITERATIONS = 2_000_000
 const SALT_BYTES = 16
@@ -200,23 +201,6 @@ function randomBytes(size: number) {
   return bytes
 }
 
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = ''
-  for (let index = 0; index < bytes.length; index += 0x8000) {
-    binary += String.fromCharCode(...bytes.slice(index, index + 0x8000))
-  }
-  return btoa(binary)
-}
-
-function base64ToBytes(value: string) {
-  const binary = atob(value)
-  const bytes = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index)
-  }
-  return bytes
-}
-
 function decodeBase64Bounded(value: string, maxBytes: number) {
   const text = String(value || '')
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) {
@@ -282,10 +266,4 @@ function requirePasskeyCollections(payload: VaultPayload, required = true): unkn
     if (!Array.isArray(collection)) throw new Error(`Vault ${field} must be an array`)
     return collection
   })
-}
-
-function toArrayBuffer(bytes: Uint8Array) {
-  const buffer = new ArrayBuffer(bytes.byteLength)
-  new Uint8Array(buffer).set(bytes)
-  return buffer
 }

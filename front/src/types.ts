@@ -50,6 +50,7 @@ export interface VaultEntry {
   id: string
   kind: EntryKind
   title: string
+  createdAt?: number
   status?: EntryStatus
   statusReason?: string
   statusUpdatedAt?: number

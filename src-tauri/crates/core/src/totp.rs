@@ -3,6 +3,7 @@ use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
+use zeroize::Zeroizing;
 
 type HmacSha1 = Hmac<Sha1>;
 type HmacSha256 = Hmac<Sha256>;
@@ -122,7 +123,7 @@ pub fn generate_totp(secret: &str, timestamp: Option<u64>) -> Result<String, Str
     }
 
     let config = parse_totp_config(secret, 6, 30, "SHA1")?;
-    let key = decode_base32_secret(&config.secret)?;
+    let key = Zeroizing::new(decode_base32_secret(&config.secret)?);
 
     let now = timestamp.unwrap_or_else(|| {
         SystemTime::now()

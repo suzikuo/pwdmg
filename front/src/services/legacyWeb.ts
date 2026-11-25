@@ -1,6 +1,8 @@
-import type { VaultEntry, VaultPayload } from '../types'
-import { defaultVaultPayload } from './vaultDefaults'
-import { secureRandomId } from './secureRandom'
+import type { VaultEntry, VaultPayload } from '../types.ts'
+import { defaultVaultPayload } from './vaultDefaults.ts'
+import { secureRandomId } from './secureRandom.ts'
+import { base64ToBytes } from './shared/encoding.ts'
+import { countEntries } from './shared/entryTree.ts'
 
 const STORAGE_KEY = 'cardData'
 const OSS_BUCKET_NAME = 'OSS_BUCKET_NAME'
@@ -45,10 +47,6 @@ export function clearLegacyWebData() {
   for (const key of LEGACY_KEYS) localStorage.removeItem(key)
 }
 
-export function migrateLegacyWebData(): { payload: VaultPayload; migrated: number; failed: number } {
-  return migrateLegacyStorageSnapshot(currentLegacyStorageSnapshot())
-}
-
 export function migrateLegacyStorageText(text: string): { payload: VaultPayload; migrated: number; failed: number } {
   if (!text || !text.trim()) return { payload: defaultVaultPayload(), migrated: 0, failed: 0 }
   try {
@@ -67,7 +65,7 @@ export function migrateLegacyStorageSnapshot(snapshot: Record<string, string>): 
     ...payload.settings.oss,
     ...legacyOss.settings
   }
-  return { payload, migrated: flattenEntries(payload.entries).length, failed: loaded.failed + legacyOss.failed }
+  return { payload, migrated: countEntries(payload.entries), failed: loaded.failed + legacyOss.failed }
 }
 
 function loadLegacyCards(snapshot: Record<string, string>) {
@@ -181,17 +179,6 @@ function normalizeDomain(value: string) {
   if (schemeIndex >= 0) result = result.slice(schemeIndex + 3)
   result = result.split('/', 1)[0].replace(/^\.+|\.+$/g, '')
   return result.startsWith('www.') ? result.slice(4) : result
-}
-
-function flattenEntries(entries: VaultEntry[]): VaultEntry[] {
-  return entries.flatMap((entry) => [entry, ...flattenEntries(entry.children || [])])
-}
-
-function base64ToBytes(value: string) {
-  const binary = atob(value)
-  const bytes = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
-  return bytes
 }
 
 function makeId() {

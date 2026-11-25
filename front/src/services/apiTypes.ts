@@ -61,7 +61,7 @@ export interface PasswordManagerApiAdapter {
   getVault: () => Promise<ApiResult<VaultPayload>>
   saveVault: (payload: VaultPayload) => Promise<ApiResult<VaultPayload>>
   deletePasskey: (passkeyId: string) => Promise<ApiResult<VaultPayload>>
-  changePassword: (newPassword: string) => Promise<ApiResult<AppState>>
+  changePassword: (newPassword: string, currentPassword?: string) => Promise<ApiResult<AppState>>
   adoptVaultEncryptionFromEnvelope: (envelopeText: string, password: string) => Promise<ApiResult<AppState>>
   exportVaultBackup: () => Promise<ApiResult<VaultBackupExport>>
   exportAndroidVaultFile: (displayName: string, contentText: string) => Promise<ApiResult<{ saved: boolean; path: string }>>
@@ -87,8 +87,11 @@ export interface PasswordManagerApiAdapter {
   downloadAppUpdate: (manifestUrl: string, onProgress?: AppUpdateProgressHandler) => Promise<ApiResult<AppUpdateDownload>>
   applyAppUpdate: (packagePath: string) => Promise<ApiResult<AppUpdateApply>>
   openExternalUrl: (url: string) => Promise<ApiResult<null>>
+  copySensitiveText?: (text: string, clearAfterSeconds?: number) => Promise<ApiResult<{ copied: boolean; clearAfterSeconds: number }>>
+  clearSensitiveClipboard?: () => Promise<ApiResult<{ cleared: boolean }>>
   safeExit: () => Promise<ApiResult<null>>
   showDesktopWindow: () => Promise<void>
+  subscribeNativeLock: (handler: (reason: string) => void) => () => void
 }
 
 export function ok<T>(data: T): ApiResult<T> {

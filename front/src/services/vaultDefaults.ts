@@ -94,6 +94,9 @@ function normalizeEntries(entries: VaultEntry[], seenIds = new Set<string>(), pa
       id,
       kind: normalizeEntryKind(entry.kind),
       title: entry.title || 'Untitled',
+      ...(typeof entry.createdAt === 'number' && entry.createdAt > 0 && Number.isFinite(entry.createdAt)
+        ? { createdAt: entry.createdAt }
+        : {}),
       status: normalizeEntryStatus(entry.status),
       statusReason: entry.statusReason || '',
       statusUpdatedAt: Number(entry.statusUpdatedAt || 0),

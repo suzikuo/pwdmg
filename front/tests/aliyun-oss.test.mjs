@@ -13,8 +13,8 @@ test.afterEach(() => {
   else delete globalThis.DOMParser
 })
 
-function createClient() {
-  return new AliyunOSSAPI('test-bucket', 'access-key', 'access-secret', 'oss-cn-hangzhou')
+function createClient(signal) {
+  return new AliyunOSSAPI('test-bucket', 'access-key', 'access-secret', 'oss-cn-hangzhou', signal)
 }
 
 test('uploads without conditional headers that OSS PutObject rejects', async () => {
@@ -91,32 +91,55 @@ test('parses namespaced OSS list responses so immutable sync heads are discovera
       return document
     }
   }
-  globalThis.fetch = async () => new Response('<ListBucketResult xmlns="http://doc.oss-cn-hangzhou.aliyuncs.com" />', { status: 200 })
+  const listedPrefixes = []
+  globalThis.fetch = async (url) => {
+    listedPrefixes.push(new URL(url).searchParams.get('prefix'))
+    return new Response('<ListBucketResult xmlns="http://doc.oss-cn-hangzhou.aliyuncs.com" />', { status: 200 })
+  }
 
   const response = await createClient().listFiles('vault.json.sync-v3/commits/', 100)
+  await createClient().listFiles()
+
+  assert.deepEqual(listedPrefixes, ['vault.json.sync-v3/commits/', ''])
 
   assert.equal(response.status, APIResponseStatus.Success)
   assert.equal(response.content[0].name, 'vault.json.sync-v3/commits/0000000000001-client.json')
 })
 
-test('binds requests to the active vault-session abort signal', async () => {
+test('forwards active vault-session cancellation to an in-flight fetch', async () => {
   const controller = new AbortController()
-  let requestSignal
-  globalThis.fetch = async (_url, init) => {
-    requestSignal = init?.signal
-    return new Response('', { status: 200 })
-  }
+  const started = mockPendingFetch()
+  const uploading = createClient(controller.signal).uploadFile('vault.json', '{}')
+  const requestSignal = await started
 
-  const client = new AliyunOSSAPI(
-    'test-bucket',
-    'access-key',
-    'access-secret',
-    'oss-cn-hangzhou',
-    controller.signal
-  )
-  await client.uploadFile('vault.json', '{}')
-
-  assert.equal(requestSignal, controller.signal)
+  assert.equal(requestSignal.aborted, false)
   controller.abort()
   assert.equal(requestSignal.aborted, true)
+  assert.equal((await uploading).status, APIResponseStatus.Fail)
 })
+
+test('aborts fetch at 30 seconds even with an active vault-session signal', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const controller = new AbortController()
+  const started = mockPendingFetch()
+  const uploading = createClient(controller.signal).uploadFile('vault.json', '{}')
+  const requestSignal = await started
+
+  t.mock.timers.tick(29_999)
+  assert.equal(requestSignal.aborted, false)
+  t.mock.timers.tick(1)
+  assert.equal(requestSignal.aborted, true)
+  assert.equal(controller.signal.aborted, false)
+  const result = await uploading
+  assert.equal(result.status, APIResponseStatus.Fail)
+  assert.match(result.content, /请求超时/)
+})
+
+function mockPendingFetch() {
+  return new Promise((started) => {
+    globalThis.fetch = (_url, { signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      started(signal)
+    })
+  })
+}

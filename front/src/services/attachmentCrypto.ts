@@ -1,4 +1,5 @@
 import type { VaultAttachment } from '../types'
+import { base64ToBytes, bytesToBase64, sha256Hex, toArrayBuffer } from './shared/encoding.ts'
 
 export type EncryptedAttachmentObject = {
   format: 'mypwdmg-attachment'
@@ -191,35 +192,19 @@ function attachmentAad(attachmentId: string) {
   return new TextEncoder().encode(`mypwdmg-attachment-v1:${attachmentId}`)
 }
 
-async function sha256Hex(bytes: Uint8Array) {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', toArrayBuffer(bytes)))
-  return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')
-}
-
 function randomBytes(size: number) {
   const bytes = new Uint8Array(size)
   crypto.getRandomValues(bytes)
   return bytes
 }
 
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = ''
-  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.slice(index, index + 0x8000))
-  return btoa(binary)
-}
-
 function base64ToBytesBounded(value: string, maxBytes: number) {
   const text = String(value || '')
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0 || text.length > Math.ceil(maxBytes / 3) * 4 + 4) throw new Error('Attachment object is malformed')
-  const binary = atob(text)
-  if (binary.length > maxBytes) throw new Error('Attachment is too large')
-  const bytes = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  const bytes = base64ToBytes(text)
+  if (bytes.byteLength > maxBytes) {
+    bytes.fill(0)
+    throw new Error('Attachment is too large')
+  }
   return bytes
-}
-
-function toArrayBuffer(bytes: Uint8Array) {
-  const buffer = new ArrayBuffer(bytes.byteLength)
-  new Uint8Array(buffer).set(bytes)
-  return buffer
 }

@@ -279,9 +279,7 @@ function appendSyncConflictHistory(
   const snapshot = remoteSnapshot(remote)
   const id = `sync-conflict-${stableStringHash(canonicalJson([entryId, snapshot]))}`
   const existing = (history || []).find((item) => item.id === id)
-  if (existing) return mergeHistory(history, [])
-
-  const record: VaultEntryHistory = {
+  const record: VaultEntryHistory = existing || {
     id,
     action: 'updated',
     at: conflictTimestamp(remote, remoteUpdatedAt),
@@ -293,7 +291,8 @@ function appendSyncConflictHistory(
     note: 'Sync conflict: remote version preserved in history',
     snapshot
   }
-  return mergeHistory([...(history || []), record], [])
+  const recent = mergeHistory(history?.filter((item) => item.id !== id), []) || []
+  return limitEntryHistory([record, ...recent]).sort((a, b) => b.at - a.at || a.id.localeCompare(b.id))
 }
 
 function remoteSnapshot(remote: FlatEntry): VaultEntrySnapshot {

@@ -1,3 +1,5 @@
+import { toArrayBuffer } from './shared/encoding.ts'
+
 type TotpOptions = {
   timestamp?: number
   digits?: number
@@ -239,10 +241,4 @@ function concatBytes(first: Uint8Array, second: Uint8Array) {
   output.set(first)
   output.set(second, first.length)
   return output
-}
-
-function toArrayBuffer(bytes: Uint8Array) {
-  const buffer = new ArrayBuffer(bytes.byteLength)
-  new Uint8Array(buffer).set(bytes)
-  return buffer
 }

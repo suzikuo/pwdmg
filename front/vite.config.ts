@@ -40,6 +40,7 @@ export default defineConfig(({ mode, command }) => {
       emptyOutDir: true,
       target: 'es2018',
       cssTarget: 'chrome61',
+      cssCodeSplit: !fileProtocolTarget,
       rollupOptions: fileProtocolTarget
         ? {
             output: {

@@ -19,9 +19,11 @@ type AliyunOssClient = Pick<AliyunOSSAPI, 'downloadFile' | 'uploadFile' | 'getFi
 
 export class AliyunOssVaultStore implements RemoteVaultStore {
   private readonly client: AliyunOssClient
+  readonly cacheScope?: string
 
-  constructor(client: AliyunOssClient) {
+  constructor(client: AliyunOssClient, cacheScope?: string) {
     this.client = client
+    this.cacheScope = cacheScope
   }
 
   async readObject(objectName: string, maxBytes?: number): Promise<RemoteVaultResult<string>> {
@@ -62,13 +64,16 @@ export class AliyunOssVaultStore implements RemoteVaultStore {
 }
 
 export function createAliyunOssVaultStore(settings: OssClientSettings, signal?: AbortSignal): RemoteVaultStore {
+  const bucket = settings.bucketName.trim()
+  const region = settings.region.trim()
+  const cacheScope = bucket && region ? `aliyun-oss:${region}/${bucket}` : undefined
   return new AliyunOssVaultStore(new AliyunOSSAPI(
     settings.bucketName,
     settings.accessKeyId,
     settings.accessKeySecret,
     settings.region,
     signal
-  ))
+  ), cacheScope)
 }
 
 function mapAliyunTextResult(response: OSSApiResponse<string | boolean | Blob>): RemoteVaultResult<string> {

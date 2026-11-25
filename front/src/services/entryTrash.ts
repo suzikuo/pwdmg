@@ -1,4 +1,5 @@
 import type { VaultEntry } from '../types'
+import { countEntries } from './shared/entryTree.ts'
 
 export function removeTrashedEntries(entries: VaultEntry[]): number {
   let removedCount = 0
@@ -12,8 +13,4 @@ export function removeTrashedEntries(entries: VaultEntry[]): number {
     removedCount += removeTrashedEntries(entry.children || [])
   }
   return removedCount
-}
-
-function countEntries(entries: VaultEntry[]): number {
-  return entries.reduce((count, entry) => count + 1 + countEntries(entry.children || []), 0)
 }

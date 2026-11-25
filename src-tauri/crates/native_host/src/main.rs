@@ -1,3 +1,4 @@
+use pwdmg_core::api_error::api_error_code;
 use pwdmg_core::native_install::is_plugin_listener_enabled;
 use pwdmg_core::vault::VaultService;
 use serde_json::{json, Value};
@@ -43,10 +44,14 @@ fn write_message(val: &Value) -> io::Result<()> {
 }
 
 fn dispatch(service: &VaultService, req: &Value) -> Value {
-    if !is_plugin_listener_enabled() {
+    dispatch_request(service, req, is_plugin_listener_enabled())
+}
+
+fn dispatch_request(service: &VaultService, req: &Value, enabled: bool) -> Value {
+    if !enabled {
         return json!({
             "ok": false,
-            "code": "PLUGIN_DISABLED",
+            "code": "DISABLED",
             "message": "插件监听已在桌面端关闭。"
         });
     }
@@ -74,6 +79,7 @@ fn dispatch(service: &VaultService, req: &Value) -> Value {
             service.unlock(password)
         }
         "lock" => Ok(service.lock()),
+        "quickUnlock" => service.quick_unlock(),
         "queryMatches" => {
             let hostname = params
                 .get("hostname")
@@ -141,7 +147,7 @@ fn dispatch(service: &VaultService, req: &Value) -> Value {
         _ => {
             return json!({
                 "ok": false,
-                "code": "UNKNOWN_METHOD",
+                "code": "UNSUPPORTED",
                 "message": "Unknown native host method."
             });
         }
@@ -149,11 +155,13 @@ fn dispatch(service: &VaultService, req: &Value) -> Value {
 
     match result {
         Ok(data) => json!({ "ok": true, "data": data }),
-        Err(err) => json!({
-            "ok": false,
-            "code": "NATIVE_HOST_ERROR",
-            "message": err
-        }),
+        Err(err) => {
+            let code = match api_error_code(&err) {
+                "ERROR" => "NATIVE_HOST_ERROR",
+                code => code,
+            };
+            json!({ "ok": false, "code": code, "message": err })
+        }
     }
 }
 
@@ -190,5 +198,53 @@ mod tests {
 
         let resp = dispatch(&service, &req);
         assert!(resp.get("ok").is_some());
+    }
+
+    #[test]
+    fn test_native_dispatch_structured_error_codes() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pwdmg_nh_test_{}_{}", std::process::id(), nanos));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file, legacy_file);
+
+        let (env, _) = pwdmg_core::crypto::encrypt_payload(
+            "secret-pass",
+            &json!({"revision": 1, "entries": []}),
+            Some(10_000),
+        )
+        .unwrap();
+        service
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+
+        let locked_resp = dispatch_request(
+            &service,
+            &json!({ "method": "queryMatches", "params": { "hostname": "example.com" } }),
+            true,
+        );
+        assert_eq!(locked_resp["ok"], false);
+        assert_eq!(locked_resp["code"], "LOCKED");
+
+        let bad_pw_resp = dispatch_request(
+            &service,
+            &json!({ "method": "unlock", "params": { "password": "wrong" } }),
+            true,
+        );
+        assert_eq!(bad_pw_resp["ok"], false);
+        assert_eq!(bad_pw_resp["code"], "BAD_PASSWORD");
+
+        let disabled_resp = dispatch_request(
+            &service,
+            &json!({ "method": "getState", "params": {} }),
+            false,
+        );
+        assert_eq!(disabled_resp["ok"], false);
+        assert_eq!(disabled_resp["code"], "DISABLED");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

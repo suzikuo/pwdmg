@@ -83,15 +83,54 @@ public class AndroidVaultStoreMutationTest {
     }
 
     @Test
-    public void autofillModesUseStrictHostBoundariesAndFailClosedForUrlPrefixes() {
+    public void autofillModesUseStrictHostAndUrlBoundaries() {
         assertTrue(AndroidVaultStore.autofillRuleMatches("login.example.com", "example.com", "base-domain"));
         assertFalse(AndroidVaultStore.autofillRuleMatches("login.example.com", "example.com", "exact-host"));
         assertTrue(AndroidVaultStore.autofillRuleMatches("login.example.com", "example.com", "subdomain"));
         assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "example.com", "subdomain"));
         assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "https://example.com/account", "url-prefix"));
+        assertTrue(AndroidVaultStore.autofillRuleMatches("https://example.com:443/account/profile#settings", "https://example.com/account", "url-prefix"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("https://example.com/accounting", "https://example.com/account", "url-prefix"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("https://example.com:8443/account", "https://example.com/account", "url-prefix"));
+        assertFalse(AndroidVaultStore.autofillRuleMatches("https://example.com/account/%2e%2e/outside", "https://example.com/account", "url-prefix"));
         assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "example.com", "never"));
         assertTrue(AndroidVaultStore.autofillRuleMatches("www.example.com", "www.example.com", "exact-host"));
         assertFalse(AndroidVaultStore.autofillRuleMatches("example.com", "www.example.com", "exact-host"));
+    }
+
+    @Test
+    public void indexedAutofillMatchesSiblingBaseDomainsAndFullUrlPrefixes() throws Exception {
+        JSONObject payload = new JSONObject().put("entries", new JSONArray()
+            .put(login("base", "login.example.com"))
+            .put(login("strict", "login.example.com").put("autofillMatchMode", "exact-host"))
+            .put(login("prefix", "https://other.example.com/login%2Fstep").put("autofillMatchMode", "url-prefix")));
+
+        JSONArray siblings = AndroidVaultStore.queryMatchesFromPayload(payload, "other.example.com");
+        assertEquals(1, siblings.length());
+        assertEquals("base", siblings.getJSONObject(0).getString("id"));
+        JSONArray urlMatches = AndroidVaultStore.queryMatchesFromPayload(payload, "https://other.example.com/login%2Fstep?form=1");
+        assertEquals(2, urlMatches.length());
+        assertEquals("prefix", urlMatches.getJSONObject(1).getString("id"));
+    }
+
+    @Test
+    public void totpUrisSelectAlgorithmDigitsAndPeriodAndValidateBase32() throws Exception {
+        String secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        String uri = "otpauth://totp/Test?secret=" + secret + "&period=" + Long.MAX_VALUE;
+        JSONObject entry = login("login", "example.com");
+        JSONObject payload = new JSONObject().put("entries", new JSONArray().put(entry));
+
+        // A period larger than the current Unix time fixes the counter at zero.
+        entry.put("totpSecret", uri);
+        assertEquals("755224", AndroidVaultStore.getFillPayloadFromPayload(payload, "login").getString("totp"));
+        entry.put("totpSecret", uri + "&algorithm=SHA256&digits=7");
+        assertEquals("4875740", AndroidVaultStore.getFillPayloadFromPayload(payload, "login").getString("totp"));
+        entry.put("totpSecret", uri + "&algorithm=SHA512&digits=8");
+        assertEquals("04125165", AndroidVaultStore.getFillPayloadFromPayload(payload, "login").getString("totp"));
+        entry.put("totpSecret", secret.substring(0, 8) + " - " + secret.substring(8));
+        assertTrue(AndroidVaultStore.getFillPayloadFromPayload(payload, "login").getString("totp").matches("[0-9]{6}"));
+        entry.put("totpSecret", secret + "!");
+        assertThrows(IllegalArgumentException.class, () -> AndroidVaultStore.getFillPayloadFromPayload(payload, "login"));
     }
 
     @Test

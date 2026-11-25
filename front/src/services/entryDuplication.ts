@@ -1,4 +1,5 @@
 import type { VaultEntry } from '../types'
+import { collectEntryIds } from './shared/entryTree.ts'
 
 type IdFactory = () => string
 
@@ -7,7 +8,7 @@ export function insertDuplicateEntry(
   sourceId: string,
   createId: IdFactory
 ): VaultEntry | null {
-  const reservedIds = collectEntryIds(entries)
+  const reservedIds = new Set(collectEntryIds(entries))
   return insertDuplicateIntoList(entries, sourceId, createId, reservedIds)
 }
 
@@ -46,6 +47,8 @@ function duplicateEntryTree(
     statusUpdatedAt: 0,
     deletedAt: 0,
     domains: [...(source.domains || [])],
+    customFields: source.customFields?.map((field) => ({ ...field })),
+    attachments: source.attachments?.map((attachment) => ({ ...attachment })),
     history: [],
     children: []
   }
@@ -53,14 +56,6 @@ function duplicateEntryTree(
     .filter((child) => !child.status || child.status === 'active')
     .map((child) => duplicateEntryTree(child, createId, reservedIds, false))
   return duplicate
-}
-
-function collectEntryIds(entries: VaultEntry[], result = new Set<string>()) {
-  for (const entry of entries) {
-    result.add(entry.id)
-    collectEntryIds(entry.children || [], result)
-  }
-  return result
 }
 
 function nextUniqueId(createId: IdFactory, reservedIds: Set<string>) {

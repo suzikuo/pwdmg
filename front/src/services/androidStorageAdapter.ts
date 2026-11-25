@@ -7,9 +7,9 @@ import type {
   AppUpdateProgress,
   AppUpdateProgressHandler,
   PluginListenerState
-} from '../types'
-import { emptyPluginListenerState, fail, ok } from './apiTypes'
-import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
+} from '../types.ts'
+import { emptyPluginListenerState, fail, ok } from './apiTypes.ts'
+import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes.ts'
 
 export const androidStorageAdapter: VaultStorageAdapter = {
   getAppInfo: () => call<AppInfo>('getAppInfo'),
@@ -46,6 +46,10 @@ export const androidStorageAdapter: VaultStorageAdapter = {
 export function hasAndroidBridge() {
   return Boolean(window.androidPasswordApi)
 }
+
+const DOCUMENT_EXPORT_TIMEOUT_MS = 5 * 60 * 1000
+const UPDATE_TASK_TIMEOUT_MS = 10 * 60 * 1000
+const TASK_POLL_INTERVAL_MS = 250
 
 type AndroidDocumentExportTask = {
   id: string
@@ -116,13 +120,15 @@ async function pollDocumentExport(
   failureCode: string,
   label: string
 ): Promise<ApiResult<{ saved: boolean; path: string }>> {
+  const deadline = performance.now() + DOCUMENT_EXPORT_TIMEOUT_MS
   let state = initial
   while (true) {
     if (state.status === 'done') return ok(state.result || { saved: false, path: '' })
     if (state.status === 'error') {
       return fail(state.errorCode || failureCode, state.errorMessage || `${label}导出失败`)
     }
-    await delay(250)
+    await delay(TASK_POLL_INTERVAL_MS)
+    if (performance.now() >= deadline) return fail('TIMEOUT', `等待 Android ${label}导出超时。`)
     const next = await call<AndroidDocumentExportTask>(stateMethod, state.id)
     if (!next.ok) return fail(next.code || failureCode, next.message || `${label}导出失败`)
     if (!next.data) return fail(failureCode, `Android ${label}导出状态缺失。`)
@@ -158,8 +164,6 @@ type AndroidUpdateTaskState<T> = AppUpdateProgress & {
   errorMessage?: string
 }
 
-const UPDATE_TASK_POLL_MS = 250
-
 async function runUpdateTask<T>(
   action: 'check' | 'download',
   value: string,
@@ -177,10 +181,13 @@ async function runUpdateTask<T>(
 }
 
 async function pollUpdateTask<T>(taskId: string, onProgress?: AppUpdateProgressHandler): Promise<ApiResult<T>> {
-  while (true) {
-    await delay(UPDATE_TASK_POLL_MS)
+  const deadline = performance.now() + UPDATE_TASK_TIMEOUT_MS
+  while (performance.now() < deadline) {
+    await delay(TASK_POLL_INTERVAL_MS)
+    if (performance.now() >= deadline) break
     const state = await call<AndroidUpdateTaskState<T>>('getUpdateTaskState', taskId)
-    if (!state.ok || !state.data) return state as ApiResult<T>
+    if (!state.ok) return fail(state.code || 'ERROR', state.message || '更新失败')
+    if (!state.data) return fail('ERROR', 'Android 更新状态缺失。')
     onProgress?.(state.data)
 
     if (state.data.status === 'done') return ok(state.data.result as T)
@@ -188,6 +195,7 @@ async function pollUpdateTask<T>(taskId: string, onProgress?: AppUpdateProgressH
       return fail(state.data.errorCode || 'ERROR', state.data.errorMessage || '更新失败')
     }
   }
+  return fail('TIMEOUT', '等待 Android 更新超时。')
 }
 
 function delay(ms: number) {

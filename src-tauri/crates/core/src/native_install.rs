@@ -91,7 +91,7 @@ pub fn write_config(val: &Value) -> Result<(), String> {
 
 pub fn is_plugin_listener_enabled() -> bool {
     let cfg = read_config();
-    cfg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)
+    cfg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn read_registry(sub_path: &str) -> String {

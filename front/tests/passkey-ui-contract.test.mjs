@@ -6,6 +6,9 @@ const managerSource = readFileSync(new URL('../src/components/tools/PasskeyManag
 const detailSource = readFileSync(new URL('../src/components/DetailContent.vue', import.meta.url), 'utf8')
 const settingsSource = readFileSync(new URL('../src/components/settings/SettingsDrawer.vue', import.meta.url), 'utf8')
 const appSource = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
+const vaultStoreSource = readFileSync(new URL('../src/stores/vaultStore.ts', import.meta.url), 'utf8')
+const sessionStoreSource = readFileSync(new URL('../src/stores/sessionStore.ts', import.meta.url), 'utf8')
+const uiStoreSource = readFileSync(new URL('../src/stores/uiStore.ts', import.meta.url), 'utf8')
 const manifestSource = readFileSync(new URL('../../android/app/src/main/AndroidManifest.xml', import.meta.url), 'utf8')
 const providerComposableSource = readFileSync(new URL('../src/composables/useAndroidPasskeyProviderSettings.ts', import.meta.url), 'utf8')
 
@@ -17,8 +20,8 @@ test('passkey manager receives only the safe presentation projection', () => {
 })
 
 test('settings and login details expose passkey management entry points', () => {
-  assert.match(settingsSource, /title="通行密钥"/)
-  assert.match(settingsSource, /emit\('open-passkeys'\)/)
+  assert.match(settingsSource, /<strong>通行密钥<\/strong>/)
+  assert.match(settingsSource, /vault\.openPasskeyManager\(\)/)
   assert.match(detailSource, /linkedPasskeys\.length/)
   assert.match(detailSource, /\$emit\('unlink-passkey'/)
   assert.match(detailSource, /\$emit\('open-passkey'/)
@@ -26,8 +29,8 @@ test('settings and login details expose passkey management entry points', () => 
 
 test('Android provider controls separate component enablement from system selection', () => {
   assert.match(settingsSource, /showAndroidPasskeyProviderSettings/)
-  assert.match(settingsSource, /toggle-android-passkey-provider/)
-  assert.match(settingsSource, /open-android-passkey-settings/)
+  assert.match(settingsSource, /toggleAndroidPasskeyProvider/)
+  assert.match(settingsSource, /openAndroidPasskeyProviderSettings/)
   assert.match(appSource, /useAndroidPasskeyProviderSettings\(\)/)
   assert.match(providerComposableSource, /getAndroidPasskeyProviderState\(\)/)
   assert.match(providerComposableSource, /setAndroidPasskeyProviderEnabled\(enabled\)/)
@@ -44,15 +47,19 @@ test('heavy tools are loaded only when their surface is opened', () => {
 })
 
 test('app keeps metadata updates constrained and deletion tombstone-backed', () => {
-  assert.match(appSource, /updatePasskeyMetadata\(/)
-  assert.match(appSource, /api\.deletePasskey\(passkeyId\)/)
-  assert.match(appSource, /scheduleAutoCloudUpload\(\)/)
+  assert.match(vaultStoreSource, /updatePasskeyMetadata\(/)
+  assert.match(vaultStoreSource, /api\.deletePasskey\(passkeyId\)/)
+  assert.match(vaultStoreSource, /scheduleAutoCloudUpload\?\.\(\)/)
   assert.doesNotMatch(managerSource, /VaultPasskey\[\]/)
 })
 
 test('passkey management closes at the vault lock boundary', () => {
-  const start = appSource.indexOf('function applyLockedUiState()')
-  const lockBoundary = appSource.slice(start, start + 3000)
-  assert.match(lockBoundary, /passkeyManagerOpen\.value = false/)
-  assert.match(lockBoundary, /passkeyManagerInitialId\.value = ''/)
+  const lockStart = sessionStoreSource.indexOf('function applyLockedUiState()')
+  const lockBoundary = sessionStoreSource.slice(lockStart, lockStart + 1500)
+  assert.match(lockBoundary, /ui\.clearAllOverlays\(\)/)
+  assert.match(lockBoundary, /vaultBridge\?\.resetOnLock\(\)/)
+  assert.match(uiStoreSource, /const passkeyManagerOpen = overlayRef\('passkey'\)/)
+  const resetStart = vaultStoreSource.indexOf('function resetOnLock()')
+  const resetBoundary = vaultStoreSource.slice(resetStart, resetStart + 1500)
+  assert.match(resetBoundary, /passkeyManagerInitialId\.value = ''/)
 })

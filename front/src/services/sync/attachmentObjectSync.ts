@@ -2,6 +2,7 @@ import type { ApiResult, VaultAttachment, VaultEntry, VaultPayload } from '../..
 import { verifyAttachmentCiphertext } from '../attachmentCrypto.ts'
 import { normalizeObjectName } from '../aliyunOss.ts'
 import { RemoteVaultStatus, type RemoteVaultStore } from '../cloud/remoteVaultStore.ts'
+import { walkEntries } from '../shared/entryTree.ts'
 
 const MAX_ATTACHMENT_OBJECT_TEXT_BYTES = 14 * 1024 * 1024 + 2048
 
@@ -63,19 +64,15 @@ export async function ensureRemoteAttachmentObjects(
 
 export function collectAttachmentReferences(entries: VaultEntry[]) {
   const references = new Map<string, VaultAttachment>()
-  const visit = (items: VaultEntry[]) => {
-    for (const entry of items) {
-      for (const reference of entry.attachments || []) {
-        const previous = references.get(reference.id)
-        if (previous && JSON.stringify(previous) !== JSON.stringify(reference)) {
-          throw new Error(`附件引用冲突：${reference.name}`)
-        }
-        references.set(reference.id, reference)
+  walkEntries(entries, (entry) => {
+    for (const reference of entry.attachments || []) {
+      const previous = references.get(reference.id)
+      if (previous && JSON.stringify(previous) !== JSON.stringify(reference)) {
+        throw new Error(`附件引用冲突：${reference.name}`)
       }
-      visit(entry.children || [])
+      references.set(reference.id, reference)
     }
-  }
-  visit(entries)
+  })
   return [...references.values()].sort((left, right) => left.id.localeCompare(right.id))
 }
 

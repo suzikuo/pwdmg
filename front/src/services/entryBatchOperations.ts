@@ -1,14 +1,11 @@
 import type { VaultEntry } from '../types'
+import { collectEntryIds, countEntries, findEntryById } from './shared/entryTree.ts'
+
+export { collectEntryIds }
 
 export type BatchMoveResult = {
   movedIds: string[]
   error: '' | 'empty-selection' | 'missing-entry' | 'invalid-destination'
-}
-
-export function collectEntryIds(entries: VaultEntry[]): string[] {
-  const result: string[] = []
-  walkEntries(entries, (entry) => result.push(entry.id))
-  return result
 }
 
 export function normalizeSelectedRootIds(entries: VaultEntry[], selectedIds: Iterable<string>): string[] {
@@ -35,10 +32,10 @@ export function moveSelectedEntries(
   const movedIds = normalizeSelectedRootIds(entries, selectedIds)
   if (movedIds.length === 0) return { movedIds: [], error: 'empty-selection' }
 
-  const sources = movedIds.map((id) => findEntry(entries, id))
+  const sources = movedIds.map((id) => findEntryById(entries, id))
   if (sources.some((entry) => !entry)) return { movedIds: [], error: 'missing-entry' }
   if (targetParentId) {
-    const target = findEntry(entries, targetParentId)
+    const target = findEntryById(entries, targetParentId)
     if (!target || target.kind !== 'folder') return { movedIds: [], error: 'invalid-destination' }
     if (sources.some((source) => source && (source.id === targetParentId || containsEntry(source, targetParentId)))) {
       return { movedIds: [], error: 'invalid-destination' }
@@ -52,7 +49,7 @@ export function moveSelectedEntries(
     movedEntries.push(entry)
   }
 
-  const target = targetParentId ? findEntry(entries, targetParentId) : undefined
+  const target = targetParentId ? findEntryById(entries, targetParentId) : null
   if (targetParentId && (!target || target.kind !== 'folder')) {
     return { movedIds: [], error: 'invalid-destination' }
   }
@@ -83,30 +80,14 @@ export function removeSelectedEntries(entries: VaultEntry[], selectedIds: Iterab
 
 export function isEntryInsideAny(entries: VaultEntry[], rootIds: Iterable<string>, entryId: string): boolean {
   for (const rootId of normalizeSelectedRootIds(entries, rootIds)) {
-    const root = findEntry(entries, rootId)
+    const root = findEntryById(entries, rootId)
     if (root && (root.id === entryId || containsEntry(root, entryId))) return true
   }
   return false
 }
 
-function walkEntries(entries: VaultEntry[], visit: (entry: VaultEntry) => void) {
-  for (const entry of entries) {
-    visit(entry)
-    walkEntries(entry.children || [], visit)
-  }
-}
-
-function findEntry(entries: VaultEntry[], entryId: string): VaultEntry | undefined {
-  for (const entry of entries) {
-    if (entry.id === entryId) return entry
-    const nested = findEntry(entry.children || [], entryId)
-    if (nested) return nested
-  }
-  return undefined
-}
-
 function containsEntry(entry: VaultEntry, entryId: string): boolean {
-  return (entry.children || []).some((child) => child.id === entryId || containsEntry(child, entryId))
+  return Boolean(findEntryById(entry.children || [], entryId))
 }
 
 function takeEntry(entries: VaultEntry[], entryId: string): VaultEntry | null {
@@ -117,8 +98,4 @@ function takeEntry(entries: VaultEntry[], entryId: string): VaultEntry | null {
     if (nested) return nested
   }
   return null
-}
-
-function countEntries(entries: VaultEntry[]): number {
-  return entries.reduce((count, entry) => count + 1 + countEntries(entry.children || []), 0)
 }

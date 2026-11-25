@@ -345,8 +345,13 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   function isUsernameInput(input) {
     const type = inputType(input)
+    const roles = (input.getAttribute('role') || '').toLowerCase().split(/\s+/)
+    if (type === 'search' || roles.includes('searchbox')) return false
     if (['hidden', 'password', 'submit', 'button', 'checkbox', 'radio', 'file'].includes(type)) return false
-    return ['text', 'email', 'tel', 'number', 'search', 'url'].includes(type) || USER_RE.test(fieldText(input))
+    const signal = fieldSignal(input)
+    if (/captcha|图形验证码|图片验证码|圖形驗證碼|圖片驗證碼/i.test(signal.text)) return false
+    if (Security.otpEvidence(signal) !== 'none') return false
+    return ['text', 'email', 'tel', 'number', 'url'].includes(type) || USER_RE.test(signal.text)
   }
 
   function accountFieldKind(input) {

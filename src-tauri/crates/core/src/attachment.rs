@@ -1,8 +1,13 @@
+use crate::paths::atomic_write_file;
+use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static ATTACHMENT_FILES: Mutex<()> = Mutex::new(());
 
 pub const ATTACHMENT_FORMAT: &str = "mypwdmg-attachment";
 pub const ATTACHMENT_VERSION: u32 = 1;
@@ -25,9 +30,43 @@ pub struct AttachmentStorageState {
 }
 
 pub fn is_valid_attachment_id(id: &str) -> bool {
-    uuid::Uuid::parse_str(id)
-        .map(|u| u.get_version_num() == 4)
-        .unwrap_or(false)
+    uuid::Uuid::parse_str(id).is_ok_and(|id_uuid| {
+        id_uuid.get_version() == Some(uuid::Version::Random)
+            && id_uuid.get_variant() == uuid::Variant::RFC4122
+            && id_uuid.hyphenated().to_string().eq_ignore_ascii_case(id)
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AttachmentObject<'a> {
+    format: &'a str,
+    version: u32,
+    cipher: &'a str,
+    attachment_id: &'a str,
+    nonce: &'a str,
+    ciphertext: &'a str,
+}
+
+pub(crate) fn validate_attachment_object(attachment_id: &str, object_text: &str) -> Result<(), String> {
+    if !is_valid_attachment_id(attachment_id) {
+        return Err("Invalid attachment ID".to_string());
+    }
+    if object_text.len() > MAX_ATTACHMENT_OBJECT_BYTES {
+        return Err("Invalid attachment object: size limit exceeded".to_string());
+    }
+    let object: AttachmentObject<'_> = serde_json::from_str(object_text)
+        .map_err(|_| "Invalid attachment object JSON schema".to_string())?;
+    if object.format != ATTACHMENT_FORMAT
+        || object.version != ATTACHMENT_VERSION
+        || object.cipher != ATTACHMENT_CIPHER
+        || object.attachment_id != attachment_id
+        || !BASE64_STANDARD.decode(object.nonce).is_ok_and(|bytes| !bytes.is_empty())
+        || !BASE64_STANDARD.decode(object.ciphertext).is_ok_and(|bytes| !bytes.is_empty())
+    {
+        return Err("Invalid attachment object payload".to_string());
+    }
+    Ok(())
 }
 
 pub struct AttachmentStore {
@@ -85,54 +124,64 @@ impl AttachmentStore {
     }
 
     pub fn write(&self, attachment_id: &str, object_text: &str) -> Result<Value, String> {
-        if !is_valid_attachment_id(attachment_id) {
-            return Err("Attachment ID is invalid".to_string());
-        }
+        validate_attachment_object(attachment_id, object_text)?;
         let raw = object_text.as_bytes();
-        if raw.len() > MAX_ATTACHMENT_OBJECT_BYTES {
-            return Err("Attachment object is too large".to_string());
-        }
-
-        let parsed: Value = serde_json::from_str(object_text)
-            .map_err(|_| "Attachment object is not valid JSON".to_string())?;
-
-        if parsed.get("format").and_then(|s| s.as_str()) != Some(ATTACHMENT_FORMAT)
-            || parsed.get("cipher").and_then(|s| s.as_str()) != Some(ATTACHMENT_CIPHER)
-            || parsed.get("attachmentId").and_then(|s| s.as_str()) != Some(attachment_id)
-        {
-            return Err("Attachment object payload is invalid".to_string());
-        }
-
+        let _files = ATTACHMENT_FILES.lock().unwrap_or_else(|e| e.into_inner());
         self.ensure_dirs().map_err(|e| e.to_string())?;
         let target = self.root.join(format!("{}.json", attachment_id));
-
-        if target.exists() {
-            if let Ok(existing) = fs::read(&target) {
-                if existing == raw {
-                    return Ok(serde_json::json!({
-                        "attachmentId": attachment_id,
-                        "size": raw.len(),
-                        "exists": true
-                    }));
+        let mut exists = false;
+        let mut retained = None;
+        for source in std::iter::once(target.clone()).chain(self.retained_paths(attachment_id)?) {
+            match fs::read(&source) {
+                Ok(existing) if existing == raw => {
+                    if source == target {
+                        exists = true;
+                    } else {
+                        retained = Some(source);
+                    }
                 }
+                Ok(_) => return Err("Conflict: attachment objects are immutable".to_string()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && source == target => {}
+                Err(e) => return Err(e.to_string()),
             }
-            return Err("Attachment objects are immutable".to_string());
         }
-
-        let state = self.state();
-        if state.activeBytes + state.retainedBytes + (raw.len() as u64) > MAX_ATTACHMENT_STORE_BYTES {
-            return Err("Attachment storage quota exceeded".to_string());
+        if !exists {
+            if let Some(source) = retained {
+                fs::rename(source, &target).map_err(|e| e.to_string())?;
+            } else {
+                let state = self.state();
+                if state.activeBytes + state.retainedBytes + raw.len() as u64 > MAX_ATTACHMENT_STORE_BYTES {
+                    return Err("Attachment storage quota exceeded".to_string());
+                }
+                atomic_write_file(&target, raw)?;
+            }
         }
-
-        let temp_path = self.root.join(format!(".{}.{}.tmp", attachment_id, uuid::Uuid::new_v4()));
-        fs::write(&temp_path, raw).map_err(|e| e.to_string())?;
-        fs::rename(&temp_path, &target).map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "attachmentId": attachment_id,
+            "objectBytes": raw.len(),
             "size": raw.len(),
             "exists": true
         }))
+    }
+
+    fn retained_paths(&self, attachment_id: &str) -> Result<Vec<PathBuf>, String> {
+        let entries = match fs::read_dir(&self.retained_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            if let Some((id, suffix)) = name.to_str().and_then(|name| name.split_once('.')) {
+                if id.eq_ignore_ascii_case(attachment_id) && suffix.ends_with(".json") {
+                    paths.push(entry.path());
+                }
+            }
+        }
+        Ok(paths)
     }
 
     pub fn read(&self, attachment_id: &str) -> Result<String, String> {
@@ -140,28 +189,26 @@ impl AttachmentStore {
             return Err("Attachment ID is invalid".to_string());
         }
 
+        let _files = ATTACHMENT_FILES.lock().unwrap_or_else(|e| e.into_inner());
         let target = self.root.join(format!("{}.json", attachment_id));
         if target.exists() {
             return fs::read_to_string(&target).map_err(|e| e.to_string());
         }
-
-        // Check retained
-        if let Ok(entries) = fs::read_dir(&self.retained_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(attachment_id) && name.ends_with(".json") {
-                    let text = fs::read_to_string(entry.path()).map_err(|e| e.to_string())?;
-                    // Restore from retained
-                    let _ = fs::rename(entry.path(), &target);
-                    return Ok(text);
-                }
-            }
+        if let Some(source) = self.retained_paths(attachment_id)?.first() {
+            let text = fs::read_to_string(source).map_err(|e| e.to_string())?;
+            fs::rename(source, &target).map_err(|e| e.to_string())?;
+            return Ok(text);
         }
 
         Err("Attachment object does not exist".to_string())
     }
 
     pub fn retain(&self, attachment_id: &str) -> Result<bool, String> {
+        let _files = ATTACHMENT_FILES.lock().unwrap_or_else(|e| e.into_inner());
+        self.retain_file(attachment_id)
+    }
+
+    fn retain_file(&self, attachment_id: &str) -> Result<bool, String> {
         if !is_valid_attachment_id(attachment_id) {
             return Err("Attachment ID is invalid".to_string());
         }
@@ -182,6 +229,7 @@ impl AttachmentStore {
     }
 
     pub fn collect(&self, referenced_ids: &[String]) -> Result<(usize, usize), String> {
+        let _files = ATTACHMENT_FILES.lock().unwrap_or_else(|e| e.into_inner());
         self.ensure_dirs().map_err(|e| e.to_string())?;
         let ref_set: std::collections::HashSet<&str> = referenced_ids.iter().map(|s| s.as_str()).collect();
 
@@ -195,7 +243,7 @@ impl AttachmentStore {
                 if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         if !ref_set.contains(stem) && is_valid_attachment_id(stem) {
-                            if self.retain(stem).unwrap_or(false) {
+                            if self.retain_file(stem).unwrap_or(false) {
                                 retained_count += 1;
                             }
                         }

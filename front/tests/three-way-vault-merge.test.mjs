@@ -65,6 +65,23 @@ test('preserves the losing same-field write as a deterministic restorable histor
   assert.ok(merged.conflicts.some((item) => item.id === 'deleted' && item.reason === 'delete-update'))
 })
 
+test('keeps a newly recorded remote conflict snapshot when newer history fills the limit', () => {
+  const base = payload([entry('shared', { title: 'Base' })])
+  const local = clone(base)
+  const remote = clone(base)
+  local.entries[0].title = 'Local'
+  local.entries[0].history = Array.from({ length: 10 }, (_, i) => ({
+    id: `history-${i}`, title: 'Local', action: 'updated', at: 100 + i
+  }))
+  remote.entries[0].title = 'Remote'
+  remote.updatedAt = 20
+
+  const { history } = mergeVaultPayloads(base, local, remote).payload.entries[0]
+  assert.equal(history.length, 10)
+  assert.equal(history.find((record) => record.id.startsWith('sync-conflict-'))?.snapshot.title, 'Remote')
+  assert.equal(history.some((record) => record.id === 'history-0'), false)
+})
+
 test('repeating a same-field merge does not duplicate the conflict history record', () => {
   const base = payload([entry('shared', { title: 'Base' })])
   const local = payload([entry('shared', { title: 'Local' })])

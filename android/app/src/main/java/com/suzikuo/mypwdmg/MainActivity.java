@@ -90,18 +90,21 @@ public class MainActivity extends Activity {
 
             @Override
             public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
-                Log.e(
-                    TAG,
-                    "WebView console: " + consoleMessage.message()
-                        + " (" + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + ")"
-                );
-                return super.onConsoleMessage(consoleMessage);
+                if (BuildConfig.DEBUG) {
+                    String sourceId = consoleMessage.sourceId();
+                    Log.e(
+                        TAG,
+                        "WebView console: " + consoleMessage.message()
+                            + " (" + safeUriLabel(sourceId == null ? null : Uri.parse(sourceId)) + ":" + consoleMessage.lineNumber() + ")"
+                    );
+                }
+                return true;
             }
         });
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                if (!request.isForMainFrame()) return false;
+                if (!request.isForMainFrame()) return !isAssetNavigation(request.getUrl());
                 return handleNavigation(request.getUrl());
             }
 
@@ -149,10 +152,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean isAssetNavigation(Uri uri) {
+        if (uri == null || !uri.toString().startsWith("file:///android_asset/")) return false;
+        String path = uri.getPath();
+        if (path == null || path.indexOf('\\') >= 0) return false;
+        for (String segment : path.split("/")) {
+            if ("..".equals(segment)) return false;
+        }
+        return true;
+    }
+
     private boolean handleNavigation(Uri uri) {
         if (uri == null) return true;
-        String value = uri.toString();
-        if (value.startsWith("file:///android_asset/")) return false;
+        if (isAssetNavigation(uri)) return false;
         String scheme = uri.getScheme();
         if (!"https".equalsIgnoreCase(scheme) && !"http".equalsIgnoreCase(scheme)) return true;
         try {

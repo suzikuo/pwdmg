@@ -11,6 +11,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
+import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -58,8 +60,9 @@ final class AndroidVaultStore {
     ));
     private static final Set<String> ENTRY_KINDS = new HashSet<>(Arrays.asList("login", "secure-note", "card", "identity", "api-key", "folder"));
     private static final Set<String> CUSTOM_FIELD_TYPES = new HashSet<>(Arrays.asList("text", "secret", "date", "url", "email", "phone"));
-    private static final int DEFAULT_ITERATIONS = 390000;
+    private static final int DEFAULT_ITERATIONS = 600000;
     private static final long UNLOCK_SESSION_TIMEOUT_MS = 15 * 60 * 1000L;
+    private static final long MAX_DEVICE_REAUTH_SECONDS = 30 * 24 * 3600L;
     private static final int MAX_IMPORT_BACKUPS = 5;
     static final String WEB_REDACTED_PRIVATE_KEY = "AA";
     private static final Object VAULT_MUTATION_LOCK = new Object();
@@ -68,15 +71,16 @@ final class AndroidVaultStore {
     private final File vaultFile;
     private final File backupDir;
     private final File deviceUnlockFile;
-    private static final Map<String, JSONObject> webPasskeyMaterials = new java.util.concurrent.ConcurrentHashMap<>();
-    private static final Set<String> webAuthorizedTombstones = java.util.Collections.synchronizedSet(new HashSet<>());
+    // All session fields and vault file operations are guarded by VAULT_MUTATION_LOCK.
+    private static final Map<String, JSONObject> webPasskeyMaterials = new HashMap<>();
+    private static final Set<String> webAuthorizedTombstones = new HashSet<>();
 
-    private static volatile JSONObject payload;
-    private static volatile byte[] key;
-    private static volatile byte[] salt;
-    private static volatile int iterations;
-    private static volatile long expiresAt;
-    private static volatile VaultSessionIndex vaultIndex;
+    private static JSONObject payload;
+    private static byte[] key;
+    private static byte[] salt;
+    private static int iterations;
+    private static long expiresAt;
+    private static VaultSessionIndex vaultIndex;
 
     static class LockedException extends Exception {
         LockedException(String message) {
@@ -157,7 +161,7 @@ final class AndroidVaultStore {
         this.deviceUnlockFile = new File(root, "device_unlock.json");
     }
 
-    synchronized JSONObject state() throws JSONException {
+    JSONObject state() throws JSONException {
         synchronized (VAULT_MUTATION_LOCK) {
             boolean unlocked = isUnlocked();
             JSONObject du = deviceUnlockState();
@@ -172,26 +176,30 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject storageState() throws JSONException {
-        return new JSONObject()
-            .put("hasVault", vaultFile.exists())
-            .put("legacyAvailable", false)
-            .put("vaultPath", vaultFile.getAbsolutePath())
-            .put("passwordless", readPasswordlessMarker());
-    }
-
-    synchronized String readVaultEnvelope() throws Exception {
-        if (!vaultFile.exists()) {
-            throw new IllegalStateException("Vault does not exist");
+    JSONObject storageState() throws JSONException {
+        synchronized (VAULT_MUTATION_LOCK) {
+            return new JSONObject()
+                .put("hasVault", vaultFile.exists())
+                .put("legacyAvailable", false)
+                .put("vaultPath", vaultFile.getAbsolutePath())
+                .put("passwordless", readPasswordlessMarker());
         }
-        return readFile(vaultFile);
     }
 
-    synchronized JSONObject writeVaultEnvelope(String envelopeText, boolean protectBackup) throws Exception {
+    String readVaultEnvelope() throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            if (!vaultFile.exists()) {
+                throw new IllegalStateException("Vault does not exist");
+            }
+            return readFile(vaultFile);
+        }
+    }
+
+    JSONObject writeVaultEnvelope(String envelopeText, boolean protectBackup) throws Exception {
         return writeVaultEnvelope(envelopeText, protectBackup, -1);
     }
 
-    synchronized JSONObject writeVaultEnvelope(String envelopeText, boolean protectBackup, long expectedRevision) throws Exception {
+    JSONObject writeVaultEnvelope(String envelopeText, boolean protectBackup, long expectedRevision) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             JSONObject envelope = validateEnvelope(envelopeText);
             JSONObject currentEnvelope = vaultFile.exists() ? readEnvelope() : null;
@@ -230,22 +238,24 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized String readLegacyLocalStorage() {
+    String readLegacyLocalStorage() {
         return "{}";
     }
 
-    synchronized JSONObject createVault(String password, boolean importLegacy) throws Exception {
-        if (vaultFile.exists()) {
-            throw new IllegalStateException("Vault already exists; unlock it instead");
+    JSONObject createVault(String password, boolean importLegacy) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            if (vaultFile.exists()) {
+                throw new IllegalStateException("Vault already exists; unlock it instead");
+            }
+            JSONObject nextPayload = defaultPayload(new JSONArray());
+            writeNewEnvelope(password, nextPayload);
+            return new JSONObject()
+                .put("vault", exposePayloadToWeb(payload))
+                .put("migrated", 0);
         }
-        JSONObject nextPayload = defaultPayload(new JSONArray());
-        writeNewEnvelope(password, nextPayload);
-        return new JSONObject()
-            .put("vault", exposePayloadToWeb(payload))
-            .put("migrated", 0);
     }
 
-    synchronized JSONObject unlock(String password) throws Exception {
+    JSONObject unlock(String password) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             if ((password == null || password.isEmpty()) && deviceUnlockFile != null && deviceUnlockFile.exists()) {
                 try {
@@ -299,14 +309,16 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject tryUnlockWithEmptyPasswordForAutofill() {
-        try {
-            if (!vaultFile.exists()) return null;
-            if (!isUnlocked()) unlock("");
-            return isUnlocked() ? exposePayloadToWeb(payload) : null;
-        } catch (Exception error) {
-            Log.e(TAG, "Empty-password autofill unlock failed", error);
-            return null;
+    JSONObject tryUnlockWithEmptyPasswordForAutofill() {
+        synchronized (VAULT_MUTATION_LOCK) {
+            try {
+                if (!vaultFile.exists()) return null;
+                if (!isUnlocked()) unlock("");
+                return isUnlocked() ? exposePayloadToWeb(payload) : null;
+            } catch (Exception error) {
+                Log.e(TAG, "Empty-password autofill unlock failed", error);
+                return null;
+            }
         }
     }
 
@@ -330,118 +342,125 @@ final class AndroidVaultStore {
         return (SecretKey) keyStore.getKey(DEVICE_UNLOCK_KEY_ALIAS, null);
     }
 
-    synchronized JSONObject deviceUnlockState() {
-        try {
+    JSONObject deviceUnlockState() throws JSONException {
+        synchronized (VAULT_MUTATION_LOCK) {
+            if (deviceUnlockFile.exists()) {
+                try {
+                    JSONObject record = new JSONObject(readFile(deviceUnlockFile));
+                    long expires = record.optLong("expiresAt", 0);
+                    if (expires > nowSeconds()) {
+                        return new JSONObject().put("supported", true).put("enabled", true).put("expiresAt", expires);
+                    }
+                } catch (Exception ignored) {
+                    // Discard an unreadable record along with expired records.
+                }
+                try {
+                    return disableDeviceUnlock();
+                } catch (IOException ignored) {
+                    // Expired and unreadable records cannot be used to unlock.
+                }
+            }
+            return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
+        }
+    }
+
+    JSONObject enableDeviceUnlock(String password, long reauthSeconds) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            if (!vaultFile.exists()) {
+                throw new IllegalStateException("Vault does not exist");
+            }
+            JSONObject envelope = readEnvelope();
+            DecryptedVault decrypted = decryptPayloadForPassword(password, envelope);
+            byte[] plaintext = null;
+            try {
+                long effectiveReauth = reauthSeconds <= 0 ? 7 * 24 * 3600L : Math.min(reauthSeconds, MAX_DEVICE_REAUTH_SECONDS);
+                long exp = nowSeconds() + effectiveReauth;
+                JSONObject keyObj = new JSONObject()
+                    .put("key", Base64.getEncoder().encodeToString(decrypted.key))
+                    .put("salt", Base64.getEncoder().encodeToString(decrypted.salt))
+                    .put("iterations", decrypted.iterations);
+
+                plaintext = keyObj.toString().getBytes(StandardCharsets.UTF_8);
+                SecretKey ksKey = getOrCreateDeviceUnlockKey();
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.ENCRYPT_MODE, ksKey);
+                byte[] iv = cipher.getIV();
+                byte[] ciphertext = cipher.doFinal(plaintext);
+
+                JSONObject record = new JSONObject()
+                    .put("version", 1)
+                    .put("expiresAt", exp)
+                    .put("iv", Base64.getEncoder().encodeToString(iv))
+                    .put("ciphertext", Base64.getEncoder().encodeToString(ciphertext));
+
+                writeFile(deviceUnlockFile, record.toString(2));
+                return new JSONObject().put("supported", true).put("enabled", true).put("expiresAt", exp);
+            } finally {
+                wipeBytes(plaintext);
+                wipeBytes(decrypted.key);
+                wipeBytes(decrypted.salt);
+            }
+        }
+    }
+
+    JSONObject disableDeviceUnlock() throws IOException, JSONException {
+        synchronized (VAULT_MUTATION_LOCK) {
+            Files.deleteIfExists(deviceUnlockFile.toPath());
+            return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
+        }
+    }
+
+    JSONObject quickUnlock() throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
             if (deviceUnlockFile == null || !deviceUnlockFile.exists()) {
-                return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
+                throw new IllegalStateException("Device unlock is not enabled");
             }
             String text = readFile(deviceUnlockFile);
-            JSONObject obj = new JSONObject(text);
-            long exp = obj.optLong("expiresAt", 0);
-            if (exp > nowSeconds()) {
-                return new JSONObject().put("supported", true).put("enabled", true).put("expiresAt", exp);
-            } else {
+            JSONObject record = new JSONObject(text);
+            long exp = record.optLong("expiresAt", 0);
+            if (exp <= nowSeconds()) {
                 disableDeviceUnlock();
+                throw new IllegalStateException("Device unlock session expired");
             }
-        } catch (Exception ignored) {
-            disableDeviceUnlock();
-        }
-        try {
-            return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
-        } catch (JSONException e) {
-            return new JSONObject();
-        }
-    }
+            byte[] iv = Base64.getDecoder().decode(record.getString("iv"));
+            byte[] ciphertext = Base64.getDecoder().decode(record.getString("ciphertext"));
 
-    synchronized JSONObject enableDeviceUnlock(String password, long reauthSeconds) throws Exception {
-        if (!vaultFile.exists()) {
-            throw new IllegalStateException("Vault does not exist");
-        }
-        JSONObject envelope = readEnvelope();
-        DecryptedVault decrypted = decryptPayloadForPassword(password, envelope);
-        try {
-            long effectiveReauth = reauthSeconds <= 0 ? 7 * 24 * 3600L : reauthSeconds;
-            long exp = nowSeconds() + effectiveReauth;
-            JSONObject keyObj = new JSONObject()
-                .put("key", Base64.getEncoder().encodeToString(decrypted.key))
-                .put("salt", Base64.getEncoder().encodeToString(decrypted.salt))
-                .put("iterations", decrypted.iterations);
-
-            byte[] plaintext = keyObj.toString().getBytes(StandardCharsets.UTF_8);
             SecretKey ksKey = getOrCreateDeviceUnlockKey();
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, ksKey);
-            byte[] iv = cipher.getIV();
-            byte[] ciphertext = cipher.doFinal(plaintext);
+            cipher.init(Cipher.DECRYPT_MODE, ksKey, new GCMParameterSpec(128, iv));
+            byte[] plaintext = cipher.doFinal(ciphertext);
 
-            JSONObject record = new JSONObject()
-                .put("version", 1)
-                .put("expiresAt", exp)
-                .put("iv", Base64.getEncoder().encodeToString(iv))
-                .put("ciphertext", Base64.getEncoder().encodeToString(ciphertext));
-
-            writeFile(deviceUnlockFile, record.toString(2));
-            return new JSONObject().put("supported", true).put("enabled", true).put("expiresAt", exp);
-        } finally {
-            wipeBytes(decrypted.key);
-            wipeBytes(decrypted.salt);
-        }
-    }
-
-    synchronized JSONObject disableDeviceUnlock() {
-        if (deviceUnlockFile != null && deviceUnlockFile.exists()) {
-            deviceUnlockFile.delete();
-        }
-        try {
-            return new JSONObject().put("supported", true).put("enabled", false).put("expiresAt", 0);
-        } catch (JSONException e) {
-            return new JSONObject();
-        }
-    }
-
-    synchronized JSONObject quickUnlock() throws Exception {
-        if (deviceUnlockFile == null || !deviceUnlockFile.exists()) {
-            throw new IllegalStateException("Device unlock is not enabled");
-        }
-        String text = readFile(deviceUnlockFile);
-        JSONObject record = new JSONObject(text);
-        long exp = record.optLong("expiresAt", 0);
-        if (exp <= nowSeconds()) {
-            disableDeviceUnlock();
-            throw new IllegalStateException("Device unlock session expired");
-        }
-        byte[] iv = Base64.getDecoder().decode(record.getString("iv"));
-        byte[] ciphertext = Base64.getDecoder().decode(record.getString("ciphertext"));
-
-        SecretKey ksKey = getOrCreateDeviceUnlockKey();
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, ksKey, new GCMParameterSpec(128, iv));
-        byte[] plaintext = cipher.doFinal(ciphertext);
-
-        JSONObject keyObj = new JSONObject(new String(plaintext, StandardCharsets.UTF_8));
-        byte[] k = Base64.getDecoder().decode(keyObj.getString("key"));
-        byte[] s = Base64.getDecoder().decode(keyObj.getString("salt"));
-        int iter = keyObj.getInt("iterations");
-        boolean committed = false;
-
-        try {
-            JSONObject envelope = readEnvelope();
-            JSONObject decPayload = decryptEnvelopeWithKey(envelope, k);
-            JSONObject normalized = normalizePayload(decPayload);
-            setPayload(normalized);
-            replaceSessionSecrets(k, s, iter);
-            refreshSession();
-            committed = true;
-            return exposePayloadToWeb(payload);
-        } finally {
-            if (!committed) {
-                wipeBytes(k);
-                wipeBytes(s);
+            byte[] unlockKey = null;
+            byte[] unlockSalt = null;
+            boolean committed = false;
+            try {
+                JSONObject keyObj = new JSONObject(new String(plaintext, StandardCharsets.UTF_8));
+                unlockKey = Base64.getDecoder().decode(keyObj.getString("key"));
+                unlockSalt = Base64.getDecoder().decode(keyObj.getString("salt"));
+                int unlockIterations = keyObj.getInt("iterations");
+                JSONObject envelope = readEnvelope();
+                VaultFormat.ValidatedEnvelope validated = VaultFormat.validateEnvelope(envelope);
+                if (validated.iterations != unlockIterations || !sameBytes(validated.salt, unlockSalt)) {
+                    throw new BadPasswordException("Vault password changed", null);
+                }
+                JSONObject decPayload = decryptEnvelopeWithKey(envelope, unlockKey, validated);
+                JSONObject normalized = normalizePayload(decPayload);
+                setPayload(normalized);
+                replaceSessionSecrets(unlockKey, unlockSalt, unlockIterations);
+                refreshSession();
+                committed = true;
+                return exposePayloadToWeb(payload);
+            } finally {
+                wipeBytes(plaintext);
+                if (!committed) {
+                    wipeBytes(unlockKey);
+                    wipeBytes(unlockSalt);
+                }
             }
         }
     }
 
-    synchronized void lock() {
+    void lock() {
         synchronized (VAULT_MUTATION_LOCK) {
             payload = null;
             clearSessionSecrets();
@@ -453,47 +472,51 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject getVault() throws Exception {
+    JSONObject getVault() throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             return exposePayloadToWeb(requirePayload());
         }
     }
 
-    synchronized JSONObject saveVault(JSONObject nextPayload) throws Exception {
-        requirePayload();
-        long expectedRevision = VaultFormat.readPayloadRevision(nextPayload);
-        JSONObject restored = restorePayloadFromWeb(requirePayload(), nextPayload);
-        JSONObject saved = persistNativePayload(restored, expectedRevision);
-        refreshSession();
-        return exposePayloadToWeb(saved);
+    JSONObject saveVault(JSONObject nextPayload) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            JSONObject current = requirePayload();
+            long expectedRevision = VaultFormat.readPayloadRevision(nextPayload);
+            JSONObject restored = restorePayloadFromWeb(current, nextPayload);
+            JSONObject saved = persistNativePayload(restored, expectedRevision);
+            refreshSession();
+            return exposePayloadToWeb(saved);
+        }
     }
 
-    synchronized JSONObject mutateVaultPayload(VaultPayloadMutator mutator) throws Exception {
-        requirePayload();
-        if (mutator == null) throw new IllegalArgumentException("Vault mutator is required");
-        NativeMutationCommit<JSONObject> commit = mutateNativePayload(
-            -1,
-            latestPayload -> new NativeMutation<>(true, mutator.mutate(latestPayload), null)
-        );
-        refreshSession();
-        return copy(commit.payload);
+    JSONObject mutateVaultPayload(VaultPayloadMutator mutator) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            requirePayload();
+            if (mutator == null) throw new IllegalArgumentException("Vault mutator is required");
+            NativeMutationCommit<JSONObject> commit = mutateNativePayload(
+                -1,
+                latestPayload -> new NativeMutation<>(true, mutator.mutate(latestPayload), null)
+            );
+            refreshSession();
+            return copy(commit.payload);
+        }
     }
 
-    synchronized boolean isUnlockedForPasskeys() {
+    boolean isUnlockedForPasskeys() {
         synchronized (VAULT_MUTATION_LOCK) {
             return isUnlocked();
         }
     }
 
-    synchronized boolean tryUnlockWithEmptyPasswordForPasskeys() {
+    boolean tryUnlockWithEmptyPasswordForPasskeys() {
         return tryUnlockWithEmptyPasswordForAutofill() != null;
     }
 
-    synchronized void unlockForPasskeys(String password) throws Exception {
+    void unlockForPasskeys(String password) throws Exception {
         unlock(password == null ? "" : password);
     }
 
-    synchronized JSONArray listPasskeysForOperation(PasskeyOperation.Operation operation) throws Exception {
+    JSONArray listPasskeysForOperation(PasskeyOperation.Operation operation) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             if (operation == null || operation.kind != PasskeyOperation.Kind.GET) {
                 throw new IllegalArgumentException("Passkey get operation is required");
@@ -508,7 +531,7 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized boolean hasExcludedPasskey(PasskeyOperation.Operation operation) throws Exception {
+    boolean hasExcludedPasskey(PasskeyOperation.Operation operation) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             if (operation == null || operation.kind != PasskeyOperation.Kind.CREATE) {
                 throw new IllegalArgumentException("Passkey create operation is required");
@@ -526,7 +549,7 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject passkeyForAssertion(
+    JSONObject passkeyForAssertion(
         String credentialId,
         PasskeyOperation.Operation operation
     ) throws Exception {
@@ -543,7 +566,7 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject storeCreatedPasskey(
+    JSONObject storeCreatedPasskey(
         JSONObject createdPasskey,
         PasskeyOperation.Operation operation
     ) throws Exception {
@@ -586,14 +609,16 @@ final class AndroidVaultStore {
         return copy(createdPasskey);
     }
 
-    synchronized JSONObject deletePasskeyForWeb(String passkeyId) throws Exception {
-        JSONObject saved = mutateVaultPayload(latest -> {
-            if (!deletePasskeyFromPayload(latest, passkeyId, nowSeconds())) {
-                throw new IllegalArgumentException("PASSKEY_NOT_FOUND");
-            }
-            return latest;
-        });
-        return exposePayloadToWeb(saved);
+    JSONObject deletePasskeyForWeb(String passkeyId) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            JSONObject saved = mutateVaultPayload(latest -> {
+                if (!deletePasskeyFromPayload(latest, passkeyId, nowSeconds())) {
+                    throw new IllegalArgumentException("PASSKEY_NOT_FOUND");
+                }
+                return latest;
+            });
+            return exposePayloadToWeb(saved);
+        }
     }
 
     static boolean deletePasskeyFromPayload(JSONObject latest, String passkeyId, long deletedAt) throws Exception {
@@ -645,9 +670,9 @@ final class AndroidVaultStore {
         return operation.credentialIds.isEmpty() || operation.credentialIds.contains(credentialId);
     }
 
-    synchronized JSONObject changePassword(String newPassword) throws Exception {
-        requirePayload();
+    JSONObject changePassword(String newPassword) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
+            requirePayload();
             byte[] nextSalt = randomBytes(VaultFormat.SALT_BYTES);
             int nextIterations = DEFAULT_ITERATIONS;
             byte[] nextKey = null;
@@ -665,6 +690,7 @@ final class AndroidVaultStore {
                     nextIterations,
                     randomBytes(VaultFormat.NONCE_BYTES)
                 ).put("passwordless", newPassword == null || newPassword.isEmpty());
+                disableDeviceUnlock();
                 writeEnvelope(nextEnvelope);
                 setPayload(current);
                 replaceSessionSecrets(nextKey, nextSalt, nextIterations);
@@ -683,9 +709,9 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject adoptEncryptionFromEnvelope(String envelopeText, String password) throws Exception {
-        requirePayload();
+    JSONObject adoptEncryptionFromEnvelope(String envelopeText, String password) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
+            requirePayload();
             JSONObject targetEnvelope = validateEnvelope(envelopeText);
             DecryptedVault target = null;
             boolean committed = false;
@@ -702,6 +728,7 @@ final class AndroidVaultStore {
                     target.iterations,
                     randomBytes(VaultFormat.NONCE_BYTES)
                 ).put("passwordless", password == null || password.isEmpty());
+                disableDeviceUnlock();
                 writeEnvelope(nextEnvelope);
                 setPayload(current);
                 replaceSessionSecrets(target.key, target.salt, target.iterations);
@@ -717,7 +744,7 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject exportBackup() throws Exception {
+    JSONObject exportBackup() throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             requirePayload();
             return new JSONObject()
@@ -727,48 +754,54 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONObject exportBackupForPayload(JSONObject nextPayload) throws Exception {
-        JSONObject current = requirePayload();
-        JSONObject normalized = normalizePayload(restorePayloadFromWeb(current, nextPayload));
-        requireNoPayloadDowngrade(current, normalized);
-        normalized.put("updatedAt", nowSeconds());
-        JSONObject envelope = encryptWithCurrentKey(normalized);
-        refreshSession();
-        return new JSONObject()
-            .put("content", envelope.toString())
-            .put("vaultPath", vaultFile.getAbsolutePath())
-            .put("updatedAt", normalized.optLong("updatedAt"));
-    }
-
-    synchronized JSONObject previewBackup(String envelopeText) throws Exception {
-        requirePayload();
-        JSONObject envelope = validateEnvelope(envelopeText);
-        JSONObject decrypted = normalizePayload(decryptWithCurrentKey(envelope));
-        refreshSession();
-        return exposePayloadToWeb(decrypted);
-    }
-
-    synchronized JSONObject previewBackupWithPassword(String envelopeText, String password) throws Exception {
-        requirePayload();
-        JSONObject envelope = validateEnvelope(envelopeText);
-        DecryptedVault decrypted = null;
-        try {
-            decrypted = decryptPayloadForPassword(password, envelope);
-            JSONObject normalized = normalizePayload(decrypted.payload);
+    JSONObject exportBackupForPayload(JSONObject nextPayload) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            JSONObject current = requirePayload();
+            JSONObject normalized = normalizePayload(restorePayloadFromWeb(current, nextPayload));
+            requireNoPayloadDowngrade(current, normalized);
+            normalized.put("updatedAt", nowSeconds());
+            JSONObject envelope = encryptWithCurrentKey(normalized);
             refreshSession();
-            return exposePayloadToWeb(normalized);
-        } finally {
-            if (decrypted != null) {
-                wipeBytes(decrypted.key);
-                wipeBytes(decrypted.salt);
+            return new JSONObject()
+                .put("content", envelope.toString())
+                .put("vaultPath", vaultFile.getAbsolutePath())
+                .put("updatedAt", normalized.optLong("updatedAt"));
+        }
+    }
+
+    JSONObject previewBackup(String envelopeText) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            requirePayload();
+            JSONObject envelope = validateEnvelope(envelopeText);
+            JSONObject decrypted = normalizePayload(decryptWithCurrentKey(envelope));
+            refreshSession();
+            return exposePayloadToWeb(decrypted);
+        }
+    }
+
+    JSONObject previewBackupWithPassword(String envelopeText, String password) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            requirePayload();
+            JSONObject envelope = validateEnvelope(envelopeText);
+            DecryptedVault decrypted = null;
+            try {
+                decrypted = decryptPayloadForPassword(password, envelope);
+                JSONObject normalized = normalizePayload(decrypted.payload);
+                refreshSession();
+                return exposePayloadToWeb(normalized);
+            } finally {
+                if (decrypted != null) {
+                    wipeBytes(decrypted.key);
+                    wipeBytes(decrypted.salt);
+                }
             }
         }
     }
 
-    synchronized JSONObject importBackup(String envelopeText) throws Exception {
-        long expectedRevision = VaultFormat.readPayloadRevision(requirePayload());
-        JSONObject envelope = validateEnvelope(envelopeText);
+    JSONObject importBackup(String envelopeText) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
+            long expectedRevision = VaultFormat.readPayloadRevision(requirePayload());
+            JSONObject envelope = validateEnvelope(envelopeText);
             JSONObject currentEnvelope = readEnvelope();
             JSONObject currentPayload = normalizePayload(decryptWithCurrentKey(currentEnvelope));
             requireExpectedRevision(expectedRevision, VaultFormat.readPayloadRevision(currentPayload));
@@ -783,15 +816,16 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized JSONArray queryMatches(String hostname) throws Exception {
+    JSONArray queryMatches(String hostname) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
-            JSONArray matches = queryMatchesFromPayload(requirePayload(), hostname);
+            requirePayload();
+            JSONArray matches = queryMatchesFromIndex(vaultIndex, hostname, false);
             refreshSession();
             return matches;
         }
     }
 
-    synchronized JSONObject getFillPayload(String entryId) throws Exception {
+    JSONObject getFillPayload(String entryId) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             JSONObject result = getFillPayloadFromPayload(requirePayload(), entryId);
             refreshSession();
@@ -799,7 +833,7 @@ final class AndroidVaultStore {
         }
     }
 
-    synchronized String generateTotp(String entryId) throws Exception {
+    String generateTotp(String entryId) throws Exception {
         synchronized (VAULT_MUTATION_LOCK) {
             requirePayload();
             JSONObject entry = vaultIndex == null ? null : vaultIndex.getLogin(entryId);
@@ -816,17 +850,14 @@ final class AndroidVaultStore {
     }
 
     static JSONArray queryMatchesFromPayload(JSONObject sourcePayload, String hostname, boolean includeAll) throws JSONException {
+        return queryMatchesFromIndex(VaultSessionIndex.build(sourcePayload.optJSONArray("entries")), hostname, includeAll);
+    }
+
+    private static JSONArray queryMatchesFromIndex(VaultSessionIndex index, String hostname, boolean includeAll) throws JSONException {
         JSONArray matches = new JSONArray();
-
-        if (includeAll) {
-            for (JSONObject entry : indexedLoginEntries(sourcePayload)) {
-                if (AUTOFILL_NEVER.equals(normalizeAutofillMatchMode(entry.optString("autofillMatchMode")))) continue;
-                matches.put(matchSummary(entry, entry.optJSONArray("domains")));
-            }
-            return matches;
-        }
-
-        for (JSONObject entry : matchingLoginEntries(sourcePayload, hostname)) {
+        List<JSONObject> entries = includeAll ? index.loginEntries() : index.matchingLogins(hostname);
+        for (JSONObject entry : entries) {
+            if (AUTOFILL_NEVER.equals(normalizeAutofillMatchMode(entry.optString("autofillMatchMode")))) continue;
             matches.put(matchSummary(entry, entry.optJSONArray("domains")));
         }
         return matches;
@@ -867,50 +898,52 @@ final class AndroidVaultStore {
             .put("totp", totp);
     }
 
-    synchronized JSONObject saveCapturedLogin(JSONObject capture) throws Exception {
-        requirePayload();
-        JSONObject normalized = normalizeCapture(capture);
-        if (normalized.optString("password").isEmpty()) {
-            throw new IllegalArgumentException("Captured password is empty");
-        }
-        if (identityValues(normalized).isEmpty()) {
-            throw new IllegalArgumentException("Captured account is empty");
-        }
+    JSONObject saveCapturedLogin(JSONObject capture) throws Exception {
+        synchronized (VAULT_MUTATION_LOCK) {
+            requirePayload();
+            JSONObject normalized = normalizeCapture(capture);
+            if (normalized.optString("password").isEmpty()) {
+                throw new IllegalArgumentException("Captured password is empty");
+            }
+            if (identityValues(normalized).isEmpty()) {
+                throw new IllegalArgumentException("Captured account is empty");
+            }
 
-        NativeMutationCommit<CaptureMutationResult> commit = mutateNativePayload(-1, workingPayload -> {
-            JSONObject candidate = findCaptureCandidateInPayload(workingPayload, normalized);
-            if (candidate != null && candidate.optString("password").equals(normalized.optString("password"))) {
+            NativeMutationCommit<CaptureMutationResult> commit = mutateNativePayload(-1, workingPayload -> {
+                JSONObject candidate = findCaptureCandidateInPayload(workingPayload, normalized);
+                if (candidate != null && candidate.optString("password").equals(normalized.optString("password"))) {
+                    return new NativeMutation<>(
+                        false,
+                        workingPayload,
+                        new CaptureMutationResult("skipped", candidate.optString("id"))
+                    );
+                }
+
+                JSONObject entry;
+                String action;
+                if (candidate != null) {
+                    entry = candidate;
+                    applyCaptureUpdate(entry, normalized);
+                    action = "updated";
+                } else {
+                    entry = entryFromCapture(normalized);
+                    prependEntry(workingPayload, entry);
+                    action = "created";
+                }
                 return new NativeMutation<>(
-                    false,
+                    true,
                     workingPayload,
-                    new CaptureMutationResult("skipped", candidate.optString("id"))
+                    new CaptureMutationResult(action, entry.optString("id"))
                 );
-            }
+            });
 
-            JSONObject entry;
-            String action;
-            if (candidate != null) {
-                entry = candidate;
-                applyCaptureUpdate(entry, normalized);
-                action = "updated";
-            } else {
-                entry = entryFromCapture(normalized);
-                prependEntry(workingPayload, entry);
-                action = "created";
-            }
-            return new NativeMutation<>(
-                true,
-                workingPayload,
-                new CaptureMutationResult(action, entry.optString("id"))
-            );
-        });
-
-        JSONObject savedEntry = findEntry(commit.payload.optJSONArray("entries"), commit.value.entryId);
-        if (savedEntry == null) throw new IllegalStateException("Captured login was not persisted");
-        refreshSession();
-        return new JSONObject()
-            .put("action", commit.value.action)
-            .put("entry", matchSummary(savedEntry, savedEntry.optJSONArray("domains")));
+            JSONObject savedEntry = findEntry(commit.payload.optJSONArray("entries"), commit.value.entryId);
+            if (savedEntry == null) throw new IllegalStateException("Captured login was not persisted");
+            refreshSession();
+            return new JSONObject()
+                .put("action", commit.value.action)
+                .put("entry", matchSummary(savedEntry, savedEntry.optJSONArray("domains")));
+        }
     }
 
     private JSONObject normalizeCapture(JSONObject capture) throws JSONException {
@@ -1329,14 +1362,18 @@ final class AndroidVaultStore {
         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(decryptKey, "AES"), new GCMParameterSpec(128, validated.nonce));
         cipher.updateAAD(VaultFormat.aadForVersion(validated.version));
         byte[] plain = cipher.doFinal(validated.ciphertext);
-        if (plain.length > VaultFormat.MAX_PLAINTEXT_BYTES) {
-            throw new IllegalArgumentException("Vault payload is too large");
+        try {
+            if (plain.length > VaultFormat.MAX_PLAINTEXT_BYTES) {
+                throw new IllegalArgumentException("Vault payload is too large");
+            }
+            JSONObject decrypted = new JSONObject(new String(plain, StandardCharsets.UTF_8));
+            VaultFormat.requireMatchingVersions(envelope, decrypted);
+            VaultFormat.requireMatchingRevisions(envelope, decrypted);
+            PasskeySchema.validateDecryptedState(decrypted);
+            return decrypted;
+        } finally {
+            wipeBytes(plain);
         }
-        JSONObject decrypted = new JSONObject(new String(plain, StandardCharsets.UTF_8));
-        VaultFormat.requireMatchingVersions(envelope, decrypted);
-        VaultFormat.requireMatchingRevisions(envelope, decrypted);
-        PasskeySchema.validateDecryptedState(decrypted);
-        return decrypted;
     }
 
     private JSONObject encryptWithCurrentKey(JSONObject sourcePayload) throws Exception {
@@ -1365,13 +1402,18 @@ final class AndroidVaultStore {
             throw new IllegalArgumentException("Vault nonce has an invalid length");
         }
         byte[] plain = sourcePayload.toString().getBytes(StandardCharsets.UTF_8);
-        if (plain.length > VaultFormat.MAX_PLAINTEXT_BYTES) {
-            throw new IllegalArgumentException("Vault payload is too large");
+        byte[] ciphertext;
+        try {
+            if (plain.length > VaultFormat.MAX_PLAINTEXT_BYTES) {
+                throw new IllegalArgumentException("Vault payload is too large");
+            }
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(encryptKey, "AES"), new GCMParameterSpec(128, nonce));
+            cipher.updateAAD(VaultFormat.aadForVersion(version));
+            ciphertext = cipher.doFinal(plain);
+        } finally {
+            wipeBytes(plain);
         }
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(encryptKey, "AES"), new GCMParameterSpec(128, nonce));
-        cipher.updateAAD(VaultFormat.aadForVersion(version));
-        byte[] ciphertext = cipher.doFinal(plain);
 
         JSONObject kdf = new JSONObject()
             .put("name", "PBKDF2-HMAC-SHA256")
@@ -1731,38 +1773,36 @@ final class AndroidVaultStore {
 
     private static byte[] deriveKey(String password, byte[] nextSalt, int nextIterations) throws Exception {
         byte[] passwordBytes = (password == null ? "" : password).getBytes(StandardCharsets.UTF_8);
-        return pbkdf2HmacSha256(passwordBytes, nextSalt, nextIterations, 32);
+        try {
+            return pbkdf2HmacSha256(passwordBytes, nextSalt, nextIterations);
+        } finally {
+            wipeBytes(passwordBytes);
+        }
     }
 
-    private static byte[] pbkdf2HmacSha256(byte[] passwordBytes, byte[] nextSalt, int nextIterations, int keyLengthBytes) throws Exception {
+    private static byte[] pbkdf2HmacSha256(byte[] passwordBytes, byte[] nextSalt, int nextIterations) throws Exception {
         Mac mac = Mac.getInstance("HmacSHA256");
-        byte[] hmacKey = passwordBytes.length == 0 ? new byte[64] : passwordBytes;
-        mac.init(new SecretKeySpec(hmacKey, "HmacSHA256"));
-        int hashLength = mac.getMacLength();
-        int blockCount = (int) Math.ceil((double) keyLengthBytes / hashLength);
-        ByteArrayOutputStream output = new ByteArrayOutputStream(blockCount * hashLength);
-
-        for (int blockIndex = 1; blockIndex <= blockCount; blockIndex += 1) {
-            mac.reset();
-            mac.update(nextSalt);
-            mac.update(int32be(blockIndex));
-            byte[] u = mac.doFinal();
-            byte[] block = u.clone();
+        // AES-256 needs exactly one SHA-256 output block. An empty HMAC key pads to all zeros.
+        mac.init(new SecretKeySpec(passwordBytes.length == 0 ? new byte[64] : passwordBytes, "HmacSHA256"));
+        mac.update(nextSalt);
+        mac.update(int32be(1));
+        byte[] u = mac.doFinal();
+        byte[] block = u.clone();
+        boolean derived = false;
+        try {
             for (int iteration = 1; iteration < nextIterations; iteration += 1) {
-                mac.reset();
-                u = mac.doFinal(u);
+                mac.update(u);
+                mac.doFinal(u, 0);
                 for (int index = 0; index < block.length; index += 1) {
                     block[index] ^= u[index];
                 }
             }
-            output.write(block);
+            derived = true;
+            return block;
+        } finally {
+            wipeBytes(u);
+            if (!derived) wipeBytes(block);
         }
-
-        byte[] derived = output.toByteArray();
-        if (derived.length == keyLengthBytes) return derived;
-        byte[] result = new byte[keyLengthBytes];
-        System.arraycopy(derived, 0, result, 0, keyLengthBytes);
-        return result;
     }
 
     private static byte[] int32be(int value) {
@@ -1956,8 +1996,10 @@ final class AndroidVaultStore {
         String result = value.trim().toLowerCase(Locale.ROOT);
         int schemeIndex = result.indexOf("://");
         if (schemeIndex >= 0) result = result.substring(schemeIndex + 3);
-        int slashIndex = result.indexOf('/');
-        if (slashIndex >= 0) result = result.substring(0, slashIndex);
+        for (char delimiter : new char[] {'/', '?', '#'}) {
+            int index = result.indexOf(delimiter);
+            if (index >= 0) result = result.substring(0, index);
+        }
         int atIndex = result.lastIndexOf('@');
         if (atIndex >= 0) result = result.substring(atIndex + 1);
         int portIndex = result.indexOf(':');
@@ -1984,16 +2026,32 @@ final class AndroidVaultStore {
         try {
             URI parsed = new URI(value == null ? "" : value.trim());
             String scheme = parsed.getScheme() == null ? "" : parsed.getScheme().toLowerCase(Locale.ROOT);
-            String host = parsed.getHost() == null ? "" : parsed.getHost().toLowerCase(Locale.ROOT);
+            String host = parsed.getHost() == null ? "" : parsed.getHost().toLowerCase(Locale.ROOT).replaceAll("\\.+$", "");
             if (!("http".equals(scheme) || "https".equals(scheme)) || host.isEmpty() || parsed.getUserInfo() != null) return "";
             int port = parsed.getPort();
+            if (port > 65535) return "";
             if (("http".equals(scheme) && port == 80) || ("https".equals(scheme) && port == 443)) port = -1;
-            String path = parsed.getRawPath();
-            if (path == null || path.isEmpty()) path = "/";
-            return new URI(scheme, null, host, port, path, parsed.getRawQuery(), null).toASCIIString();
+            String path = normalizeUrlPath(parsed.getRawPath());
+            String origin = scheme + "://" + host + (port < 0 ? "" : ":" + port);
+            String query = parsed.getRawQuery();
+            return new URI(origin + path + (query == null ? "" : "?" + query)).toASCIIString();
         } catch (URISyntaxException exception) {
             return "";
         }
+    }
+
+    private static String normalizeUrlPath(String rawPath) {
+        if (rawPath == null || rawPath.isEmpty()) return "/";
+        List<String> segments = new ArrayList<>();
+        String[] rawSegments = rawPath.substring(1).split("/", -1);
+        for (int index = 0; index < rawSegments.length; index += 1) {
+            String segment = rawSegments[index];
+            String dots = segment.replaceAll("(?i)%2e", ".");
+            if ("..".equals(dots) && !segments.isEmpty()) segments.remove(segments.size() - 1);
+            if (!".".equals(dots) && !"..".equals(dots)) segments.add(segment);
+            else if (index == rawSegments.length - 1) segments.add("");
+        }
+        return "/" + String.join("/", segments);
     }
 
     private static final Set<String> MULTIPART_TLDS = new HashSet<>(Arrays.asList(
@@ -2053,7 +2111,16 @@ final class AndroidVaultStore {
 
     static boolean autofillRuleMatches(String hostname, String savedDomain, String mode) {
         String normalizedMode = normalizeAutofillMatchMode(mode);
-        if (AUTOFILL_NEVER.equals(normalizedMode) || AUTOFILL_URL_PREFIX.equals(normalizedMode)) return false;
+        if (AUTOFILL_NEVER.equals(normalizedMode)) return false;
+        if (AUTOFILL_URL_PREFIX.equals(normalizedMode)) {
+            String page = normalizeUrlPrefix(hostname);
+            String rule = normalizeUrlPrefix(savedDomain);
+            if (page.isEmpty() || rule.isEmpty() || !page.startsWith(rule)) return false;
+            // The normalized origin always ends at a slash, before the rule's path.
+            if (page.length() == rule.length()) return true;
+            return "/?&=".indexOf(rule.charAt(rule.length() - 1)) >= 0
+                || "/?&".indexOf(page.charAt(rule.length())) >= 0;
+        }
         boolean stripWww = AUTOFILL_BASE_DOMAIN.equals(normalizedMode);
         String host = normalizeDomain(hostname, stripWww);
         String domain = normalizeDomain(savedDomain, stripWww);
@@ -2104,12 +2171,6 @@ final class AndroidVaultStore {
         }
     }
 
-    private static List<JSONObject> indexedLoginEntries(JSONObject sourcePayload) {
-        if (vaultIndex != null) return vaultIndex.loginEntries();
-
-        return loginEntriesFromPayload(sourcePayload);
-    }
-
     private static List<JSONObject> loginEntriesFromPayload(JSONObject sourcePayload) {
         List<JSONObject> entries = new ArrayList<>();
         flattenEntries(sourcePayload.optJSONArray("entries"), entries);
@@ -2118,21 +2179,6 @@ final class AndroidVaultStore {
             if ("login".equals(entry.optString("kind")) && STATUS_ACTIVE.equals(normalizeEntryStatus(entry.optString("status")))) logins.add(entry);
         }
         return logins;
-    }
-
-    private static List<JSONObject> matchingLoginEntries(JSONObject sourcePayload, String hostname) {
-        if (vaultIndex != null) return vaultIndex.matchingLogins(hostname);
-
-        return matchingLoginEntriesFromPayload(sourcePayload, hostname);
-    }
-
-    private static List<JSONObject> matchingLoginEntriesFromPayload(JSONObject sourcePayload, String hostname) {
-        String host = normalizeDomain(hostname, false);
-        List<JSONObject> matches = new ArrayList<>();
-        for (JSONObject entry : loginEntriesFromPayload(sourcePayload)) {
-            if (entryMatchesHost(entry, host)) matches.add(entry);
-        }
-        return matches;
     }
 
     private static JSONObject findEntry(JSONArray entries, String entryId) {
@@ -2148,38 +2194,79 @@ final class AndroidVaultStore {
 
     private static String generateTotpCode(String secret) throws Exception {
         if (secret == null || secret.trim().isEmpty()) return "";
-        byte[] key = decodeBase32(secret);
-        long counter = (System.currentTimeMillis() / 1000) / 30;
-        byte[] counterBytes = ByteBuffer.allocate(8).putLong(counter).array();
-        Mac mac = Mac.getInstance("HmacSHA1");
-        mac.init(new SecretKeySpec(key, "HmacSHA1"));
-        byte[] hash = mac.doFinal(counterBytes);
-        int offset = hash[hash.length - 1] & 0x0F;
-        int binary =
-            ((hash[offset] & 0x7F) << 24) |
-            ((hash[offset + 1] & 0xFF) << 16) |
-            ((hash[offset + 2] & 0xFF) << 8) |
-            (hash[offset + 3] & 0xFF);
-        return String.format(Locale.ROOT, "%06d", binary % 1000000);
+        String encodedKey = secret.trim();
+        String algorithm = "HmacSHA1";
+        int digits = 6;
+        long period = 30;
+        if (encodedKey.regionMatches(true, 0, "otpauth:", 0, "otpauth:".length())) {
+            URI uri;
+            try {
+                uri = new URI(encodedKey);
+            } catch (URISyntaxException error) {
+                throw new IllegalArgumentException("Invalid TOTP URI");
+            }
+            if (!"totp".equalsIgnoreCase(uri.getRawAuthority()) || uri.getRawPath() == null
+                || uri.getRawPath().length() <= 1 || uri.getRawQuery() == null) {
+                throw new IllegalArgumentException("Invalid TOTP URI");
+            }
+            Map<String, String> parameters = new HashMap<>();
+            for (String parameter : uri.getRawQuery().split("&")) {
+                String[] pair = parameter.split("=", 2);
+                if (pair.length == 2) {
+                    parameters.putIfAbsent(
+                        URLDecoder.decode(pair[0], "UTF-8"), URLDecoder.decode(pair[1], "UTF-8")
+                    );
+                }
+            }
+            encodedKey = parameters.getOrDefault("secret", "");
+            switch (parameters.getOrDefault("algorithm", "SHA1").toUpperCase(Locale.ROOT)) {
+                case "SHA1": algorithm = "HmacSHA1"; break;
+                case "SHA256": algorithm = "HmacSHA256"; break;
+                case "SHA512": algorithm = "HmacSHA512"; break;
+                default: throw new IllegalArgumentException("Unsupported TOTP algorithm");
+            }
+            digits = Integer.parseInt(parameters.getOrDefault("digits", "6"));
+            period = Long.parseLong(parameters.getOrDefault("period", "30"));
+            if (digits < 6 || digits > 8 || period <= 0) throw new IllegalArgumentException("Invalid TOTP digits or period");
+        }
+
+        byte[] totpKey = decodeBase32(encodedKey);
+        byte[] hash = null;
+        try {
+            long counter = (System.currentTimeMillis() / 1000) / period;
+            byte[] counterBytes = ByteBuffer.allocate(8).putLong(counter).array();
+            Mac mac = Mac.getInstance(algorithm);
+            mac.init(new SecretKeySpec(totpKey, algorithm));
+            hash = mac.doFinal(counterBytes);
+            int offset = hash[hash.length - 1] & 0x0F;
+            int binary = ByteBuffer.wrap(hash, offset, 4).getInt() & Integer.MAX_VALUE;
+            int modulus = digits == 6 ? 1_000_000 : digits == 7 ? 10_000_000 : 100_000_000;
+            return String.format(Locale.ROOT, "%0" + digits + "d", binary % modulus);
+        } finally {
+            wipeBytes(totpKey);
+            wipeBytes(hash);
+        }
     }
 
     private static byte[] decodeBase32(String value) {
         String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-        String cleaned = value.toUpperCase(Locale.ROOT).replaceAll("\\s", "").replace("=", "");
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        String cleaned = value.replaceAll("[\\s\\p{Z}-]", "");
+        if (!cleaned.matches("[A-Za-z2-7]{2,}=*")) throw new IllegalArgumentException("Invalid Base32 TOTP secret");
+        cleaned = cleaned.replaceFirst("=+$", "").toUpperCase(Locale.ROOT);
+        byte[] output = new byte[(int) ((long) cleaned.length() * 5 / 8)];
+        int outputIndex = 0;
         int buffer = 0;
         int bitsLeft = 0;
         for (int index = 0; index < cleaned.length(); index += 1) {
             int next = alphabet.indexOf(cleaned.charAt(index));
-            if (next < 0) continue;
             buffer = (buffer << 5) | next;
             bitsLeft += 5;
             if (bitsLeft >= 8) {
-                output.write((buffer >> (bitsLeft - 8)) & 0xFF);
                 bitsLeft -= 8;
+                output[outputIndex++] = (byte) (buffer >> bitsLeft);
             }
         }
-        return output.toByteArray();
+        return output;
     }
 
     private static final class VaultSessionIndex {
@@ -2210,7 +2297,9 @@ final class AndroidVaultStore {
             if (host.isEmpty()) return new ArrayList<>();
 
             Set<String> candidateIds = new HashSet<>();
-            for (String suffix : domainSuffixes(host)) {
+            Set<String> candidateDomains = new HashSet<>(domainSuffixes(host));
+            candidateDomains.add(extractBaseDomain(normalizeDomain(host)));
+            for (String suffix : candidateDomains) {
                 List<JSONObject> entries = exactDomainEntries.get(suffix);
                 if (entries == null) continue;
                 for (JSONObject entry : entries) {
@@ -2223,7 +2312,7 @@ final class AndroidVaultStore {
                 JSONArray domains = entry.optJSONArray("domains");
                 for (int index = 0; domains != null && index < domains.length(); index += 1) {
                     String domain = normalizeDomain(domains.optString(index));
-                    if (domain.indexOf('*') >= 0 && entryMatchesHost(entry, host)) {
+                    if (domain.indexOf('*') >= 0 && entryMatchesHost(entry, hostname)) {
                         String id = entry.optString("id");
                         if (!id.isEmpty()) candidateIds.add(id);
                         break;
@@ -2235,7 +2324,7 @@ final class AndroidVaultStore {
             if (candidateIds.isEmpty()) return matches;
             for (JSONObject entry : loginEntries) {
                 String id = entry.optString("id");
-                if (candidateIds.contains(id) && !ambiguousIds.contains(id) && entryMatchesHost(entry, host)) matches.add(entry);
+                if (candidateIds.contains(id) && !ambiguousIds.contains(id) && entryMatchesHost(entry, hostname)) matches.add(entry);
             }
             return matches;
         }
@@ -2269,12 +2358,13 @@ final class AndroidVaultStore {
                     if (domain.indexOf('*') >= 0) {
                         hasWildcard = true;
                     } else {
-                        List<JSONObject> list = exactDomainEntries.get(domain);
-                        if (list == null) {
-                            list = new ArrayList<>();
-                            exactDomainEntries.put(domain, list);
+                        exactDomainEntries.computeIfAbsent(domain, ignored -> new ArrayList<>()).add(entry);
+                        if (AUTOFILL_BASE_DOMAIN.equals(mode)) {
+                            String base = extractBaseDomain(domain);
+                            if (!base.equals(domain)) {
+                                exactDomainEntries.computeIfAbsent(base, ignored -> new ArrayList<>()).add(entry);
+                            }
                         }
-                        list.add(entry);
                     }
                 }
                 if (hasWildcard) wildcardEntries.add(entry);

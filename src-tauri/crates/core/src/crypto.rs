@@ -7,9 +7,9 @@ use base64::prelude::*;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const DEFAULT_ITERATIONS: u32 = 390_000;
+pub const DEFAULT_ITERATIONS: u32 = 600_000;
 pub const MIN_KDF_ITERATIONS: u32 = 10_000;
 pub const MAX_KDF_ITERATIONS: u32 = 2_000_000;
 pub const SALT_BYTES: usize = 16;
@@ -112,17 +112,14 @@ pub fn validate_revision(val: u64) -> Result<u64, VaultCryptoError> {
 }
 
 pub fn payload_version_for_encryption(payload: &Value) -> u32 {
-    if let Some(v) = payload.get("version").and_then(|v| v.as_u64()) {
-        if v == 2 {
-            return 2;
-        }
+    if payload.get("version").and_then(Value::as_u64) == Some(2)
+        || payload.get("passkeys").is_some()
+        || payload.get("passkeyTombstones").is_some()
+    {
+        2
+    } else {
+        1
     }
-    if let Some(settings) = payload.get("settings").and_then(|s| s.as_object()) {
-        if settings.get("passkeys").is_some() || settings.get("passkeyTombstones").is_some() {
-            return 2;
-        }
-    }
-    1
 }
 
 pub fn aad_for_version(version: u32) -> Result<&'static [u8], VaultCryptoError> {
@@ -173,7 +170,17 @@ pub fn encrypt_payload_with_key(
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
-    let raw = serde_json::to_vec(payload).map_err(|e| VaultCryptoError::InvalidJson(e.to_string()))?;
+    let mut promoted_payload;
+    let payload = if version == 2 && payload.get("version").and_then(Value::as_u64) == Some(1) {
+        promoted_payload = payload.clone();
+        promoted_payload["version"] = Value::from(2);
+        &promoted_payload
+    } else {
+        payload
+    };
+    let raw = Zeroizing::new(
+        serde_json::to_vec(payload).map_err(|e| VaultCryptoError::InvalidJson(e.to_string()))?,
+    );
     if raw.len() > MAX_PLAINTEXT_BYTES {
         return Err(VaultCryptoError::PayloadTooLarge);
     }
@@ -212,6 +219,26 @@ pub fn decrypt_payload(
     password: &str,
     envelope: &VaultEnvelope,
 ) -> Result<(Value, VaultKey), VaultCryptoError> {
+    let decoded = decode_envelope(envelope)?;
+    let iterations = envelope.kdf.iterations;
+    let key = derive_key(password, &decoded.salt, iterations)?;
+    let vault_key = VaultKey { key, salt: decoded.salt, iterations };
+    let payload = decrypt_validated(&vault_key, envelope, decoded)?;
+    Ok((payload, vault_key))
+}
+
+pub fn validate_envelope(envelope: &VaultEnvelope) -> Result<(), VaultCryptoError> {
+    decode_envelope(envelope).map(|_| ())
+}
+
+struct DecodedEnvelope {
+    salt: [u8; SALT_BYTES],
+    nonce: [u8; NONCE_BYTES],
+    ciphertext: Vec<u8>,
+    aad: &'static [u8],
+}
+
+fn decode_envelope(envelope: &VaultEnvelope) -> Result<DecodedEnvelope, VaultCryptoError> {
     if envelope.format != "mypwdmg-vault" {
         return Err(VaultCryptoError::InvalidFormat);
     }
@@ -225,74 +252,51 @@ pub fn decrypt_payload(
     if !(MIN_KDF_ITERATIONS..=MAX_KDF_ITERATIONS).contains(&iterations) {
         return Err(VaultCryptoError::InvalidIterations(iterations));
     }
-
-    let salt_bytes = BASE64_STANDARD
-        .decode(&envelope.kdf.salt)
-        .map_err(|e| VaultCryptoError::InvalidBase64(e.to_string()))?;
-    if salt_bytes.len() != SALT_BYTES {
-        return Err(VaultCryptoError::InvalidSaltLength(salt_bytes.len()));
+    let aad = aad_for_version(envelope.version)?;
+    if let Some(revision) = envelope.revision {
+        validate_revision(revision)?;
     }
-    let mut salt = [0u8; SALT_BYTES];
-    salt.copy_from_slice(&salt_bytes);
 
-    let key = derive_key(password, &salt, iterations)?;
-    let vault_key = VaultKey {
-        key,
-        salt,
-        iterations,
+    let decode = |text: &str| {
+        BASE64_STANDARD.decode(text).map_err(|e| VaultCryptoError::InvalidBase64(e.to_string()))
     };
-
-    let payload = decrypt_payload_with_key(&vault_key, envelope)?;
-    Ok((payload, vault_key))
+    let salt = decode(&envelope.kdf.salt)?.try_into()
+        .map_err(|bytes: Vec<u8>| VaultCryptoError::InvalidSaltLength(bytes.len()))?;
+    let nonce = decode(&envelope.nonce)?.try_into()
+        .map_err(|bytes: Vec<u8>| VaultCryptoError::InvalidNonceLength(bytes.len()))?;
+    if envelope.ciphertext.len() > MAX_CIPHERTEXT_BYTES.div_ceil(3) * 4 {
+        return Err(VaultCryptoError::PayloadTooLarge);
+    }
+    let ciphertext = decode(&envelope.ciphertext)?;
+    if !(MIN_CIPHERTEXT_BYTES..=MAX_CIPHERTEXT_BYTES).contains(&ciphertext.len()) {
+        return Err(VaultCryptoError::InvalidCiphertextLength(ciphertext.len()));
+    }
+    Ok(DecodedEnvelope { salt, nonce, ciphertext, aad })
 }
 
 pub fn decrypt_payload_with_key(
     vault_key: &VaultKey,
     envelope: &VaultEnvelope,
 ) -> Result<Value, VaultCryptoError> {
-    if envelope.format != "mypwdmg-vault" {
-        return Err(VaultCryptoError::InvalidFormat);
-    }
-    if envelope.cipher != "AES-256-GCM" {
-        return Err(VaultCryptoError::UnsupportedCipher(envelope.cipher.clone()));
-    }
+    decrypt_validated(vault_key, envelope, decode_envelope(envelope)?)
+}
 
-    if envelope.kdf.name != "PBKDF2-HMAC-SHA256" {
-        return Err(VaultCryptoError::UnsupportedKdf(envelope.kdf.name.clone()));
-    }
-    let envelope_salt = BASE64_STANDARD
-        .decode(&envelope.kdf.salt)
-        .map_err(|e| VaultCryptoError::InvalidBase64(e.to_string()))?;
-    if envelope_salt.len() != SALT_BYTES {
-        return Err(VaultCryptoError::InvalidSaltLength(envelope_salt.len()));
-    }
-    if vault_key.iterations != envelope.kdf.iterations || vault_key.salt.as_slice() != envelope_salt.as_slice() {
+fn decrypt_validated(
+    vault_key: &VaultKey,
+    envelope: &VaultEnvelope,
+    decoded: DecodedEnvelope,
+) -> Result<Value, VaultCryptoError> {
+    if vault_key.iterations != envelope.kdf.iterations || vault_key.salt != decoded.salt {
         return Err(VaultCryptoError::WrongPasswordOrCorrupted);
     }
-
-    let aad = aad_for_version(envelope.version)?;
-
-    let nonce_bytes = BASE64_STANDARD
-        .decode(&envelope.nonce)
-        .map_err(|e| VaultCryptoError::InvalidBase64(e.to_string()))?;
-    if nonce_bytes.len() != NONCE_BYTES {
-        return Err(VaultCryptoError::InvalidNonceLength(nonce_bytes.len()));
-    }
-
-    let ciphertext_bytes = BASE64_STANDARD
-        .decode(&envelope.ciphertext)
-        .map_err(|e| VaultCryptoError::InvalidBase64(e.to_string()))?;
-    if ciphertext_bytes.len() < MIN_CIPHERTEXT_BYTES || ciphertext_bytes.len() > MAX_CIPHERTEXT_BYTES {
-        return Err(VaultCryptoError::InvalidCiphertextLength(ciphertext_bytes.len()));
-    }
-
     let cipher = Aes256Gcm::new_from_slice(&vault_key.key)
         .map_err(|_| VaultCryptoError::WrongPasswordOrCorrupted)?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let plaintext_bytes = cipher
-        .decrypt(nonce, Payload { msg: &ciphertext_bytes, aad })
-        .map_err(|_| VaultCryptoError::WrongPasswordOrCorrupted)?;
+    let plaintext_bytes = Zeroizing::new(
+        cipher.decrypt(
+            Nonce::from_slice(&decoded.nonce),
+            Payload { msg: &decoded.ciphertext, aad: decoded.aad },
+        ).map_err(|_| VaultCryptoError::WrongPasswordOrCorrupted)?,
+    );
 
     let payload: Value = serde_json::from_slice(&plaintext_bytes)
         .map_err(|e| VaultCryptoError::InvalidJson(e.to_string()))?;
@@ -303,7 +307,7 @@ pub fn decrypt_payload_with_key(
 
     // Verify version consistency
     if let Some(pv) = payload.get("version").and_then(|v| v.as_u64()) {
-        if pv as u32 != envelope.version {
+        if pv != u64::from(envelope.version) {
             return Err(VaultCryptoError::UnsupportedVersion(envelope.version));
         }
     }
@@ -357,19 +361,25 @@ mod tests {
 
     #[test]
     fn test_v2_passkey_version_promotion() {
-        let payload = json!({
-            "version": 2,
-            "revision": 1,
-            "entries": [],
-            "settings": {
-                "passkeys": []
-            }
-        });
+        for field in ["passkeys", "passkeyTombstones"] {
+            let mut payload = json!({ "version": 1, "revision": 1, "entries": [] });
+            payload[field] = json!([]);
+            let (envelope, _) = encrypt_payload("pass", &payload, Some(10_000)).unwrap();
+            assert_eq!(envelope.version, 2);
 
-        let (envelope, _) = encrypt_payload("pass", &payload, Some(10_000)).unwrap();
-        assert_eq!(envelope.version, 2);
+            let (decrypted, _) = decrypt_payload("pass", &envelope).unwrap();
+            payload["version"] = json!(2);
+            assert_eq!(decrypted, payload);
+        }
+    }
 
-        let (decrypted, _) = decrypt_payload("pass", &envelope).unwrap();
-        assert_eq!(decrypted["version"], 2);
+    #[test]
+    fn test_owasp_default_iterations_and_legacy_390k_compatibility() {
+        assert_eq!(DEFAULT_ITERATIONS, 600_000);
+        let payload = json!({ "version": 2, "revision": 1, "entries": [] });
+        let (legacy_env, _) = encrypt_payload("legacy-pw", &payload, Some(390_000)).unwrap();
+        assert_eq!(legacy_env.kdf.iterations, 390_000);
+        let (decrypted, _) = decrypt_payload("legacy-pw", &legacy_env).unwrap();
+        assert_eq!(decrypted, payload);
     }
 }

@@ -1,8 +1,9 @@
-import type { ApiResult, AppInfo, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, AttachmentObjectRetention, AttachmentObjectWrite, AttachmentStorageState, PluginListenerState } from '../types'
-import { emptyAndroidPasskeyProviderState, fail, ok } from './apiTypes'
-import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes'
+import type { ApiResult, AppInfo, AppUpdateApply, AppUpdateCheck, AppUpdateDownload, AttachmentObjectRetention, AttachmentObjectWrite, AttachmentStorageState, PluginListenerState } from '../types.ts'
+import { emptyAndroidPasskeyProviderState, fail, ok } from './apiTypes.ts'
+import type { StorageState, VaultStorageAdapter, WriteEnvelopeResult } from './storageTypes.ts'
 
-const pywebviewWaitMs = import.meta.env.DEV ? 600 : 15000
+const BRIDGE_READY_TIMEOUT_MS = 1000
+const BRIDGE_POLL_INTERVAL_MS = 25
 
 let pyApiReadyPromise: Promise<ReturnType<typeof pyApi>> | null = null
 
@@ -39,12 +40,18 @@ export const desktopStorageAdapter: VaultStorageAdapter = {
   safeExit: () => call<null>('safeExit')
 }
 
-function getTauriInvoke(): ((cmd: string, payload?: any) => Promise<any>) | null {
-  const w = typeof window !== 'undefined' ? (window as any) : null
-  if (!w) return null
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke
-  if (w.__TAURI__?.core?.invoke) return w.__TAURI__.core.invoke
+type TauriInvoke = (cmd: string, payload?: Record<string, unknown>) => Promise<unknown>
+
+function getTauriInvoke(): TauriInvoke | null {
+  if (typeof window === 'undefined') return null
+  if (window.__TAURI_INTERNALS__?.invoke) return window.__TAURI_INTERNALS__.invoke
+  if (window.__TAURI__?.core?.invoke) return window.__TAURI__.core.invoke
   return null
+}
+
+function getTauriEventListen() {
+  if (typeof window === 'undefined') return null
+  return window.__TAURI__?.event?.listen ?? null
 }
 
 export function callDesktopApi<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
@@ -52,54 +59,87 @@ export function callDesktopApi<T>(method: string, ...args: unknown[]): Promise<A
 }
 
 export async function showDesktopWindow(): Promise<void> {
-  const invoke = getTauriInvoke()
-  if (invoke) {
-    try {
-      await invoke('desktop_api', { method: 'showWindow', args: [] })
-      return
-    } catch {
-      // ignore
+  try {
+    await callDesktopApi('showWindow')
+  } catch {
+    // ignore
+  }
+}
+
+export function subscribeDesktopVaultLocked(handler: (reason: string) => void): () => void {
+  const listen = getTauriEventListen()
+  if (!listen) return () => {}
+
+  let disposed = false
+  let unlisten: (() => void) | null = null
+
+  const onEvent = (event: { payload?: { reason?: unknown } }) => {
+    if (disposed) return
+    const reason = typeof event?.payload?.reason === 'string' && event.payload.reason
+      ? event.payload.reason
+      : 'native'
+    handler(reason)
+  }
+
+  try {
+    const registration = listen<{ reason?: unknown }>('vault-locked', onEvent)
+    Promise.resolve(registration)
+      .then((cleanup) => {
+        if (typeof cleanup !== 'function') return
+        if (disposed) {
+          try { cleanup() } catch { /* ignore */ }
+          return
+        }
+        unlisten = cleanup
+      })
+      .catch(() => {
+        // Ignore registration failure outside Tauri runtime
+      })
+  } catch {
+    return () => {}
+  }
+
+  return () => {
+    disposed = true
+    if (unlisten) {
+      const cleanup = unlisten
+      unlisten = null
+      try { cleanup() } catch { /* ignore */ }
     }
   }
-  void callDesktopApi('showWindow')
+}
+
+async function invokeTauriDesktopApi<T>(invoke: TauriInvoke, method: string, args: unknown[]): Promise<ApiResult<T>> {
+  try {
+    const res = (await invoke('desktop_api', { method, args })) as ApiResult<T>
+    if (res && typeof res === 'object' && 'ok' in res) return res
+    return ok(res as T)
+  } catch (err) {
+    return fail('DESKTOP_API_ERROR', err instanceof Error ? err.message : String(err))
+  }
 }
 
 async function call<T>(method: string, ...args: unknown[]): Promise<ApiResult<T>> {
   const invoke = getTauriInvoke()
-  if (invoke) {
-    try {
-      const res = (await invoke('desktop_api', { method, args })) as ApiResult<T>
-      if (res && typeof res === 'object' && 'ok' in res) return res
-      return ok(res as T)
-    } catch (err) {
-      return fail('DESKTOP_API_ERROR', err instanceof Error ? err.message : String(err))
-    }
-  }
+  if (invoke) return invokeTauriDesktopApi<T>(invoke, method, args)
 
   const api = await resolvePyApi()
   if (api?.[method]) return api[method](...args) as Promise<ApiResult<T>>
 
   const lateInvoke = getTauriInvoke()
-  if (lateInvoke) {
-    try {
-      const res = (await lateInvoke('desktop_api', { method, args })) as ApiResult<T>
-      if (res && typeof res === 'object' && 'ok' in res) return res
-      return ok(res as T)
-    } catch (err) {
-      return fail('DESKTOP_API_ERROR', err instanceof Error ? err.message : String(err))
-    }
-  }
+  if (lateInvoke) return invokeTauriDesktopApi<T>(lateInvoke, method, args)
 
   return fail('DESKTOP_API_NOT_READY', '正在等待桌面端本地 API。若长时间停留，请确认桌面应用正常运行。')
 }
 
 function pyApi() {
-  return window.pywebview?.api
+  return typeof window !== 'undefined' ? window.pywebview?.api : undefined
 }
 
 async function resolvePyApi() {
   const current = pyApi()
   if (current) return current
+  if (typeof window === 'undefined') return undefined
 
   if (!pyApiReadyPromise) {
     pyApiReadyPromise = new Promise<ReturnType<typeof pyApi>>((resolve) => {
@@ -115,12 +155,12 @@ async function resolvePyApi() {
       window.addEventListener('pywebviewready', finish, { once: true })
       let elapsed = 0
       const pollTimer = window.setInterval(() => {
-        elapsed += 25
-        if (pyApi() || getTauriInvoke() || elapsed >= 1000) {
+        elapsed += BRIDGE_POLL_INTERVAL_MS
+        if (pyApi() || getTauriInvoke() || elapsed >= BRIDGE_READY_TIMEOUT_MS) {
           window.clearInterval(pollTimer)
           finish()
         }
-      }, 25)
+      }, BRIDGE_POLL_INTERVAL_MS)
     })
   }
 

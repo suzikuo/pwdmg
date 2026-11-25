@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { showConfirmDialog, showFailToast, showSuccessToast } from 'vant'
+import { showConfirmDialog, showFailToast, showSuccessToast } from '../services/uiFeedback'
 import { api } from '../services/api'
 import type { PluginListenerState } from '../types'
 

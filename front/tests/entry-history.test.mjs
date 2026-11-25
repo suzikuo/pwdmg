@@ -46,6 +46,26 @@ test('restoring a snapshot preserves identity, history, children, and clears new
   assert.equal(entry.children, children)
 })
 
+test('restores kind and copies mutable snapshot values', () => {
+  const snapshot = createEntrySnapshot({
+    ...fixture(),
+    kind: 'secure-note',
+    customFields: [{ id: 'field', value: 'original' }],
+    attachments: [{ id: 'object', name: 'original.txt' }]
+  })
+  const entry = fixture()
+  restoreEntrySnapshot(entry, snapshot)
+  assert.equal(entry.kind, 'secure-note')
+  entry.domains.push('new.example.com')
+  entry.customFields[0].value = 'changed'
+  entry.attachments[0].name = 'changed.txt'
+  entry.customFields.push({ id: 'another-field' })
+  entry.attachments.push({ id: 'another-object' })
+  assert.deepEqual(Array.from(snapshot.domains), fixture().domains)
+  assert.deepEqual(Array.from(snapshot.customFields, (item) => ({ ...item })), [{ id: 'field', value: 'original' }])
+  assert.deepEqual(Array.from(snapshot.attachments, (item) => ({ ...item })), [{ id: 'object', name: 'original.txt' }])
+})
+
 test('summarizes only key field changes and ignores domain ordering and position metadata', () => {
   const before = fixture()
   const after = {

@@ -1,3 +1,5 @@
+export class VaultRevisionConflictError extends Error {}
+
 export function readPersistedRevision(value: unknown, exists = true): number {
   if (!exists) return 0
   const revision = Number((value as { revision?: unknown } | null | undefined)?.revision ?? 1)
@@ -9,12 +11,12 @@ export function readPersistedRevision(value: unknown, exists = true): number {
 
 export function requireCurrentRevision(value: unknown, exists: boolean, expectedRevision: number): number {
   const currentRevision = readPersistedRevision(value, exists)
-  if (currentRevision !== expectedRevision) throw new Error('Vault revision conflict; reload before replacing')
+  if (currentRevision !== expectedRevision) throw new VaultRevisionConflictError('Vault revision conflict; reload before replacing')
   return currentRevision
 }
 
 export function requireNextRevision(value: unknown, currentRevision: number): number {
   const nextRevision = readPersistedRevision(value)
-  if (nextRevision !== currentRevision + 1) throw new Error('Vault revision must advance by exactly one')
+  if (nextRevision !== currentRevision + 1) throw new VaultRevisionConflictError('Vault revision must advance by exactly one')
   return nextRevision
 }

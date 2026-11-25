@@ -1,8 +1,9 @@
-import { emptyAndroidPasskeyProviderState, emptyPluginListenerState, fail, ok } from './apiTypes'
-import { validateAttachmentId, validateEncryptedAttachmentObject } from './attachmentCrypto'
-import { idbGet, idbRunReadwrite, idbSet, idbSetIfCurrentRevision, idbSetIfRevision } from './indexedDbStore'
-import { clearLegacyWebData, currentLegacyStorageSnapshot, hasLegacyWebData } from './legacyWeb'
-import type { VaultStorageAdapter } from './storageTypes'
+import { emptyAndroidPasskeyProviderState, emptyPluginListenerState, fail, ok } from './apiTypes.ts'
+import { validateAttachmentId, validateEncryptedAttachmentObject } from './attachmentCrypto.ts'
+import { idbGet, idbRunReadwrite, type IndexedDbWriteTransaction } from './indexedDbStore.ts'
+import { clearLegacyWebData, currentLegacyStorageSnapshot, hasLegacyWebData } from './legacyWeb.ts'
+import { requireCurrentRevision, requireNextRevision, VaultRevisionConflictError } from './revisionGuards.ts'
+import type { VaultStorageAdapter } from './storageTypes.ts'
 import {
   normalizeWebAttachmentManifest,
   planWebAttachmentCollection
@@ -18,7 +19,13 @@ const VAULT_KEY = 'vault'
 const BACKUPS_KEY = 'importBackups'
 const MAX_IMPORT_BACKUPS = 5
 const VAULT_PATH_LABEL = 'IndexedDB:mypwdmg-web-vault/vault'
-const PACKAGED_APP_VERSION = String(import.meta.env.PACKAGE_VERSION || '0.0.0')
+const PACKAGED_APP_VERSION = (() => {
+  try {
+    return String(import.meta.env.PACKAGE_VERSION || '0.0.0')
+  } catch {
+    return '0.0.0'
+  }
+})()
 const ATTACHMENT_MANIFEST_KEY = 'attachmentManifest'
 const ATTACHMENT_OBJECT_PREFIX = 'attachmentObject:'
 const ATTACHMENT_RETAINED_PREFIX = 'attachmentRetained:'
@@ -46,15 +53,19 @@ export const webStorageAdapter: VaultStorageAdapter = {
   }),
   writeVaultEnvelope: async (envelopeText, protectBackup = false, expectedRevision) => guard(async () => {
     const envelope = JSON.parse(envelopeText) as Record<string, unknown>
-    const current = await idbGet<Record<string, unknown>>(VAULT_KEY)
-    if (current?.version === 2 && envelope.version === 1) {
-      throw new Error('Refusing to replace a version 2 vault with version 1')
-    }
-    const backupPath = protectBackup ? await backupCurrentEnvelope() : ''
-    if (expectedRevision === undefined) await idbSet(VAULT_KEY, envelope)
-    else if (protectBackup) await idbSetIfCurrentRevision(VAULT_KEY, envelope, expectedRevision)
-    else await idbSetIfRevision(VAULT_KEY, envelope, expectedRevision)
-    return { vaultPath: VAULT_PATH_LABEL, backupPath }
+    return idbRunReadwrite(async (transaction) => {
+      const current = await transaction.get<Record<string, unknown>>(VAULT_KEY)
+      if (current?.version === 2 && envelope.version === 1) {
+        throw new Error('Refusing to replace a version 2 vault with version 1')
+      }
+      if (expectedRevision !== undefined) {
+        const currentRevision = requireCurrentRevision(current, current !== null, expectedRevision)
+        if (!protectBackup) requireNextRevision(envelope, currentRevision)
+      }
+      const backupPath = protectBackup && current ? await backupCurrentEnvelope(transaction, current) : ''
+      transaction.set(VAULT_KEY, envelope)
+      return { vaultPath: VAULT_PATH_LABEL, backupPath }
+    })
   }),
   readLegacyLocalStorage: async () => ok(JSON.stringify(currentLegacyStorageSnapshot())),
   getAttachmentStorageState: () => guard(async () => {
@@ -210,19 +221,14 @@ function emptyAndroidAutofillState() {
   }
 }
 
-async function backupCurrentEnvelope() {
-  const envelope = await idbGet<unknown>(VAULT_KEY)
-  if (!envelope) return ''
-  const name = `vault-before-import-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
-  const backups = ((await idbGet<StoredBackup[]>(BACKUPS_KEY)) || [])
-    .concat({
-      name,
-      content: JSON.stringify(envelope, null, 2),
-      createdAt: Date.now()
-    })
+async function backupCurrentEnvelope(transaction: IndexedDbWriteTransaction, envelope: Record<string, unknown>) {
+  const createdAt = Date.now()
+  const name = `vault-before-import-${new Date(createdAt).toISOString().replace(/[:.]/g, '-')}.json`
+  const backups = [{ name, content: JSON.stringify(envelope, null, 2), createdAt },
+    ...((await transaction.get<StoredBackup[]>(BACKUPS_KEY)) || [])]
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, MAX_IMPORT_BACKUPS)
-  await idbSet(BACKUPS_KEY, backups)
+  transaction.set(BACKUPS_KEY, backups)
   return `IndexedDB:${name}`
 }
 
@@ -230,7 +236,8 @@ async function guard<T>(fn: () => Promise<T> | T) {
   try {
     return ok(await fn())
   } catch (error) {
-    return fail('WEB_STORAGE_ERROR', error instanceof Error ? error.message : String(error))
+    const code = error instanceof VaultRevisionConflictError ? 'CONFLICT' : 'WEB_STORAGE_ERROR'
+    return fail(code, error instanceof Error ? error.message : String(error))
   }
 }
 

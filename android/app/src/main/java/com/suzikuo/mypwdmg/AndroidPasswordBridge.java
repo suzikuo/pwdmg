@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.service.autofill.Dataset;
 import android.service.autofill.FillResponse;
@@ -27,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 public final class AndroidPasswordBridge {
@@ -36,13 +37,15 @@ public final class AndroidPasswordBridge {
     private static final int VAULT_EXPORT_REQUEST_CODE = 7432;
     private static final int MAX_VAULT_EXPORT_BYTES = 24 * 1024 * 1024;
     private static final long DOCUMENT_EXPORT_TIMEOUT_MINUTES = 5;
+    private static final long TASK_RESULT_TTL_MS = TimeUnit.MINUTES.toMillis(5);
+    private static final int MAX_UPDATE_TASKS = 16;
     private final Activity activity;
     private final AndroidVaultStore store;
     private final AndroidAttachmentStore attachmentStore;
     private final AndroidUpdateManager updater;
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService documentIoExecutor = Executors.newSingleThreadExecutor();
-    private final ScheduledExecutorService documentExportTimeoutExecutor = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledThreadPoolExecutor documentExportTimeoutExecutor = new ScheduledThreadPoolExecutor(1);
     private final Map<String, UpdateTask> updateTasks = new ConcurrentHashMap<>();
     private final Map<String, DocumentExportTask> documentExportTasks = new ConcurrentHashMap<>();
 
@@ -51,6 +54,16 @@ public final class AndroidPasswordBridge {
         this.store = new AndroidVaultStore(activity);
         this.attachmentStore = new AndroidAttachmentStore(new java.io.File(activity.getFilesDir(), "attachments"));
         this.updater = new AndroidUpdateManager(activity);
+        documentExportTimeoutExecutor.setRemoveOnCancelPolicy(true);
+        documentExportTimeoutExecutor.scheduleWithFixedDelay(this::pruneTaskResults, 1, 1, TimeUnit.MINUTES);
+    }
+
+    private void pruneTaskResults() {
+        long cutoff = SystemClock.elapsedRealtime() - TASK_RESULT_TTL_MS;
+        updateTasks.values().removeIf(task -> task.finishedBefore(cutoff));
+        documentExportTasks.forEach((id, task) -> {
+            if (task.finishedBefore(cutoff)) documentExportTasks.remove(id, task);
+        });
     }
 
     @JavascriptInterface
@@ -442,9 +455,19 @@ public final class AndroidPasswordBridge {
             }
 
             UpdateTask task = new UpdateTask(normalizedAction);
-            updateTasks.put(task.id, task);
-            Future<?> future = updateExecutor.submit(() -> runUpdateTask(task, value));
-            task.setFuture(future);
+            synchronized (updateTasks) {
+                pruneTaskResults();
+                if (updateTasks.size() >= MAX_UPDATE_TASKS) {
+                    throw new IllegalStateException("Too many update tasks");
+                }
+                updateTasks.put(task.id, task);
+                try {
+                    task.setFuture(updateExecutor.submit(() -> runUpdateTask(task, value)));
+                } catch (RuntimeException error) {
+                    updateTasks.remove(task.id, task);
+                    throw error;
+                }
+            }
             return task.toJson();
         });
     }
@@ -452,11 +475,14 @@ public final class AndroidPasswordBridge {
     @JavascriptInterface
     public String getUpdateTaskState(String taskId) {
         return result(() -> {
+            pruneTaskResults();
             UpdateTask task = updateTasks.get(taskId);
             if (task == null) throw new IllegalArgumentException("Update task was not found");
-            JSONObject state = task.toJson();
-            if (task.isFinished()) updateTasks.remove(taskId);
-            return state;
+            synchronized (task) {
+                JSONObject state = task.toJson();
+                if (task.isFinished()) updateTasks.remove(taskId, task);
+                return state;
+            }
         });
     }
 
@@ -492,9 +518,13 @@ public final class AndroidPasswordBridge {
             task.complete(false, "");
             return;
         }
-        task.beginWriting();
+        if (!task.beginWriting()) return;
         DocumentExportTask selected = task;
-        documentIoExecutor.submit(() -> writeDocumentExport(selected, data.getData()));
+        try {
+            documentIoExecutor.submit(() -> writeDocumentExport(selected, data.getData()));
+        } catch (RuntimeException error) {
+            selected.fail(selected.failureCode, error.getMessage());
+        }
     }
 
     void close() {
@@ -502,6 +532,8 @@ public final class AndroidPasswordBridge {
         updateExecutor.shutdownNow();
         documentIoExecutor.shutdownNow();
         documentExportTimeoutExecutor.shutdownNow();
+        updateTasks.clear();
+        documentExportTasks.clear();
     }
 
     private JSONObject autofillState() throws Exception {
@@ -526,19 +558,22 @@ public final class AndroidPasswordBridge {
         int requestCode,
         String failureCode
     ) throws Exception {
-        for (Map.Entry<String, DocumentExportTask> entry : documentExportTasks.entrySet()) {
-            DocumentExportTask task = entry.getValue();
-            if (task.isFinished()) {
-                documentExportTasks.remove(entry.getKey(), task);
-                continue;
-            }
-            throw new IllegalStateException("Another document export is already running");
-        }
-        byte[] content = decodeExportContent(contentBase64, maxBytes);
         String name = normalizeExportName(displayName);
         String type = normalizeExportMimeType(mimeType);
-        DocumentExportTask task = new DocumentExportTask(name, type, content, requestCode, failureCode);
-        documentExportTasks.put(task.id, task);
+        DocumentExportTask exportTask;
+        synchronized (documentExportTasks) {
+            for (Map.Entry<String, DocumentExportTask> entry : documentExportTasks.entrySet()) {
+                DocumentExportTask task = entry.getValue();
+                if (!task.isFinished()) {
+                    throw new IllegalStateException("Another document export is already running");
+                }
+                documentExportTasks.remove(entry.getKey(), task);
+            }
+            byte[] content = decodeExportContent(contentBase64, maxBytes);
+            exportTask = new DocumentExportTask(name, type, content, requestCode, failureCode);
+            documentExportTasks.put(exportTask.id, exportTask);
+        }
+        DocumentExportTask task = exportTask;
         try {
             task.setTimeoutFuture(documentExportTimeoutExecutor.schedule(
                 () -> task.fail("DOCUMENT_EXPORT_TIMEOUT", "Document export timed out"),
@@ -564,11 +599,14 @@ public final class AndroidPasswordBridge {
     }
 
     private JSONObject getDocumentExportTaskState(String taskId) throws Exception {
+        pruneTaskResults();
         DocumentExportTask task = documentExportTasks.get(taskId == null ? "" : taskId);
         if (task == null) throw new IllegalArgumentException("Document export task was not found");
-        JSONObject state = task.toJson();
-        if (task.isFinished()) documentExportTasks.remove(task.id, task);
-        return state;
+        synchronized (task) {
+            JSONObject state = task.toJson();
+            if (task.isFinished()) documentExportTasks.remove(task.id, task);
+            return state;
+        }
     }
 
     private void writeDocumentExport(DocumentExportTask task, Uri uri) {
@@ -718,6 +756,7 @@ public final class AndroidPasswordBridge {
         private byte[] content;
         private Future<?> timeoutFuture;
         private String status = "waiting";
+        private long finishedAt = -1;
         private JSONObject result;
         private String errorCode = "";
         private String errorMessage = "";
@@ -738,6 +777,10 @@ public final class AndroidPasswordBridge {
             return "done".equals(status) || "error".equals(status);
         }
 
+        synchronized boolean finishedBefore(long cutoff) {
+            return finishedAt >= 0 && finishedAt <= cutoff;
+        }
+
         synchronized void setTimeoutFuture(Future<?> future) {
             if (isFinished()) {
                 future.cancel(false);
@@ -746,10 +789,11 @@ public final class AndroidPasswordBridge {
             timeoutFuture = future;
         }
 
-        synchronized void beginWriting() {
-            if (!"waiting".equals(status)) return;
+        synchronized boolean beginWriting() {
+            if (!"waiting".equals(status)) return false;
             status = "running";
             cancelTimeout();
+            return true;
         }
 
         synchronized byte[] takeContent() {
@@ -760,6 +804,7 @@ public final class AndroidPasswordBridge {
 
         synchronized void complete(boolean saved, String path) {
             if (isFinished()) return;
+            finishedAt = SystemClock.elapsedRealtime();
             cancelTimeout();
             try {
                 JSONObject completed = new JSONObject()
@@ -780,6 +825,7 @@ public final class AndroidPasswordBridge {
 
         synchronized void fail(String code, String message) {
             if (isFinished()) return;
+            finishedAt = SystemClock.elapsedRealtime();
             cancelTimeout();
             status = "error";
             errorCode = code == null ? failureCode : code;
@@ -829,6 +875,7 @@ public final class AndroidPasswordBridge {
         final String action;
         private Future<?> future;
         private String status = "running";
+        private long finishedAt = -1;
         private String phase = "check";
         private long downloaded = 0;
         private long total = 0;
@@ -862,6 +909,7 @@ public final class AndroidPasswordBridge {
         }
 
         synchronized void complete(JSONObject result) {
+            this.finishedAt = SystemClock.elapsedRealtime();
             this.status = "done";
             this.result = result;
             this.progress = 100;
@@ -869,9 +917,14 @@ public final class AndroidPasswordBridge {
         }
 
         synchronized void fail(String code, String message) {
+            this.finishedAt = SystemClock.elapsedRealtime();
             this.status = "error";
             this.errorCode = code == null ? "ERROR" : code;
             this.errorMessage = message == null ? "" : message;
+        }
+
+        synchronized boolean finishedBefore(long cutoff) {
+            return finishedAt >= 0 && finishedAt <= cutoff;
         }
 
         synchronized boolean isFinished() {

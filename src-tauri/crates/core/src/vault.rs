@@ -1,9 +1,11 @@
+use crate::api_error::{BAD_PASSWORD_MESSAGE, LOCKED_MESSAGE, MANUAL_LOCK_MESSAGE};
 use crate::crypto::{
-    decrypt_payload, encrypt_payload, encrypt_payload_with_key, VaultEnvelope, VaultKey,
+    decrypt_payload, decrypt_payload_with_key, encrypt_payload, encrypt_payload_with_key,
+    payload_version_for_encryption, validate_envelope, VaultCryptoError, VaultEnvelope, VaultKey,
 };
 use crate::device_unlock::DeviceUnlockStore;
 use crate::domain::{entry_matches_page, normalize_domain};
-use crate::paths::{ensure_app_dir, legacy_local_storage_file, local_backup_dir, vault_file};
+use crate::paths::{atomic_write_file, backup_vault_file, legacy_local_storage_file, vault_file};
 use crate::totp::generate_totp;
 use serde_json::{json, Value};
 use sha2::Digest;
@@ -13,6 +15,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_SESSION_TIMEOUT_SECONDS: u64 = 15 * 60;
+const MAX_VAULT_ENVELOPE_TEXT_LENGTH: usize = 24 * 1024 * 1024;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -28,16 +31,89 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+pub fn default_vault_payload(entries: Vec<Value>) -> Value {
+    json!({
+        "version": 2,
+        "passkeySchemaVersion": 1,
+        "revision": 1,
+        "entries": entries,
+        "passkeys": [],
+        "passkeyTombstones": [],
+        "settings": {
+            "oss": {
+                "bucketName": "",
+                "accessKeyId": "",
+                "accessKeySecret": "",
+                "region": "",
+                "objectName": "pwd/mypwdmg-vault.json",
+                "autoSync": false,
+                "autoSyncIntervalMinutes": 1
+            }
+        },
+        "updatedAt": now_secs()
+    })
+}
+
+fn parse_and_validate_envelope(envelope_text: &str) -> Result<VaultEnvelope, String> {
+    if envelope_text.len() > MAX_VAULT_ENVELOPE_TEXT_LENGTH {
+        return Err("Vault file exceeds the safe size limit".to_string());
+    }
+    let envelope: VaultEnvelope = serde_json::from_str(envelope_text)
+        .map_err(|_| "Vault envelope is not valid JSON".to_string())?;
+    validate_envelope(&envelope).map_err(|e| format!("Invalid vault envelope: {e}"))?;
+    Ok(envelope)
+}
+
+fn map_decrypt_error(err: VaultCryptoError) -> String {
+    match err {
+        VaultCryptoError::WrongPasswordOrCorrupted => BAD_PASSWORD_MESSAGE.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn ensure_v2_metadata(payload: &mut Value) {
+    if payload_version_for_encryption(payload) == 2 {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("version".to_string(), Value::from(2));
+            obj.entry("passkeySchemaVersion".to_string())
+                .or_insert_with(|| Value::from(1));
+            if !obj.get("passkeys").is_some_and(Value::is_array) {
+                obj.insert("passkeys".to_string(), json!([]));
+            }
+            if !obj.get("passkeyTombstones").is_some_and(Value::is_array) {
+                obj.insert("passkeyTombstones".to_string(), json!([]));
+            }
+        }
+    }
+}
+
+fn assert_no_version_downgrade(current: &Value, next: &Value) -> Result<(), String> {
+    if payload_version_for_encryption(current) == 2 && payload_version_for_encryption(next) < 2 {
+        return Err("Refusing to downgrade a version 2 vault".to_string());
+    }
+    Ok(())
+}
+
 pub struct VaultService {
     vault_path: PathBuf,
     legacy_path: PathBuf,
-    session: Mutex<Option<VaultSession>>,
+    state: Mutex<VaultState>,
+    device_unlock: DeviceUnlockStore,
+}
+
+#[derive(Default)]
+struct VaultState {
+    session: Option<VaultSession>,
+    manually_locked: bool,
 }
 
 struct VaultSession {
     payload: Value,
     key: VaultKey,
+    passwordless: Option<bool>,
     expires_at_ms: u64,
+    unlocked_at_ms: u64,
+    vault_file_stamp: Option<(u64, u64)>,
 }
 
 impl Default for VaultService {
@@ -51,7 +127,8 @@ impl VaultService {
         Self {
             vault_path: vault_path.as_ref().to_path_buf(),
             legacy_path: legacy_path.as_ref().to_path_buf(),
-            session: Mutex::new(None),
+            state: Mutex::new(VaultState::default()),
+            device_unlock: DeviceUnlockStore::for_vault(vault_path.as_ref().to_path_buf()),
         }
     }
 
@@ -67,41 +144,80 @@ impl VaultService {
         false
     }
 
+    fn lock_epoch_path(&self) -> PathBuf {
+        self.vault_path.with_file_name("lock.epoch")
+    }
+
+    fn read_lock_epoch(&self) -> Option<u64> {
+        fs::read_to_string(self.lock_epoch_path())
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+    }
+
+    fn write_lock_epoch(&self) {
+        let prev = self.read_lock_epoch().unwrap_or(0);
+        let epoch = now_ms().max(prev).saturating_add(1);
+        let path = self.lock_epoch_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = atomic_write_file(&path, epoch.to_string().as_bytes());
+    }
+
+    fn session_unlock_timestamp(&self) -> u64 {
+        now_ms().max(self.read_lock_epoch().unwrap_or(0))
+    }
+
+    fn current_vault_file_stamp(&self) -> Option<(u64, u64)> {
+        let meta = fs::metadata(&self.vault_path).ok()?;
+        let len = meta.len();
+        let mtime_nanos = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        Some((len, mtime_nanos))
+    }
+
+    fn is_invalidated_by_lock_epoch(&self, session: &VaultSession) -> bool {
+        self.read_lock_epoch()
+            .is_some_and(|epoch| epoch > session.unlocked_at_ms)
+    }
+
     fn check_or_auto_unlock(&self) {
         let now = now_ms();
-        let mut lock_guard = self.session.lock().unwrap();
-        if let Some(session) = lock_guard.as_ref() {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if lock_guard.manually_locked {
+            return;
+        }
+        if let Some(session) = lock_guard.session.as_ref() {
+            if self.is_invalidated_by_lock_epoch(session) {
+                lock_guard.session = None;
+                lock_guard.manually_locked = true;
+                return;
+            }
             if now > session.expires_at_ms {
-                *lock_guard = None;
+                lock_guard.session = None;
             }
         }
-        let is_locked = lock_guard.is_none();
-        drop(lock_guard);
-
-        if is_locked && self.vault_path.exists() {
-            let du = DeviceUnlockStore::default();
-            if let Ok(key_val) = du.read_key() {
-                let _ = self.unlock_with_device_key(&key_val);
+        if lock_guard.session.is_none() && self.vault_path.exists() {
+            if let Ok(key) = self.device_unlock.read_key() {
+                lock_guard.session = self.session_from_device_key(&key).ok();
             }
         }
     }
 
-    pub fn state(&self) -> Value {
+    fn build_state_locked(&self, lock_guard: &VaultState) -> Value {
         let has_vault = self.vault_path.exists();
         let legacy_available = self.legacy_path.exists();
         let passwordless = self.is_passwordless();
-
-        self.check_or_auto_unlock();
-
-        let lock_guard = self.session.lock().unwrap();
-        let (locked, expires_at) = match lock_guard.as_ref() {
-            Some(s) => (false, s.expires_at_ms),
-            None => (true, 0),
+        let now = now_ms();
+        let (locked, expires_at) = match lock_guard.session.as_ref() {
+            Some(s) if now <= s.expires_at_ms => (false, s.expires_at_ms / 1000),
+            _ => (true, 0),
         };
-        drop(lock_guard);
-
-        let du = DeviceUnlockStore::default();
-        let device_unlock = du.state();
+        let device_unlock = self.device_unlock.state();
 
         json!({
             "hasVault": has_vault,
@@ -114,6 +230,14 @@ impl VaultService {
         })
     }
 
+    pub fn state(&self) -> Value {
+        self.check_or_auto_unlock();
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if lock_guard.session.is_some() {
+            let _ = self.refresh_session_if_needed(&mut lock_guard, false);
+        }
+        self.build_state_locked(&lock_guard)
+    }
 
     pub fn storage_state(&self) -> Value {
         json!({
@@ -137,30 +261,44 @@ impl VaultService {
         protect_backup: bool,
         expected_revision: Option<u64>,
     ) -> Result<Value, String> {
-        let envelope: VaultEnvelope = serde_json::from_str(envelope_text)
-            .map_err(|_| "Vault envelope is not valid JSON".to_string())?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.persist_envelope(&mut state, envelope_text, protect_backup, expected_revision)
+    }
 
-        let current_rev = if self.vault_path.exists() {
-            let current_text = fs::read_to_string(&self.vault_path).map_err(|e| e.to_string())?;
-            let curr_env = serde_json::from_str::<VaultEnvelope>(&current_text)
-                .map_err(|_| "Current vault envelope is invalid JSON".to_string())?;
-            curr_env.revision.unwrap_or(1)
-        } else {
-            0
-        };
+    fn persist_envelope(
+        &self,
+        state: &mut VaultState,
+        envelope_text: &str,
+        protect_backup: bool,
+        expected_revision: Option<u64>,
+    ) -> Result<Value, String> {
+        let envelope = parse_and_validate_envelope(envelope_text)?;
 
-        if let Some(exp_rev) = expected_revision {
-            if current_rev != exp_rev {
-                return Err(format!(
-                    "Revision mismatch: expected {}, got {}",
-                    exp_rev, current_rev
-                ));
+        let mut backup_path: Option<PathBuf> = None;
+        let (current_rev, key_changed) = match fs::read(&self.vault_path) {
+            Ok(current_bytes) => {
+                let current: VaultEnvelope = serde_json::from_slice(&current_bytes)
+                    .map_err(|_| "Current vault envelope is invalid JSON".to_string())?;
+                if current.version == 2 && envelope.version == 1 {
+                    return Err("Invalid vault envelope: cannot downgrade a v2 vault to v1".to_string());
+                }
+                let current_rev = current.revision.unwrap_or(1);
+                Self::check_revision(current_rev, expected_revision)?;
+                if protect_backup {
+                    backup_path = Some(backup_vault_file(&self.vault_path, &current_bytes)?);
+                }
+                (current_rev, current.kdf != envelope.kdf)
             }
-        }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Self::check_revision(0, expected_revision)?;
+                (0, false)
+            }
+            Err(e) => return Err(e.to_string()),
+        };
 
         if !protect_backup && current_rev > 0 {
             if let Some(new_rev) = envelope.revision {
-                if new_rev != current_rev + 1 {
+                if current_rev.checked_add(1) != Some(new_rev) {
                     return Err(format!(
                         "Vault revision must advance by exactly one: current {}, next {}",
                         current_rev, new_rev
@@ -172,79 +310,202 @@ impl VaultService {
         if let Some(parent) = self.vault_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-
-        if protect_backup && self.vault_path.exists() {
-            let backup_dir = local_backup_dir();
-            let _ = fs::create_dir_all(&backup_dir);
-            let backup_file = backup_dir.join(format!("vault-backup-{}.json", now_secs()));
-            let _ = fs::copy(&self.vault_path, backup_file);
+        if key_changed || protect_backup {
+            self.device_unlock.disable()?;
         }
-
-        // `std::fs::rename` does not replace an existing destination on
-        // Windows. Use truncate-write here so normal desktop saves and
-        // password changes work after the first revision as well.
-        fs::write(&self.vault_path, envelope_text).map_err(|e| e.to_string())?;
+        atomic_write_file(&self.vault_path, envelope_text.as_bytes())?;
+        if key_changed || protect_backup {
+            state.session = None;
+        }
+        if protect_backup {
+            state.manually_locked = true;
+        }
 
         Ok(json!({
             "saved": true,
-            "revision": envelope.revision.unwrap_or(1)
+            "revision": envelope.revision.unwrap_or(1),
+            "vaultPath": self.vault_path.to_string_lossy(),
+            "backupPath": backup_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
         }))
     }
 
-    pub fn unlock(&self, password: &str) -> Result<Value, String> {
-        if !self.vault_path.exists() {
-            return Err("Vault file does not exist".to_string());
+    fn verify_persisted_envelope(&self, key: &VaultKey, expected_revision: u64) -> Result<(), String> {
+        let persisted_text = self
+            .read_vault_envelope()
+            .map_err(|_| "保险库写入校验失败，修改未生效".to_string())?;
+        let persisted_env = parse_and_validate_envelope(&persisted_text)
+            .map_err(|_| "保险库写入校验失败，修改未生效".to_string())?;
+        let persisted_payload = decrypt_payload_with_key(key, &persisted_env)
+            .map_err(|_| "保险库写入校验失败，修改未生效".to_string())?;
+        let persisted_rev = persisted_payload
+            .get("revision")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        if persisted_rev != expected_revision {
+            return Err("保险库写入校验失败，修改未生效".to_string());
+        }
+        Ok(())
+    }
+
+    fn refresh_session_if_needed<'a>(
+        &self,
+        lock_guard: &'a mut VaultState,
+        extend_timeout: bool,
+    ) -> Result<&'a mut VaultSession, String> {
+        let now = now_ms();
+        let (invalidated_by_epoch, expired, needs_reload, disk_stamp) = {
+            let Some(session) = lock_guard.session.as_ref() else {
+                return Err(LOCKED_MESSAGE.to_string());
+            };
+            if self.is_invalidated_by_lock_epoch(session) {
+                (true, false, false, None)
+            } else if now > session.expires_at_ms {
+                (false, true, false, None)
+            } else {
+                let disk_stamp = self.current_vault_file_stamp();
+                (false, false, disk_stamp != session.vault_file_stamp, disk_stamp)
+            }
+        };
+
+        if invalidated_by_epoch {
+            lock_guard.session = None;
+            lock_guard.manually_locked = true;
+            return Err(LOCKED_MESSAGE.to_string());
+        }
+        if expired {
+            lock_guard.session = None;
+            return Err(LOCKED_MESSAGE.to_string());
         }
 
-        let text = fs::read_to_string(&self.vault_path).map_err(|e| e.to_string())?;
-        let envelope: VaultEnvelope = serde_json::from_str(&text)
-            .map_err(|_| "Vault envelope is not valid JSON".to_string())?;
+        if needs_reload {
+            if disk_stamp.is_none() {
+                lock_guard.session = None;
+                return Err(LOCKED_MESSAGE.to_string());
+            }
+            let reloaded = {
+                let session = lock_guard.session.as_ref().unwrap();
+                let env_text = match self.read_vault_envelope() {
+                    Ok(t) => t,
+                    Err(_) => {
+                        lock_guard.session = None;
+                        return Err(LOCKED_MESSAGE.to_string());
+                    }
+                };
+                let envelope = match parse_and_validate_envelope(&env_text) {
+                    Ok(e) => e,
+                    Err(_) => {
+                        lock_guard.session = None;
+                        return Err(LOCKED_MESSAGE.to_string());
+                    }
+                };
+                let payload = match decrypt_payload_with_key(&session.key, &envelope) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        lock_guard.session = None;
+                        return Err(LOCKED_MESSAGE.to_string());
+                    }
+                };
+                assert_no_version_downgrade(&session.payload, &payload)?;
+                (payload, envelope.passwordless)
+            };
 
-        if password.is_empty() {
-            let du = DeviceUnlockStore::default();
-            if let Ok(key_val) = du.read_key() {
-                if self.unlock_with_device_key(&key_val).is_ok() {
-                    let lock_guard = self.session.lock().unwrap();
-                    let expires_at_ms = lock_guard.as_ref().map(|s| s.expires_at_ms).unwrap_or(0);
-                    return Ok(json!({
-                        "locked": false,
-                        "expiresAt": expires_at_ms
-                    }));
+            let session = lock_guard.session.as_mut().unwrap();
+            session.payload = reloaded.0;
+            session.passwordless = reloaded.1;
+            session.vault_file_stamp = disk_stamp;
+        }
+
+        let session = lock_guard.session.as_mut().unwrap();
+        if extend_timeout {
+            session.expires_at_ms = now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+        }
+        Ok(session)
+    }
+
+    fn require_fresh_session<'a>(
+        &self,
+        lock_guard: &'a mut VaultState,
+    ) -> Result<&'a mut VaultSession, String> {
+        self.refresh_session_if_needed(lock_guard, true)
+    }
+
+    fn check_revision(current: u64, expected: Option<u64>) -> Result<(), String> {
+        if let Some(expected) = expected {
+            if current != expected {
+                return Err(format!("Revision mismatch: expected {expected}, got {current}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn envelope_for_unlock(&self) -> Result<VaultEnvelope, String> {
+        let text = self.read_vault_envelope()?;
+        serde_json::from_str(&text).map_err(|_| BAD_PASSWORD_MESSAGE.to_string())
+    }
+
+    fn unlock_inner(&self, password: &str) -> Result<(Value, Value, u64), String> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let envelope = self.envelope_for_unlock()?;
+
+        if password.is_empty() && !state.manually_locked {
+            if let Ok(key) = self.device_unlock.read_key() {
+                if let Ok(session) = self.session_from_device_key(&key) {
+                    let expires_at_secs = session.expires_at_ms / 1000;
+                    let payload = session.payload.clone();
+                    state.session = Some(session);
+                    state.manually_locked = false;
+                    let state_val = self.build_state_locked(&state);
+                    return Ok((state_val, payload, expires_at_secs));
                 }
             }
         }
 
         let (payload, key) = decrypt_payload(password, &envelope)
-            .map_err(|e| e.to_string())?;
-
+            .map_err(|_| BAD_PASSWORD_MESSAGE.to_string())?;
         let expires_at_ms = now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
-        let mut lock_guard = self.session.lock().unwrap();
-        *lock_guard = Some(VaultSession {
-            payload,
+        let expires_at_secs = expires_at_ms / 1000;
+        let passwordless = Some(password.is_empty());
+        state.session = Some(VaultSession {
+            payload: payload.clone(),
             key,
+            passwordless: envelope.passwordless.or(passwordless),
             expires_at_ms,
+            unlocked_at_ms: self.session_unlock_timestamp(),
+            vault_file_stamp: self.current_vault_file_stamp(),
         });
+        state.manually_locked = false;
+        let state_val = self.build_state_locked(&state);
+        Ok((state_val, payload, expires_at_secs))
+    }
 
+    pub fn unlock(&self, password: &str) -> Result<Value, String> {
+        let (_, _, expires_at_secs) = self.unlock_inner(password)?;
         Ok(json!({
             "locked": false,
-            "expiresAt": expires_at_ms
+            "expiresAt": expires_at_secs
+        }))
+    }
+
+    pub fn unlock_with_payload(&self, password: &str) -> Result<Value, String> {
+        let (state_val, payload, _) = self.unlock_inner(password)?;
+        Ok(json!({
+            "state": state_val,
+            "payload": payload,
         }))
     }
 
     pub fn lock(&self) -> Value {
-        let mut lock_guard = self.session.lock().unwrap();
-        *lock_guard = None;
-        json!({
-            "locked": true,
-            "expiresAt": 0
-        })
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        lock_guard.manually_locked = true;
+        lock_guard.session = None;
+        self.write_lock_epoch();
+        self.build_state_locked(&lock_guard)
     }
 
-    /// Internal: unlock the vault using a pre-loaded device key record (no password needed).
-    fn unlock_with_device_key(&self, key_val: &Value) -> Result<(), String> {
-        if !self.vault_path.exists() {
-            return Err("Vault file does not exist".to_string());
-        }
+    fn session_from_device_key(&self, key_val: &Value) -> Result<VaultSession, String> {
         let key_b64 = key_val.get("key").and_then(|k| k.as_str()).ok_or("Missing key")?;
         let salt_b64 = key_val.get("salt").and_then(|s| s.as_str()).ok_or("Missing salt")?;
         let iterations = key_val.get("iterations").and_then(|i| i.as_u64()).ok_or("Missing iterations")?;
@@ -256,171 +517,370 @@ impl VaultService {
         let key_arr: [u8; 32] = key_bytes.try_into().map_err(|_| "Device key wrong length (expected 32 bytes)".to_string())?;
         let salt_arr: [u8; 16] = salt_bytes.try_into().map_err(|_| "Device salt wrong length (expected 16 bytes)".to_string())?;
 
-        let text = fs::read_to_string(&self.vault_path).map_err(|e| e.to_string())?;
-        let envelope: VaultEnvelope = serde_json::from_str(&text)
-            .map_err(|_| "Vault envelope is not valid JSON".to_string())?;
-
+        let envelope = self.envelope_for_unlock()?;
         let vault_key = VaultKey {
             key: key_arr,
             salt: salt_arr,
-            iterations: iterations as u32,
+            iterations: u32::try_from(iterations).map_err(|_| "Invalid device key iterations")?,
         };
-
-        use crate::crypto::decrypt_payload_with_key;
         let payload = decrypt_payload_with_key(&vault_key, &envelope)
-            .map_err(|e| e.to_string())?;
-
-        let expires_at_ms = now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
-        let mut lock_guard = self.session.lock().unwrap();
-        *lock_guard = Some(VaultSession {
+            .map_err(|_| BAD_PASSWORD_MESSAGE.to_string())?;
+        Ok(VaultSession {
             payload,
             key: vault_key,
-            expires_at_ms,
-        });
-        Ok(())
+            passwordless: envelope.passwordless,
+            expires_at_ms: now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000,
+            unlocked_at_ms: self.session_unlock_timestamp(),
+            vault_file_stamp: self.current_vault_file_stamp(),
+        })
     }
 
-
     pub fn device_unlock_state(&self) -> Value {
-        DeviceUnlockStore::default().state()
+        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.device_unlock.state()
     }
 
     pub fn enable_device_unlock(&self, password: &str, reauth_seconds: u64) -> Result<Value, String> {
-        let text = fs::read_to_string(&self.vault_path).map_err(|e| e.to_string())?;
-        let envelope: VaultEnvelope = serde_json::from_str(&text)
-            .map_err(|_| "Vault envelope is not valid JSON".to_string())?;
-        let (_payload, vault_key) = decrypt_payload(password, &envelope)
-            .map_err(|_| "密码不正确".to_string())?;
-
-        DeviceUnlockStore::default().enable(&vault_key, reauth_seconds)
+        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let envelope = self.envelope_for_unlock()?;
+        let (_, vault_key) = decrypt_payload(password, &envelope)
+            .map_err(|_| BAD_PASSWORD_MESSAGE.to_string())?;
+        self.device_unlock.enable(&vault_key, reauth_seconds)
     }
 
     pub fn disable_device_unlock(&self) -> Result<Value, String> {
-        DeviceUnlockStore::default().disable()
+        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.device_unlock.disable()
     }
 
     pub fn read_device_unlock_key(&self) -> Result<Value, String> {
-        DeviceUnlockStore::default().read_key()
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let key = self.device_unlock.read_key()?;
+        state.session = Some(self.session_from_device_key(&key)?);
+        state.manually_locked = false;
+        Ok(key)
+    }
+
+    fn quick_unlock_inner(&self) -> Result<(Value, Value), String> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.manually_locked {
+            return Err(MANUAL_LOCK_MESSAGE.to_string());
+        }
+        let key = self.device_unlock.read_key()?;
+        let session = match self.session_from_device_key(&key) {
+            Ok(session) => session,
+            Err(err) => {
+                let _ = self.device_unlock.disable();
+                return Err(err);
+            }
+        };
+        let payload = session.payload.clone();
+        state.session = Some(session);
+        state.manually_locked = false;
+        let state_val = self.build_state_locked(&state);
+        Ok((state_val, payload))
+    }
+
+    pub fn quick_unlock(&self) -> Result<Value, String> {
+        let (_, payload) = self.quick_unlock_inner()?;
+        Ok(payload)
+    }
+
+    pub fn quick_unlock_with_state(&self) -> Result<Value, String> {
+        let (state_val, payload) = self.quick_unlock_inner()?;
+        Ok(json!({
+            "state": state_val,
+            "payload": payload,
+        }))
     }
 
     pub fn create_vault(&self, password: &str, _import_legacy: bool) -> Result<Value, String> {
-        ensure_app_dir().map_err(|e| e.to_string())?;
-        let initial_payload = json!({
-            "version": 1,
-            "revision": 1,
-            "entries": [],
-            "settings": {}
-        });
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if self.vault_path.exists() {
+            return Err("Vault already exists; unlock it instead".to_string());
+        }
+
+        let mut initial_payload = default_vault_payload(Vec::new());
+        ensure_v2_metadata(&mut initial_payload);
 
         let (envelope, vault_key) = encrypt_payload(password, &initial_payload, None)
             .map_err(|e| e.to_string())?;
 
         let env_text = serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?;
-        self.write_vault_envelope(&env_text, false, None)?;
+        self.persist_envelope(&mut state, &env_text, false, Some(0))?;
+        self.verify_persisted_envelope(&vault_key, 1)?;
 
         let expires_at_ms = now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
-        let mut lock_guard = self.session.lock().unwrap();
-        *lock_guard = Some(VaultSession {
-            payload: initial_payload,
+        let expires_at_secs = expires_at_ms / 1000;
+        state.session = Some(VaultSession {
+            payload: initial_payload.clone(),
             key: vault_key,
+            passwordless: envelope.passwordless,
             expires_at_ms,
+            unlocked_at_ms: self.session_unlock_timestamp(),
+            vault_file_stamp: self.current_vault_file_stamp(),
         });
+        state.manually_locked = false;
+        let state_val = self.build_state_locked(&state);
 
         Ok(json!({
             "created": true,
             "locked": false,
-            "expiresAt": expires_at_ms
+            "expiresAt": expires_at_secs,
+            "state": state_val,
+            "payload": initial_payload,
+            "migrated": 0,
+            "legacyCleanupPending": false,
         }))
     }
 
     pub fn get_vault(&self) -> Result<Value, String> {
-        let mut lock_guard = self.session.lock().unwrap();
-        let now = now_ms();
-        if let Some(session) = lock_guard.as_mut() {
-            if now > session.expires_at_ms {
-                *lock_guard = None;
-                return Err("Vault is locked".to_string());
-            }
-            session.expires_at_ms = now + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
-            return Ok(session.payload.clone());
-        }
-        Err("Vault is locked".to_string())
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.require_fresh_session(&mut lock_guard)?;
+        Ok(session.payload.clone())
     }
 
     pub fn save_vault(&self, new_payload: &Value, expected_revision: Option<u64>) -> Result<Value, String> {
-        let mut lock_guard = self.session.lock().unwrap();
-        let now = now_ms();
-        let session = match lock_guard.as_mut() {
-            Some(s) if now <= s.expires_at_ms => s,
-            _ => {
-                *lock_guard = None;
-                return Err("Vault is locked".to_string());
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (current_rev, session_key, session_passwordless) = {
+            let session = self.require_fresh_session(&mut lock_guard)?;
+            let current_rev = session.payload.get("revision").and_then(|r| r.as_u64()).unwrap_or(1);
+            let effective_expected = expected_revision
+                .or_else(|| new_payload.get("revision").and_then(Value::as_u64));
+            if let Some(exp) = effective_expected {
+                if exp != current_rev {
+                    return Err(format!("Conflict: current revision is {}, expected {}", current_rev, exp));
+                }
             }
+            assert_no_version_downgrade(&session.payload, new_payload)?;
+            (current_rev, session.key.clone(), session.passwordless)
         };
 
-        let current_rev = session.payload.get("revision").and_then(|r| r.as_u64()).unwrap_or(1);
-        if let Some(exp) = expected_revision {
-            if exp != current_rev {
-                return Err(format!("Conflict: current revision is {}, expected {}", current_rev, exp));
-            }
-        }
-
-        let next_rev = current_rev + 1;
+        let next_rev = current_rev.checked_add(1).ok_or("Invalid vault revision")?;
         let mut payload_to_save = new_payload.clone();
-        if let Some(obj) = payload_to_save.as_object_mut() {
-            obj.insert("revision".to_string(), Value::Number(next_rev.into()));
-        }
+        let object = payload_to_save
+            .as_object_mut()
+            .ok_or("Invalid vault payload: expected an object")?;
+        object.insert("revision".to_string(), Value::from(next_rev));
+        object.insert("updatedAt".to_string(), Value::from(now_secs()));
+        ensure_v2_metadata(&mut payload_to_save);
 
-        let envelope = encrypt_payload_with_key(&session.key, &payload_to_save)
-            .map_err(|e| e.to_string())?;
+        let mut envelope = encrypt_payload_with_key(&session_key, &payload_to_save)
+            .map_err(|e| format!("Invalid vault payload: {e}"))?;
+        envelope.passwordless = session_passwordless;
         let env_text = serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?;
-        drop(lock_guard);
+        self.persist_envelope(&mut lock_guard, &env_text, false, Some(current_rev))?;
 
-        self.write_vault_envelope(&env_text, false, Some(current_rev))?;
-
-        let mut lock_guard = self.session.lock().unwrap();
-        if let Some(s) = lock_guard.as_mut() {
-            s.payload = payload_to_save;
-            s.expires_at_ms = now + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+        let new_stamp = self.current_vault_file_stamp();
+        if let Some(session) = lock_guard.session.as_mut() {
+            session.payload = payload_to_save.clone();
+            session.expires_at_ms = now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+            session.vault_file_stamp = new_stamp;
         }
 
-        Ok(json!({ "saved": true, "revision": next_rev }))
+        Ok(json!({
+            "saved": true,
+            "revision": next_rev,
+            "payload": payload_to_save,
+        }))
+    }
+
+    fn change_password_inner(
+        &self,
+        current_password: Option<&str>,
+        new_password: &str,
+    ) -> Result<(Value, Value), String> {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (current_rev, mut payload) = {
+            let session = self.require_fresh_session(&mut lock_guard)?;
+            let current_rev = session.payload.get("revision").and_then(Value::as_u64).unwrap_or(1);
+            (current_rev, session.payload.clone())
+        };
+
+        if let Some(cur_pw) = current_password {
+            let current_envelope = self.envelope_for_unlock()?;
+            let effective_pw = if current_envelope.passwordless == Some(true) && cur_pw.is_empty() {
+                ""
+            } else {
+                cur_pw
+            };
+            decrypt_payload(effective_pw, &current_envelope)
+                .map_err(|_| BAD_PASSWORD_MESSAGE.to_string())?;
+        }
+
+        let next_rev = current_rev.checked_add(1).ok_or("Invalid vault revision")?;
+        payload["revision"] = json!(next_rev);
+        payload["updatedAt"] = json!(now_secs());
+        ensure_v2_metadata(&mut payload);
+
+        let (envelope, key) = encrypt_payload(new_password, &payload, None)
+            .map_err(|e| format!("Invalid vault payload: {e}"))?;
+        let env_text = serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?;
+        self.device_unlock.disable()?;
+        self.persist_envelope(&mut lock_guard, &env_text, false, Some(current_rev))?;
+        self.verify_persisted_envelope(&key, next_rev)?;
+
+        lock_guard.session = Some(VaultSession {
+            payload: payload.clone(),
+            key,
+            passwordless: envelope.passwordless,
+            expires_at_ms: now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000,
+            unlocked_at_ms: self.session_unlock_timestamp(),
+            vault_file_stamp: self.current_vault_file_stamp(),
+        });
+        let state_val = self.build_state_locked(&lock_guard);
+        Ok((state_val, payload))
     }
 
     pub fn change_password(&self, new_password: &str) -> Result<Value, String> {
-        let mut lock_guard = self.session.lock().unwrap();
-        let now = now_ms();
-        let session = match lock_guard.as_mut() {
-            Some(s) if now <= s.expires_at_ms => s,
-            _ => {
-                *lock_guard = None;
-                return Err("Vault is locked".to_string());
-            }
+        let (state_val, payload) = self.change_password_inner(None, new_password)?;
+        Ok(json!({
+            "passwordChanged": true,
+            "state": state_val,
+            "payload": payload,
+        }))
+    }
+
+    pub fn change_password_verified(
+        &self,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<Value, String> {
+        let (state_val, payload) = self.change_password_inner(Some(current_password), new_password)?;
+        Ok(json!({
+            "state": state_val,
+            "payload": payload,
+        }))
+    }
+
+    pub fn adopt_encryption_from_envelope(
+        &self,
+        envelope_text: &str,
+        password: &str,
+    ) -> Result<Value, String> {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (current_rev, mut next_payload) = {
+            let session = self.require_fresh_session(&mut lock_guard)?;
+            let current_rev = session.payload.get("revision").and_then(Value::as_u64).unwrap_or(1);
+            (current_rev, session.payload.clone())
         };
 
-        let (new_envelope, new_key) = encrypt_payload(new_password, &session.payload, None)
-            .map_err(|e| e.to_string())?;
-        let env_text = serde_json::to_string_pretty(&new_envelope).map_err(|e| e.to_string())?;
+        let target_envelope = parse_and_validate_envelope(envelope_text)?;
+        let (_, target_key) = decrypt_payload(password, &target_envelope)
+            .map_err(map_decrypt_error)?;
 
-        let temp_path = self.vault_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-        fs::write(&temp_path, &env_text).map_err(|e| e.to_string())?;
-        fs::rename(&temp_path, &self.vault_path).map_err(|e| e.to_string())?;
+        let next_rev = current_rev.checked_add(1).ok_or("Invalid vault revision")?;
+        next_payload["revision"] = json!(next_rev);
+        next_payload["updatedAt"] = json!(now_secs());
+        ensure_v2_metadata(&mut next_payload);
 
-        session.key = new_key;
-        session.expires_at_ms = now + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+        let mut next_envelope = encrypt_payload_with_key(&target_key, &next_payload)
+            .map_err(|e| format!("Invalid vault payload: {e}"))?;
+        next_envelope.passwordless = Some(password.is_empty());
+        let env_text = serde_json::to_string_pretty(&next_envelope).map_err(|e| e.to_string())?;
 
-        Ok(json!({ "passwordChanged": true }))
+        self.device_unlock.disable()?;
+        self.persist_envelope(&mut lock_guard, &env_text, false, Some(current_rev))?;
+        self.verify_persisted_envelope(&target_key, next_rev)?;
+
+        lock_guard.session = Some(VaultSession {
+            payload: next_payload.clone(),
+            key: target_key,
+            passwordless: next_envelope.passwordless,
+            expires_at_ms: now_ms() + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000,
+            unlocked_at_ms: self.session_unlock_timestamp(),
+            vault_file_stamp: self.current_vault_file_stamp(),
+        });
+        let state_val = self.build_state_locked(&lock_guard);
+        Ok(json!({
+            "state": state_val,
+            "payload": next_payload,
+        }))
     }
 
     pub fn export_backup(&self) -> Result<Value, String> {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let _session = self.require_fresh_session(&mut lock_guard)?;
         let envelope_text = self.read_vault_envelope()?;
-        Ok(json!({ "envelope": envelope_text }))
+        Ok(json!({
+            "content": envelope_text,
+            "envelope": envelope_text,
+            "vaultPath": self.vault_path.to_string_lossy(),
+            "updatedAt": now_secs(),
+        }))
+    }
+
+    pub fn export_backup_for_payload(&self, payload: &Value) -> Result<Value, String> {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (session_key, session_passwordless) = {
+            let session = self.require_fresh_session(&mut lock_guard)?;
+            if !payload.is_object() {
+                return Err("Invalid vault payload: expected an object".to_string());
+            }
+            assert_no_version_downgrade(&session.payload, payload)?;
+            (session.key.clone(), session.passwordless)
+        };
+
+        let updated_at = now_secs();
+        let mut next_payload = payload.clone();
+        if let Some(obj) = next_payload.as_object_mut() {
+            obj.insert("updatedAt".to_string(), Value::from(updated_at));
+        }
+        ensure_v2_metadata(&mut next_payload);
+
+        let mut envelope = encrypt_payload_with_key(&session_key, &next_payload)
+            .map_err(|e| format!("Invalid vault payload: {e}"))?;
+        envelope.passwordless = session_passwordless.or_else(|| Some(self.is_passwordless()));
+        let content = serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?;
+
+        Ok(json!({
+            "content": content,
+            "vaultPath": self.vault_path.to_string_lossy(),
+            "updatedAt": updated_at,
+        }))
+    }
+
+    pub fn preview_backup(&self, envelope_text: &str) -> Result<Value, String> {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.require_fresh_session(&mut lock_guard)?;
+        let envelope = parse_and_validate_envelope(envelope_text)?;
+        let decrypted = decrypt_payload_with_key(&session.key, &envelope)
+            .map_err(map_decrypt_error)?;
+        Ok(json!({ "payload": decrypted }))
+    }
+
+    pub fn preview_backup_with_password(
+        &self,
+        envelope_text: &str,
+        password: &str,
+    ) -> Result<Value, String> {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let _session = self.require_fresh_session(&mut lock_guard)?;
+        let envelope = parse_and_validate_envelope(envelope_text)?;
+        let (decrypted, _temp_key) = decrypt_payload(password, &envelope)
+            .map_err(map_decrypt_error)?;
+        Ok(json!({ "payload": decrypted }))
     }
 
     pub fn import_backup(&self, envelope_text: &str) -> Result<Value, String> {
         self.write_vault_envelope(envelope_text, true, None)?;
-        self.lock();
         Ok(json!({ "imported": true }))
+    }
+
+    pub fn import_backup_with_state(&self, envelope_text: &str) -> Result<Value, String> {
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let expected_rev = {
+            let session = self.require_fresh_session(&mut lock_guard)?;
+            session.payload.get("revision").and_then(Value::as_u64)
+        };
+        let _ = parse_and_validate_envelope(envelope_text)?;
+        let write_res = self.persist_envelope(&mut lock_guard, envelope_text, true, expected_rev)?;
+        let state_val = self.build_state_locked(&lock_guard);
+        Ok(json!({
+            "state": state_val,
+            "backupPath": write_res.get("backupPath").and_then(Value::as_str).unwrap_or(""),
+            "vaultPath": self.vault_path.to_string_lossy(),
+        }))
     }
 
     pub fn read_legacy_local_storage(&self) -> Result<String, String> {
@@ -447,16 +907,8 @@ impl VaultService {
 
     pub fn query_matches(&self, hostname: &str, page_url: &str) -> Result<Vec<Value>, String> {
         self.check_or_auto_unlock();
-        let mut lock_guard = self.session.lock().unwrap();
-        let now = now_ms();
-        let session = match lock_guard.as_mut() {
-            Some(s) if now <= s.expires_at_ms => s,
-            _ => {
-                *lock_guard = None;
-                return Err("Vault is locked".to_string());
-            }
-        };
-        session.expires_at_ms = now + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.require_fresh_session(&mut lock_guard)?;
 
         let host = normalize_domain(hostname, false);
         let mut results = Vec::new();
@@ -513,16 +965,8 @@ impl VaultService {
         page_url: &str,
     ) -> Result<Value, String> {
         self.check_or_auto_unlock();
-        let mut lock_guard = self.session.lock().unwrap();
-        let now = now_ms();
-        let session = match lock_guard.as_mut() {
-            Some(s) if now <= s.expires_at_ms => s,
-            _ => {
-                *lock_guard = None;
-                return Err("Vault is locked".to_string());
-            }
-        };
-        session.expires_at_ms = now + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.require_fresh_session(&mut lock_guard)?;
 
         let host = normalize_domain(hostname, false);
         if host.is_empty() {
@@ -558,16 +1002,8 @@ impl VaultService {
 
     pub fn list_save_targets(&self) -> Result<Value, String> {
         self.check_or_auto_unlock();
-        let mut lock_guard = self.session.lock().unwrap();
-        let now = now_ms();
-        let session = match lock_guard.as_mut() {
-            Some(s) if now <= s.expires_at_ms => s,
-            _ => {
-                *lock_guard = None;
-                return Err("Vault is locked".to_string());
-            }
-        };
-        session.expires_at_ms = now + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.require_fresh_session(&mut lock_guard)?;
 
         let mut folders = Vec::new();
         if let Some(entries) = session.payload.get("entries").and_then(|e| e.as_array()) {
@@ -600,16 +1036,8 @@ impl VaultService {
 
     pub fn preview_captured_login(&self, capture: &Value) -> Result<Value, String> {
         self.check_or_auto_unlock();
-        let mut lock_guard = self.session.lock().unwrap();
-        let now = now_ms();
-        let session = match lock_guard.as_mut() {
-            Some(s) if now <= s.expires_at_ms => s,
-            _ => {
-                *lock_guard = None;
-                return Err("Vault is locked".to_string());
-            }
-        };
-        session.expires_at_ms = now + DEFAULT_SESSION_TIMEOUT_SECONDS * 1000;
+        let mut lock_guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let session = self.require_fresh_session(&mut lock_guard)?;
 
         let hostname = capture.get("hostname").and_then(|h| h.as_str()).unwrap_or("");
         let username = capture.get("username").and_then(|u| u.as_str()).unwrap_or("");
@@ -751,7 +1179,8 @@ impl VaultService {
             result_entry = new_entry;
         }
 
-        let save_res = self.save_vault(&vault_payload, None)?;
+        let expected_revision = vault_payload.get("revision").and_then(Value::as_u64).unwrap_or(1);
+        let save_res = self.save_vault(&vault_payload, Some(expected_revision))?;
         Ok(json!({
             "action": action,
             "entry": result_entry,
@@ -912,6 +1341,525 @@ mod tests {
         assert_eq!(m["domains"], json!(["example.com"]));
         assert_eq!(m["hasPassword"], true);
         assert_eq!(m["hasTotp"], false);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_change_password_atomic_revision_and_v2_downgrade_guard() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_chpwd_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file.clone(), legacy_file);
+
+        let v2_payload = json!({
+            "version": 2,
+            "revision": 1,
+            "entries": [],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (env_v2, _) = encrypt_payload("old-pass", &v2_payload, Some(10_000)).unwrap();
+        assert_eq!(env_v2.version, 2);
+        service
+            .write_vault_envelope(&serde_json::to_string(&env_v2).unwrap(), false, Some(0))
+            .unwrap();
+
+        // v2 -> v1 downgrade must be rejected
+        let (env_v1, _) = encrypt_payload("old-pass", &json!({"version": 1, "revision": 2, "entries": []}), Some(10_000)).unwrap();
+        assert_eq!(env_v1.version, 1);
+        let downgrade = service.write_vault_envelope(&serde_json::to_string(&env_v1).unwrap(), false, Some(1));
+        assert!(downgrade.is_err(), "v2 to v1 downgrade must be rejected");
+
+        // Unlock and change_password over existing Windows file succeeds & increments revision
+        service.unlock("old-pass").unwrap();
+        service.change_password("new-pass").unwrap();
+        service.lock();
+        assert!(service.unlock("old-pass").is_err());
+        service.unlock("new-pass").unwrap();
+        let unlocked = service.get_vault().unwrap();
+        assert_eq!(unlocked["revision"], 2);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_manual_lock_blocks_auto_unlock() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_lock_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file, legacy_file);
+
+        let (env, _) = encrypt_payload("pwd123", &json!({"revision": 1, "entries": []}), Some(10_000)).unwrap();
+        service
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+        service.unlock("pwd123").unwrap();
+        assert_eq!(service.state()["locked"], false);
+
+        service.lock();
+        assert_eq!(service.state()["locked"], true);
+        assert!(service.get_vault().is_err());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_export_backup_for_payload_and_preview_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_preview_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file.clone(), legacy_file);
+
+        let initial = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 1,
+            "entries": [{ "id": "e1", "kind": "login", "title": "Local", "domains": ["a.com"] }],
+            "passkeys": [],
+            "passkeyTombstones": [],
+            "settings": { "oss": {} },
+            "updatedAt": 100
+        });
+        let (env, _) = encrypt_payload("master-pw", &initial, Some(10_000)).unwrap();
+        service
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+
+        let unlocked = service.unlock_with_payload("master-pw").unwrap();
+        assert_eq!(unlocked["state"]["locked"], false);
+        assert_eq!(unlocked["payload"]["revision"], 1);
+
+        // Export backup for a modified payload using active session key
+        let merged = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 2,
+            "entries": [
+                { "id": "e1", "kind": "login", "title": "Local", "domains": ["a.com"] },
+                { "id": "e2", "kind": "login", "title": "Cloud", "domains": ["b.com"] }
+            ],
+            "passkeys": [],
+            "passkeyTombstones": [],
+            "settings": { "oss": {} },
+            "updatedAt": 100
+        });
+        let exported = service.export_backup_for_payload(&merged).unwrap();
+        let content = exported["content"].as_str().unwrap();
+        assert_eq!(exported["vaultPath"], vault_file.to_string_lossy().as_ref());
+        assert!(exported["updatedAt"].as_u64().unwrap() > 0);
+
+        // Preview with active session key
+        let previewed = service.preview_backup(content).unwrap();
+        assert_eq!(previewed["payload"]["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(previewed["payload"]["entries"][1]["title"], "Cloud");
+
+        // Preview an envelope encrypted with a different password
+        let remote_payload = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 5,
+            "entries": [{ "id": "r1", "kind": "login", "title": "Remote", "domains": ["r.com"] }],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (remote_env, _) = encrypt_payload("remote-pw", &remote_payload, Some(10_000)).unwrap();
+        let remote_text = serde_json::to_string(&remote_env).unwrap();
+
+        assert!(service.preview_backup(&remote_text).is_err());
+        assert!(service.preview_backup_with_password(&remote_text, "wrong-pw").is_err());
+
+        let previewed_remote = service
+            .preview_backup_with_password(&remote_text, "remote-pw")
+            .unwrap();
+        assert_eq!(previewed_remote["payload"]["revision"], 5);
+        assert_eq!(previewed_remote["payload"]["entries"][0]["title"], "Remote");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_adopt_encryption_from_envelope_switches_kdf_and_invalidates_device_unlock() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_adopt_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file.clone(), legacy_file);
+
+        let local_payload = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 1,
+            "entries": [{ "id": "local-1", "kind": "login", "title": "Keep Me", "domains": ["keep.com"] }],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (local_env, _) = encrypt_payload("local-pw", &local_payload, Some(10_000)).unwrap();
+        service
+            .write_vault_envelope(&serde_json::to_string(&local_env).unwrap(), false, Some(0))
+            .unwrap();
+        service.unlock_with_payload("local-pw").unwrap();
+
+        // Enable device unlock (on Windows DPAPI)
+        let du_enabled = service.enable_device_unlock("local-pw", 3600);
+        if cfg!(target_os = "windows") {
+            assert_eq!(du_enabled.unwrap()["enabled"], true);
+        }
+
+        // Create remote envelope with a different password and KDF salt/iterations
+        let remote_payload = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 9,
+            "entries": [],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (remote_env, _) = encrypt_payload("remote-pw", &remote_payload, Some(12_345)).unwrap();
+        let remote_text = serde_json::to_string(&remote_env).unwrap();
+
+        // Wrong password for target envelope must fail without mutating local vault
+        assert!(service.adopt_encryption_from_envelope(&remote_text, "wrong").is_err());
+
+        // Right password adopts KDF/key, re-encrypts LOCAL payload, increments revision, disables device unlock
+        let adopted = service
+            .adopt_encryption_from_envelope(&remote_text, "remote-pw")
+            .unwrap();
+        assert_eq!(adopted["state"]["locked"], false);
+        assert_eq!(adopted["payload"]["revision"], 2);
+        assert_eq!(adopted["payload"]["entries"][0]["title"], "Keep Me");
+        assert_eq!(service.device_unlock_state()["enabled"], false);
+
+        // Persisted envelope must now use remote KDF and unlock only with remote-pw
+        let persisted_env: VaultEnvelope =
+            serde_json::from_str(&fs::read_to_string(&vault_file).unwrap()).unwrap();
+        assert_eq!(persisted_env.kdf, remote_env.kdf);
+
+        service.lock();
+        assert!(service.unlock_with_payload("local-pw").is_err());
+        let re_unlocked = service.unlock_with_payload("remote-pw").unwrap();
+        assert_eq!(re_unlocked["payload"]["revision"], 2);
+        assert_eq!(re_unlocked["payload"]["entries"][0]["title"], "Keep Me");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_change_password_verified_checks_current_and_allows_passwordless() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_chpwd_v_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file.clone(), legacy_file);
+
+        let payload = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 1,
+            "entries": [{ "id": "e1", "kind": "login", "title": "Site", "domains": [] }],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (env, _) = encrypt_payload("curr-pass", &payload, Some(10_000)).unwrap();
+        service
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+        service.unlock_with_payload("curr-pass").unwrap();
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(service.enable_device_unlock("curr-pass", 3600).unwrap()["enabled"], true);
+        }
+
+        // Reject wrong current password
+        let bad = service.change_password_verified("wrong-pass", "next-pass");
+        assert!(bad.is_err());
+        assert_eq!(bad.unwrap_err(), BAD_PASSWORD_MESSAGE);
+
+        // Succeed with right current password -> switch to passwordless ("")
+        let changed = service.change_password_verified("curr-pass", "").unwrap();
+        assert_eq!(changed["state"]["passwordless"], true);
+        assert_eq!(changed["state"]["locked"], false);
+        assert_eq!(changed["payload"]["revision"], 2);
+        assert_eq!(service.device_unlock_state()["enabled"], false);
+
+        // When passwordless == true, empty current password is accepted
+        let changed2 = service.change_password_verified("", "final-pass").unwrap();
+        assert_eq!(changed2["state"]["passwordless"], false);
+        assert_eq!(changed2["payload"]["revision"], 3);
+
+        service.lock();
+        assert!(service.unlock_with_payload("curr-pass").is_err());
+        assert!(service.unlock_with_payload("").is_err());
+        let ok = service.unlock_with_payload("final-pass").unwrap();
+        assert_eq!(ok["payload"]["revision"], 3);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_quick_unlock_blocked_after_manual_lock() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_qu_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file.clone(), legacy_file.clone());
+
+        let payload = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 1,
+            "entries": [{ "id": "e1", "kind": "login", "title": "Quick", "domains": [] }],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (env, _) = encrypt_payload("pw-qu", &payload, Some(10_000)).unwrap();
+        service
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+        service.unlock_with_payload("pw-qu").unwrap();
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(service.enable_device_unlock("pw-qu", 3600).unwrap()["enabled"], true);
+
+            // Fresh service instance (manually_locked == false) can quick_unlock
+            let fresh = VaultService::new(vault_file.clone(), legacy_file.clone());
+            let qu = fresh.quick_unlock_with_state().unwrap();
+            assert_eq!(qu["state"]["locked"], false);
+            assert_eq!(qu["payload"]["entries"][0]["title"], "Quick");
+
+            // After manual lock(), quick_unlock MUST fail
+            let locked_state = fresh.lock();
+            assert_eq!(locked_state["locked"], true);
+            let blocked = fresh.quick_unlock();
+            assert!(blocked.is_err());
+            assert_eq!(blocked.unwrap_err(), MANUAL_LOCK_MESSAGE);
+            let blocked_with_state = fresh.quick_unlock_with_state();
+            assert!(blocked_with_state.is_err());
+            assert_eq!(blocked_with_state.unwrap_err(), MANUAL_LOCK_MESSAGE);
+            // Empty password unlock also must not bypass manual lock
+            assert!(fresh.unlock_with_payload("").is_err());
+            // Master password unlock clears manual lock
+            assert!(fresh.unlock_with_payload("pw-qu").is_ok());
+        } else {
+            service.lock();
+            let blocked = service.quick_unlock();
+            assert!(blocked.is_err());
+            assert_eq!(blocked.unwrap_err(), MANUAL_LOCK_MESSAGE);
+        }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_import_backup_with_state_and_create_vault_shape() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_imp_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let service = VaultService::new(vault_file.clone(), legacy_file);
+
+        // create_vault returns { state, payload, migrated, legacyCleanupPending }
+        let created = service.create_vault("init-pw", false).unwrap();
+        assert_eq!(created["state"]["hasVault"], true);
+        assert_eq!(created["state"]["locked"], false);
+        assert_eq!(created["payload"]["revision"], 1);
+        assert_eq!(created["migrated"], 0);
+        assert_eq!(created["legacyCleanupPending"], false);
+
+        // save_vault updates revision and returns { saved, revision, payload }
+        let mut p = created["payload"].clone();
+        p["entries"] = json!([{ "id": "n1", "kind": "login", "title": "Saved", "domains": [] }]);
+        let saved = service.save_vault(&p, None).unwrap();
+        assert_eq!(saved["saved"], true);
+        assert_eq!(saved["revision"], 2);
+        assert_eq!(saved["payload"]["revision"], 2);
+
+        // import_backup_with_state backs up existing, locks session, sets manually_locked
+        let backup_payload = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 7,
+            "entries": [{ "id": "b1", "kind": "login", "title": "Restored", "domains": [] }],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (backup_env, _) = encrypt_payload("backup-pw", &backup_payload, Some(10_000)).unwrap();
+        let imported = service
+            .import_backup_with_state(&serde_json::to_string(&backup_env).unwrap())
+            .unwrap();
+        assert_eq!(imported["state"]["locked"], true);
+        assert_eq!(imported["vaultPath"], vault_file.to_string_lossy().as_ref());
+        let backup_path = imported["backupPath"].as_str().unwrap();
+        assert!(!backup_path.is_empty());
+        assert!(Path::new(backup_path).exists());
+        assert!(service.get_vault().is_err());
+
+        let unlocked = service.unlock_with_payload("backup-pw").unwrap();
+        assert_eq!(unlocked["payload"]["revision"], 7);
+        assert_eq!(unlocked["payload"]["entries"][0]["title"], "Restored");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_cross_process_lock_sync_invalidates_peer_session() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_xlock_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let desktop = VaultService::new(vault_file.clone(), legacy_file.clone());
+        let native_host = VaultService::new(vault_file, legacy_file);
+
+        let initial = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 1,
+            "entries": [{
+                "id": "e1",
+                "kind": "login",
+                "title": "Example",
+                "username": "alice",
+                "password": "pw",
+                "domains": ["example.com"],
+                "autofillMatchMode": "base-domain",
+                "status": "active"
+            }],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (env, _) = encrypt_payload("shared-pw", &initial, Some(10_000)).unwrap();
+        desktop
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+
+        desktop.unlock("shared-pw").unwrap();
+        native_host.unlock("shared-pw").unwrap();
+        assert_eq!(
+            native_host
+                .query_matches("example.com", "https://example.com/login")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Locking Desktop writes lock.epoch and immediately invalidates native_host
+        desktop.lock();
+        let err = native_host
+            .query_matches("example.com", "https://example.com/login")
+            .unwrap_err();
+        assert_eq!(err, LOCKED_MESSAGE);
+        assert_eq!(native_host.state()["locked"], true);
+
+        // Re-unlocking native_host after Desktop lock succeeds cleanly
+        native_host.unlock("shared-pw").unwrap();
+        assert_eq!(
+            native_host
+                .query_matches("example.com", "https://example.com/login")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_cross_process_live_reload_sees_new_entries_without_reunlock() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_xreload_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let desktop = VaultService::new(vault_file.clone(), legacy_file.clone());
+        let native_host = VaultService::new(vault_file, legacy_file);
+
+        let initial = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 1,
+            "entries": [],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (env, _) = encrypt_payload("shared-pw", &initial, Some(10_000)).unwrap();
+        desktop
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+
+        desktop.unlock("shared-pw").unwrap();
+        native_host.unlock("shared-pw").unwrap();
+        assert!(native_host
+            .query_matches("fresh.example.com", "https://fresh.example.com/login")
+            .unwrap()
+            .is_empty());
+
+        // Desktop saves a brand new login entry
+        let mut updated = desktop.get_vault().unwrap();
+        updated["entries"] = json!([{
+            "id": "fresh-1",
+            "kind": "login",
+            "title": "Fresh Site",
+            "username": "bob",
+            "password": "secret",
+            "domains": ["fresh.example.com"],
+            "autofillMatchMode": "base-domain",
+            "status": "active"
+        }]);
+        desktop.save_vault(&updated, Some(1)).unwrap();
+
+        // native_host immediately sees the new entry without re-unlocking
+        let matches = native_host
+            .query_matches("fresh.example.com", "https://fresh.example.com/login")
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["id"], "fresh-1");
+        assert_eq!(matches[0]["username"], "bob");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_cross_process_password_rotation_invalidates_peer_session() {
+        let dir = std::env::temp_dir().join(format!("pwdmg_test_xrot_{}", uuid::Uuid::new_v4()));
+        let vault_file = dir.join("vault.json");
+        let legacy_file = dir.join("legacy.json");
+        let desktop = VaultService::new(vault_file.clone(), legacy_file.clone());
+        let native_host = VaultService::new(vault_file, legacy_file);
+
+        let initial = json!({
+            "version": 2,
+            "passkeySchemaVersion": 1,
+            "revision": 1,
+            "entries": [{
+                "id": "e1",
+                "kind": "login",
+                "title": "Rotate",
+                "username": "carol",
+                "password": "pw",
+                "domains": ["rotate.example.com"],
+                "autofillMatchMode": "base-domain",
+                "status": "active"
+            }],
+            "passkeys": [],
+            "passkeyTombstones": []
+        });
+        let (env, _) = encrypt_payload("old-pw", &initial, Some(10_000)).unwrap();
+        desktop
+            .write_vault_envelope(&serde_json::to_string(&env).unwrap(), false, Some(0))
+            .unwrap();
+
+        desktop.unlock("old-pw").unwrap();
+        native_host.unlock("old-pw").unwrap();
+        assert_eq!(
+            native_host
+                .query_matches("rotate.example.com", "https://rotate.example.com/")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Desktop rotates master password
+        desktop.change_password("new-pw").unwrap();
+
+        // native_host detects changed vault file, fails decryption with stale key, and locks immediately
+        let err = native_host
+            .query_matches("rotate.example.com", "https://rotate.example.com/")
+            .unwrap_err();
+        assert_eq!(err, LOCKED_MESSAGE);
+        assert_eq!(native_host.state()["locked"], true);
 
         let _ = fs::remove_dir_all(dir);
     }

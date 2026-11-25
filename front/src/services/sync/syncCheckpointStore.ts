@@ -37,18 +37,6 @@ export async function writeSyncCheckpoint(checkpoint: SyncCheckpoint): Promise<v
   }
 }
 
-export async function deleteSyncCheckpoint(key: string): Promise<void> {
-  if (!globalThis.indexedDB) return
-  const database = await openDatabase()
-  try {
-    const transaction = database.transaction(STORE_NAME, 'readwrite')
-    transaction.objectStore(STORE_NAME).delete(key)
-    await transactionDone(transaction)
-  } finally {
-    database.close()
-  }
-}
-
 export function normalizeSyncCheckpoint(value: unknown): SyncCheckpoint | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const item = value as Partial<SyncCheckpoint>

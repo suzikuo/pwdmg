@@ -5,7 +5,7 @@ type SessionTimeout = number | (() => number)
 
 export function useVaultSession(onExpire: SessionExpiryHandler, timeoutMs: SessionTimeout) {
   const generation = new SessionGeneration()
-  let timer = 0
+  let timer: ReturnType<typeof setTimeout> | 0 = 0
 
   function capture() {
     return generation.capture()
@@ -28,14 +28,18 @@ export function useVaultSession(onExpire: SessionExpiryHandler, timeoutMs: Sessi
     if (!unlocked) return
     const delay = typeof timeoutMs === 'function' ? timeoutMs() : timeoutMs
     if (!Number.isFinite(Number(delay)) || Number(delay) <= 0) return
-    timer = window.setTimeout(() => {
+    const timerHost = typeof window !== 'undefined' ? window : globalThis
+    timer = timerHost.setTimeout(() => {
       timer = 0
       onExpire()
     }, Number(delay))
+    const handle = timer as unknown as { unref?: () => void }
+    handle?.unref?.()
   }
 
   function cancel() {
-    if (timer) window.clearTimeout(timer)
+    const timerHost = typeof window !== 'undefined' ? window : globalThis
+    if (timer) timerHost.clearTimeout(timer)
     timer = 0
   }
 
