@@ -30,8 +30,8 @@ android {
         applicationId = "com.suzikuo.mypwdmg"
         minSdk = 26
         targetSdk = 34
-        versionCode = 292
-        versionName = "2.0.92"
+        versionCode = 293
+        versionName = "2.0.93"
     }
 
     buildFeatures {
