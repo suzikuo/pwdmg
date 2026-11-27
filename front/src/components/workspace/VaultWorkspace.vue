@@ -3,7 +3,7 @@
     class="workbench-shell"
     :class="[
       { 'is-desktop': isDesktop },
-      isDesktop ? `is-layout-${layoutMode}` : 'is-layout-mobile'
+      isDesktop ? `is-layout-${layoutMode}` : ['is-layout-mobile', `is-mobile-${mobileLayoutMode}`]
     ]"
   >
     <div v-if="isDesktop && layoutMode === 'top-nav-split'" class="workbench-topnav-slot">
@@ -77,7 +77,7 @@
               :selection-mode="selectionMode"
               :selected-ids="selectedIds"
               :expanded-ids="expandedIds"
-              :list-style="isDesktop ? listStyle : 'rows'"
+              :list-style="isDesktop ? listStyle : mobileListStyle"
               :density="density"
               :depth="0"
               @view="emit('view', $event)"
@@ -185,6 +185,8 @@
         </aside>
       </div>
     </div>
+
+    <slot v-if="!isDesktop" name="mobile-chrome" />
   </div>
 </template>
 
@@ -198,12 +200,15 @@ import { useAppStores, type SidebarView } from '../../stores'
 import type { VaultEntry } from '../../types'
 import type { PasskeyPresentationItem } from '../../services/passkeyPresentation.ts'
 import type { SkinDensity, SkinLayoutMode, SkinListStyle } from '../../services/skins/index.ts'
+import type { MobileLayoutMode, MobileListStyle } from '../../stores/uiStore.ts'
 
 const props = withDefaults(defineProps<{
   isDesktop: boolean
   editorOpen: boolean
   layoutMode?: SkinLayoutMode
   listStyle?: SkinListStyle
+  mobileLayoutMode?: MobileLayoutMode
+  mobileListStyle?: MobileListStyle
   density?: SkinDensity
   sidebarView: SidebarView
   activeFolderId: string
@@ -231,6 +236,8 @@ const props = withDefaults(defineProps<{
 }>(), {
   layoutMode: 'three-pane',
   listStyle: 'rows',
+  mobileLayoutMode: 'classic',
+  mobileListStyle: 'rows',
   density: 'comfortable'
 })
 
@@ -529,5 +536,13 @@ const viewBanner = computed<{
   align-items: center;
   justify-content: center;
   padding: 24px;
+}
+
+.workbench-shell.is-mobile-bottom-tabs .list-pane__scroll {
+  padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+}
+
+.workbench-shell.is-mobile-floating-dock .list-pane__scroll {
+  padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
 }
 </style>

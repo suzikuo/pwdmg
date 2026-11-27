@@ -69,11 +69,11 @@ function createFakeDocument() {
   }
 }
 
-test('all 8 built-in skins exist, pass validation, and have valid light/dark tokens and default layouts', () => {
+test('all 12 built-in skins exist, pass validation, and have valid light/dark tokens and default layouts', () => {
   assert.equal(DEFAULT_SKIN_ID, 'graphite')
   assert.deepEqual(
     BUILTIN_SKINS.map((s) => s.id),
-    ['graphite', 'native', 'industrial', 'bento', 'paper', 'nord', 'moss', 'rosewood']
+    ['graphite', 'native', 'industrial', 'bento', 'paper', 'nord', 'moss', 'rosewood', 'obsidian', 'tokyo', 'ocean', 'amber']
   )
 
   const expectedLayouts = {
@@ -84,7 +84,11 @@ test('all 8 built-in skins exist, pass validation, and have valid light/dark tok
     paper: { mode: 'three-pane', density: 'comfortable', listStyle: 'rows' },
     nord: { mode: 'top-nav-split', density: 'comfortable', listStyle: 'rows' },
     moss: { mode: 'three-pane', density: 'comfortable', listStyle: 'rows' },
-    rosewood: { mode: 'compact-cards', density: 'airy', listStyle: 'cards' }
+    rosewood: { mode: 'compact-cards', density: 'airy', listStyle: 'cards' },
+    obsidian: { mode: 'three-pane', density: 'comfortable', listStyle: 'rows' },
+    tokyo: { mode: 'top-nav-split', density: 'comfortable', listStyle: 'rows' },
+    ocean: { mode: 'compact-cards', density: 'airy', listStyle: 'cards' },
+    amber: { mode: 'three-pane', density: 'compact', listStyle: 'table' }
   }
 
   const requiredTokens = [
@@ -273,7 +277,7 @@ test('uiStore switches skins, updates activeSkinId, and applies CSS custom prope
   try {
     const ui = createUiStore()
     assert.equal(ui.activeSkinId.value, 'graphite')
-    assert.equal(ui.availableSkins.value.length, 8)
+    assert.equal(ui.availableSkins.value.length, 12)
     assert.deepEqual(ui.activeLayout.value, { mode: 'three-pane', density: 'comfortable', listStyle: 'rows' })
 
     ui.setTheme('dark')
@@ -311,13 +315,13 @@ test('uiStore switches skins, updates activeSkinId, and applies CSS custom prope
     }))
     assert.equal(customResult.ok, true)
     assert.equal(ui.activeSkinId.value, 'studio-mono')
-    assert.equal(ui.availableSkins.value.length, 9)
+    assert.equal(ui.availableSkins.value.length, 13)
     assert.ok(globalThis.localStorage.getItem(CUSTOM_SKINS_STORAGE_KEY)?.includes('studio-mono'))
 
     // Removing active custom skin falls back cleanly to graphite
     assert.equal(ui.removeCustomSkin('studio-mono'), true)
     assert.equal(ui.activeSkinId.value, 'graphite')
-    assert.equal(ui.availableSkins.value.length, 8)
+    assert.equal(ui.availableSkins.value.length, 12)
 
     // Direct applySkinToDocument clears previous skin variables before applying
     applySkinToDocument(getSkin('native'), 'light')

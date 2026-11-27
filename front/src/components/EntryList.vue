@@ -350,7 +350,7 @@ const props = withDefaults(defineProps<{
   selectionMode?: boolean
   selectedIds?: ReadonlySet<string>
   expandedIds?: ReadonlySet<string>
-  listStyle?: SkinListStyle
+  listStyle?: SkinListStyle | 'compact'
   density?: SkinDensity
   depth?: number
 }>(), {
@@ -1345,6 +1345,68 @@ function maybeAutoScroll(clientY: number) {
   margin-left: auto;
   width: 26px;
   padding: 0;
+}
+
+/* Mobile Compact Single-Line List Style */
+.entry-list.is-style-compact {
+  gap: 1px;
+}
+
+.entry-list.is-style-compact .entry-row {
+  min-height: 40px;
+  padding: 5px 10px;
+  gap: 8px;
+}
+
+.entry-list.is-style-compact .entry-avatar {
+  width: 26px;
+  height: 26px;
+}
+
+.entry-list.is-style-compact .entry-sub {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .entry-list.is-style-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .entry-list.is-style-cards.is-root {
+    padding: 10px 10px 24px;
+  }
+
+  .entry-list.is-style-cards .entry-card {
+    min-height: 98px;
+    padding: 10px;
+    gap: 8px;
+  }
+
+  .entry-list.is-style-cards .entry-card__top {
+    gap: 7px;
+  }
+
+  .entry-list.is-style-cards .entry-avatar {
+    width: 26px;
+    height: 26px;
+  }
+
+  .entry-list.is-style-cards .entry-card__footer {
+    padding-top: 6px;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .entry-list.is-style-cards .entry-card__action {
+    height: 24px;
+    padding: 0 6px;
+    font-size: 10.5px;
+  }
+
+  .entry-list.is-style-cards .entry-card__action span {
+    display: none;
+  }
 }
 
 /* Drag ghost cloned to body */

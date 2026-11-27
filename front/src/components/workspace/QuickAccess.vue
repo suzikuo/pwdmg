@@ -22,7 +22,7 @@
               class="qa-input"
               autocomplete="off"
               spellcheck="false"
-              placeholder="搜索条目、账号、域名，或输入 > 运行指令…"
+              :placeholder="showCommands ? '搜索条目、账号、域名，或输入 > 运行指令…' : '搜索条目、账号、域名…'"
               aria-label="搜索条目或命令"
             />
             <button
@@ -165,12 +165,12 @@
             <UiEmpty
               v-else
               icon="search"
-              title="没有匹配的条目或指令"
-              description="试试其他关键词，或输入 > 查看所有快捷指令。"
+              :title="showCommands ? '没有匹配的条目或指令' : '没有匹配的条目'"
+              :description="showCommands ? '试试其他关键词，或输入 > 查看所有快捷指令。' : '试试其他关键词，支持标题、账号、域名或备注搜索。'"
             />
           </div>
 
-          <footer class="qa-footer" aria-hidden="true">
+          <footer v-if="showCommands" class="qa-footer" aria-hidden="true">
             <span class="qa-hint"><kbd>↑</kbd><kbd>↓</kbd> 导航</span>
             <span class="qa-hint"><kbd>Enter</kbd> 复制密码 / 执行</span>
             <span class="qa-hint"><kbd>Shift+Enter</kbd> 复制账号</span>
@@ -256,10 +256,12 @@ const props = withDefaults(defineProps<{
   searchIndex?: VaultSearchIndex | null
   favoriteIds?: ReadonlySet<string>
   recentIds?: readonly string[]
+  showCommands?: boolean
 }>(), {
   searchIndex: null,
   favoriteIds: () => new Set<string>(),
-  recentIds: () => []
+  recentIds: () => [],
+  showCommands: true
 })
 
 const emit = defineEmits<{
@@ -280,7 +282,7 @@ const activeIndex = ref(0)
 const searchInput = ref<HTMLInputElement | null>(null)
 const resultList = ref<HTMLElement | null>(null)
 
-const isCommandOnlyQuery = computed(() => keyword.value.trimStart().startsWith('>'))
+const isCommandOnlyQuery = computed(() => props.showCommands && keyword.value.trimStart().startsWith('>'))
 
 const entryResults = computed<VaultEntry[]>(() => {
   if (isCommandOnlyQuery.value) return []
@@ -291,10 +293,12 @@ const entryResults = computed<VaultEntry[]>(() => {
     favoriteIds: props.favoriteIds,
     recentIds: props.recentIds
   })
-  return list.slice(0, 12)
+  const limit = keyword.value.trim() ? 12 : 3
+  return list.slice(0, limit)
 })
 
 const filteredCommands = computed<PaletteCommand[]>(() => {
+  if (!props.showCommands) return []
   const raw = keyword.value.trim()
   if (!raw) return COMMANDS
   const query = (raw.startsWith('>') ? raw.slice(1) : raw).trim().toLowerCase()
@@ -482,7 +486,7 @@ function entrySummary(entry: VaultEntry) {
 <style scoped>
 .qa-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--desktop-titlebar-height, 0px) 0 0;
   z-index: var(--z-modal);
   display: flex;
   align-items: flex-start;

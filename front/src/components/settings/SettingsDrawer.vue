@@ -28,22 +28,21 @@
       }"
     >
       <aside v-if="ui.isWide || isMobileMenu" class="settings-nav" aria-label="设置分类">
-        <nav class="settings-nav-list no-scrollbar">
+        <nav v-if="ui.isWide" class="settings-nav-list no-scrollbar">
           <button
             v-for="item in navItems"
             :key="item.key"
             type="button"
             class="settings-nav-btn"
-            :class="{ 'is-active': ui.isWide && activeSection === item.key }"
-            :aria-current="ui.isWide && activeSection === item.key ? 'page' : undefined"
+            :class="{ 'is-active': activeSection === item.key }"
+            :aria-current="activeSection === item.key ? 'page' : undefined"
             @click="selectSection(item.key)"
           >
             <span class="settings-nav-icon">
-              <UiIcon :name="item.icon" :size="16" />
+              <UiIcon :name="item.icon" :size="15" />
             </span>
             <span class="settings-nav-copy">
               <span class="settings-nav-label">{{ item.label }}</span>
-              <small v-if="item.hint" class="settings-nav-hint">{{ item.hint }}</small>
             </span>
             <UiBadge
               v-if="item.badge"
@@ -52,11 +51,41 @@
             >
               {{ item.badge }}
             </UiBadge>
-            <UiIcon name="chevron-right" :size="15" class="settings-nav-chevron" />
           </button>
         </nav>
 
-        <div class="settings-nav-footer">
+        <div v-else class="settings-mobile-groups">
+          <div v-for="group in mobileNavGroups" :key="group.title" class="settings-mobile-group">
+            <h4 class="settings-mobile-group__title">{{ group.title }}</h4>
+            <div class="settings-mobile-group__card">
+              <button
+                v-for="item in group.items"
+                :key="item.key"
+                type="button"
+                class="settings-mobile-row"
+                @click="selectSection(item.key)"
+              >
+                <span class="settings-mobile-row__icon" :class="`is-${item.key}`">
+                  <UiIcon :name="item.icon" :size="17" />
+                </span>
+                <span class="settings-mobile-row__copy">
+                  <span class="settings-mobile-row__label">{{ item.label }}</span>
+                  <small v-if="item.hint" class="settings-mobile-row__hint">{{ item.hint }}</small>
+                </span>
+                <UiBadge
+                  v-if="item.badge"
+                  :tone="item.badgeTone || 'neutral'"
+                  size="sm"
+                >
+                  {{ item.badge }}
+                </UiBadge>
+                <UiIcon name="chevron-right" :size="15" class="settings-mobile-row__chevron" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="ui.isWide" class="settings-nav-footer">
           <UiButton
             variant="ghost"
             size="sm"
@@ -101,7 +130,50 @@
               <span class="skin-gallery-count">{{ ui.availableSkins.length }} 套可用</span>
             </div>
 
-            <div class="skin-grid" role="radiogroup" aria-label="选择皮肤配色">
+            <button
+              type="button"
+              class="skin-picker-toggle"
+              :aria-expanded="skinGalleryOpen"
+              @click="skinGalleryOpen = !skinGalleryOpen"
+            >
+              <span
+                class="skin-swatch skin-swatch--mini"
+                :style="{
+                  backgroundColor: skinPreview(ui.activeSkin).bg,
+                  borderColor: skinPreview(ui.activeSkin).border
+                }"
+                aria-hidden="true"
+              >
+                <span
+                  class="skin-swatch__sidebar"
+                  :style="{
+                    backgroundColor: skinPreview(ui.activeSkin).sidebar,
+                    borderColor: skinPreview(ui.activeSkin).border
+                  }"
+                >
+                  <span class="skin-swatch__dot" :style="{ backgroundColor: skinPreview(ui.activeSkin).accent }" />
+                </span>
+                <span
+                  class="skin-swatch__surface"
+                  :style="{
+                    backgroundColor: skinPreview(ui.activeSkin).surface,
+                    borderColor: skinPreview(ui.activeSkin).border
+                  }"
+                >
+                  <span class="skin-swatch__pill" :style="{ backgroundColor: skinPreview(ui.activeSkin).accent }" />
+                </span>
+              </span>
+              <span class="skin-picker-toggle__copy">
+                <strong>{{ ui.activeSkin.name }}</strong>
+                <small>{{ skinGalleryOpen ? '点击收起皮肤列表' : '点击展开选择其他皮肤' }}</small>
+              </span>
+              <span class="skin-picker-toggle__action">
+                <span>{{ skinGalleryOpen ? '收起' : '展开' }}</span>
+                <UiIcon :name="skinGalleryOpen ? 'chevron-down' : 'chevron-right'" :size="14" />
+              </span>
+            </button>
+
+            <div v-if="skinGalleryOpen" class="skin-grid" role="radiogroup" aria-label="选择皮肤配色">
               <div
                 v-for="skin in ui.availableSkins"
                 :key="skin.id"
@@ -179,51 +251,91 @@
                   <small class="skin-gallery-sub">与任意皮肤配色自由混搭</small>
                 </div>
                 <UiButton
-                  v-if="ui.hasLayoutOverride"
+                  v-if="ui.isWide ? ui.hasLayoutOverride : ui.hasMobileLayoutOverride"
                   variant="ghost"
                   size="xs"
-                  @click="ui.resetLayoutOverride()"
+                  @click="ui.isWide ? ui.resetLayoutOverride() : ui.resetMobileLayoutOverride()"
                 >
-                  重置为皮肤默认
+                  {{ ui.isWide ? '重置为皮肤默认' : '恢复默认布局' }}
                 </UiButton>
               </div>
 
               <div class="layout-override-list">
-                <div class="layout-override-row">
-                  <span class="layout-override-label">框架布局</span>
-                  <div class="layout-segment" role="radiogroup" aria-label="框架布局">
-                    <button
-                      v-for="opt in layoutModeOptions"
-                      :key="opt.key"
-                      type="button"
-                      role="radio"
-                      class="segment-btn layout-segment__btn"
-                      :class="{ 'is-active': (ui.layoutOverride.mode ?? null) === opt.value }"
-                      :aria-checked="(ui.layoutOverride.mode ?? null) === opt.value"
-                      @click="ui.setLayoutMode(opt.value)"
-                    >
-                      {{ opt.label }}
-                    </button>
+                <template v-if="ui.isWide">
+                  <div class="layout-override-row">
+                    <span class="layout-override-label">框架布局</span>
+                    <div class="layout-segment" role="radiogroup" aria-label="框架布局">
+                      <button
+                        v-for="opt in layoutModeOptions"
+                        :key="opt.key"
+                        type="button"
+                        role="radio"
+                        class="segment-btn layout-segment__btn"
+                        :class="{ 'is-active': (ui.layoutOverride.mode ?? null) === opt.value }"
+                        :aria-checked="(ui.layoutOverride.mode ?? null) === opt.value"
+                        @click="ui.setLayoutMode(opt.value)"
+                      >
+                        {{ opt.label }}
+                      </button>
+                    </div>
                   </div>
-                </div>
 
-                <div class="layout-override-row">
-                  <span class="layout-override-label">列表形态</span>
-                  <div class="layout-segment" role="radiogroup" aria-label="列表形态">
-                    <button
-                      v-for="opt in listStyleOptions"
-                      :key="opt.key"
-                      type="button"
-                      role="radio"
-                      class="segment-btn layout-segment__btn"
-                      :class="{ 'is-active': (ui.layoutOverride.listStyle ?? null) === opt.value }"
-                      :aria-checked="(ui.layoutOverride.listStyle ?? null) === opt.value"
-                      @click="ui.setListStyle(opt.value)"
-                    >
-                      {{ opt.label }}
-                    </button>
+                  <div class="layout-override-row">
+                    <span class="layout-override-label">列表形态</span>
+                    <div class="layout-segment" role="radiogroup" aria-label="列表形态">
+                      <button
+                        v-for="opt in listStyleOptions"
+                        :key="opt.key"
+                        type="button"
+                        role="radio"
+                        class="segment-btn layout-segment__btn"
+                        :class="{ 'is-active': (ui.layoutOverride.listStyle ?? null) === opt.value }"
+                        :aria-checked="(ui.layoutOverride.listStyle ?? null) === opt.value"
+                        @click="ui.setListStyle(opt.value)"
+                      >
+                        {{ opt.label }}
+                      </button>
+                    </div>
                   </div>
-                </div>
+                </template>
+
+                <template v-else>
+                  <div class="layout-override-row">
+                    <span class="layout-override-label">移动端布局</span>
+                    <div class="layout-segment" role="radiogroup" aria-label="移动端布局">
+                      <button
+                        v-for="opt in mobileLayoutModeOptions"
+                        :key="opt.value"
+                        type="button"
+                        role="radio"
+                        class="segment-btn layout-segment__btn"
+                        :class="{ 'is-active': ui.mobileLayoutMode === opt.value }"
+                        :aria-checked="ui.mobileLayoutMode === opt.value"
+                        @click="ui.setMobileLayoutMode(opt.value)"
+                      >
+                        {{ opt.label }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="layout-override-row">
+                    <span class="layout-override-label">移动端列表</span>
+                    <div class="layout-segment" role="radiogroup" aria-label="移动端列表">
+                      <button
+                        v-for="opt in mobileListStyleOptions"
+                        :key="opt.value"
+                        type="button"
+                        role="radio"
+                        class="segment-btn layout-segment__btn"
+                        :class="{ 'is-active': ui.mobileListStyle === opt.value }"
+                        :aria-checked="ui.mobileListStyle === opt.value"
+                        @click="ui.setMobileListStyle(opt.value)"
+                      >
+                        {{ opt.label }}
+                      </button>
+                    </div>
+                  </div>
+                </template>
 
                 <div class="layout-override-row">
                   <span class="layout-override-label">界面密度</span>
@@ -668,6 +780,19 @@
                   配置
                 </UiButton>
               </div>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card--danger">
+            <div class="setting-row">
+              <div class="setting-row__copy">
+                <strong>安全退出</strong>
+                <small>立即锁定保险库并清除当前会话内存凭据</small>
+              </div>
+              <UiButton variant="danger" size="sm" @click="session.safeExit()">
+                <UiIcon name="lock" :size="14" />
+                <span>安全退出</span>
+              </UiButton>
             </div>
           </div>
         </section>
@@ -1321,6 +1446,7 @@ import type {
 } from '../../services/skins/index.ts'
 import { showFailToast, showSuccessToast } from '../../services/uiFeedback'
 import { useAppStores, type SidebarView, type ThemePreference } from '../../stores'
+import type { MobileLayoutMode, MobileListStyle } from '../../stores/uiStore'
 import type { DesktopCloseBehavior, VaultEntry } from '../../types'
 
 type SettingsSectionKey = 'appearance' | 'security' | 'sync' | 'storage' | 'system' | 'about'
@@ -1342,6 +1468,7 @@ const platform = stores.platform
 
 const contentPane = ref<HTMLElement | null>(null)
 const skinFileInput = ref<HTMLInputElement | null>(null)
+const skinGalleryOpen = ref(false)
 const wallpaperFileInput = ref<HTMLInputElement | null>(null)
 const systemSelectionMode = ref(false)
 const systemSelectedIds = ref<Set<string>>(new Set())
@@ -1411,6 +1538,18 @@ const listStyleOptions: Array<{ key: string; value: SkinListStyle | null; label:
   { key: 'cards', value: 'cards', label: '卡片网格' }
 ]
 
+const mobileLayoutModeOptions: Array<{ value: MobileLayoutMode; label: string }> = [
+  { value: 'classic', label: '经典顶部' },
+  { value: 'bottom-tabs', label: '悬浮底栏' },
+  { value: 'floating-dock', label: '悬浮球' }
+]
+
+const mobileListStyleOptions: Array<{ value: MobileListStyle; label: string }> = [
+  { value: 'rows', label: '标准列表' },
+  { value: 'cards', label: '双列卡片' },
+  { value: 'compact', label: '极简紧凑' }
+]
+
 const densityOptions: Array<{ key: string; value: SkinDensity | null; label: string }> = [
   { key: 'follow', value: null, label: '跟随皮肤' },
   { key: 'compact', value: 'compact', label: '紧凑' },
@@ -1421,6 +1560,7 @@ const densityOptions: Array<{ key: string; value: SkinDensity | null; label: str
 const navItems = computed<Array<{
   key: SettingsSectionKey
   label: string
+  shortLabel: string
   hint?: string
   icon: UiIconName
   badge?: string | number
@@ -1429,30 +1569,35 @@ const navItems = computed<Array<{
   {
     key: 'appearance',
     label: '外观与交互',
+    shortLabel: '外观交互',
     hint: `${ui.activeSkin.name} · ${ui.theme === 'dark' ? '深色' : '浅色'}`,
     icon: 'sun'
   },
   {
     key: 'security',
     label: '安全与解锁',
+    shortLabel: '安全解锁',
     hint: session.deviceUnlockState.enabled ? '主密码 · 已启用设备快解' : '主密码 · 自动锁定 · 自动填充',
     icon: 'shield'
   },
   {
     key: 'sync',
     label: '云同步与备份',
+    shortLabel: '云端同步',
     hint: sync.hasCompleteOssSettings() ? '阿里云 OSS 已配置' : '配置云同步与本地完整备份',
     icon: 'cloud'
   },
   {
     key: 'storage',
     label: '附件与存储',
+    shortLabel: '附件存储',
     hint: '本地加密附件空间与清理',
     icon: 'paperclip'
   },
   {
     key: 'system',
     label: '系统分组',
+    shortLabel: '系统分组',
     hint: `已归档 ${vault.stats.archived} · 回收站 ${vault.stats.trashed}`,
     icon: 'archive',
     badge: (vault.stats.archived + vault.stats.trashed) || undefined,
@@ -1461,6 +1606,7 @@ const navItems = computed<Array<{
   {
     key: 'about',
     label: '关于与更新',
+    shortLabel: '关于更新',
     hint: `v${session.displayAppVersion}`,
     icon: 'info',
     badge: session.updateInfo?.updateAvailable ? '新' : undefined,
@@ -1471,6 +1617,16 @@ const navItems = computed<Array<{
 const isMobileMenu = computed(() => !ui.isWide && !ui.drawerDetailOpen)
 const isMobileSubpage = computed(() => !ui.isWide && ui.drawerDetailOpen)
 const activeNavItem = computed(() => navItems.value.find((item) => item.key === activeSection.value))
+const mobileNavGroups = computed(() => {
+  const byKey = new Map(navItems.value.map((item) => [item.key, item]))
+  const pick = (keys: SettingsSectionKey[]) => keys
+    .map((key) => byKey.get(key))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  return [
+    { title: '偏好与安全', items: pick(['appearance', 'security', 'sync']) },
+    { title: '数据与关于', items: pick(['storage', 'system', 'about']) }
+  ]
+})
 const modalTitle = computed(() => {
   if (isMobileSubpage.value) return activeNavItem.value?.label || '设置'
   return ui.isWide ? '设置与管理' : '设置'
@@ -1922,6 +2078,122 @@ watch(
   font-variant-numeric: tabular-nums;
   color: var(--text-muted);
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.skin-picker-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background-color: var(--surface-container-low);
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+.skin-picker-toggle:hover {
+  border-color: var(--border-strong);
+  background-color: var(--surface-container);
+}
+
+.skin-swatch--mini {
+  width: 44px;
+  height: 30px;
+  flex-shrink: 0;
+}
+
+.skin-picker-toggle__copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skin-picker-toggle__copy strong {
+  font-size: var(--app-font-sm);
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skin-picker-toggle__copy small {
+  font-size: var(--app-font-xs);
+  color: var(--text-muted);
+}
+
+.skin-picker-toggle__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--app-font-xs);
+  font-weight: 500;
+  color: var(--brand);
+  flex-shrink: 0;
+}
+
+.skin-picker-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background-color: var(--surface-container-low);
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+.skin-picker-toggle:hover {
+  border-color: var(--border-strong);
+  background-color: var(--surface-container);
+}
+
+.skin-swatch--mini {
+  width: 44px;
+  height: 30px;
+  flex-shrink: 0;
+}
+
+.skin-picker-toggle__copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skin-picker-toggle__copy strong {
+  font-size: var(--app-font-sm);
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skin-picker-toggle__copy small {
+  font-size: var(--app-font-xs);
+  color: var(--text-muted);
+}
+
+.skin-picker-toggle__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--app-font-xs);
+  font-weight: 500;
+  color: var(--brand);
   flex-shrink: 0;
 }
 
@@ -2712,86 +2984,161 @@ watch(
   display: none;
 }
 
+.settings-card--danger {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-soft));
+  background-color: color-mix(in srgb, var(--danger-soft) 45%, var(--surface-container-low));
+}
+
 @media (max-width: 767px) {
   .settings-layout {
     display: flex;
     flex-direction: column;
-    min-height: 100%;
+    height: 100%;
+    min-height: 0;
     gap: 10px;
+    overflow: hidden;
   }
 
   .settings-nav {
     flex: 1 1 auto;
     border-right: 0;
     border-bottom: 0;
-    padding: 0;
-    gap: 16px;
+    padding: 2px 0 8px;
+    gap: 0;
+    overflow-y: auto;
   }
 
-  .settings-nav-list {
+  .settings-mobile-groups {
     display: flex;
     flex-direction: column;
-    gap: 0;
+    gap: 18px;
+  }
+
+  .settings-mobile-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .settings-mobile-group__title {
+    margin: 0;
+    padding: 0 6px;
+    font-size: var(--app-font-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
+
+  .settings-mobile-group__card {
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--radius-lg);
     border: 1px solid var(--border-soft);
-    border-radius: var(--radius-md);
     background-color: var(--surface-container-low);
     overflow: hidden;
   }
 
-  .settings-nav-btn {
-    width: 100%;
-    justify-content: flex-start;
-    padding: 13px 14px;
+  .settings-mobile-row {
+    position: relative;
+    display: flex;
+    align-items: center;
     gap: 12px;
-    border-radius: 0;
+    width: 100%;
+    padding: 13px 14px;
     border: 0;
-    border-bottom: 1px solid var(--border-soft);
-    background-color: transparent;
+    background: transparent;
     color: var(--text-main);
-    font-size: var(--app-font-base);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color var(--duration-fast) var(--ease-standard);
   }
 
-  .settings-nav-btn:last-child {
-    border-bottom: 0;
+  .settings-mobile-row + .settings-mobile-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 62px;
+    right: 14px;
+    height: 1px;
+    background-color: var(--border-soft);
   }
 
-  .settings-nav-icon {
-    flex: 0 0 32px;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-sm);
+  .settings-mobile-row:hover,
+  .settings-mobile-row:active {
+    background-color: var(--surface-container-high);
+  }
+
+  .settings-mobile-row__icon {
+    flex: 0 0 36px;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--brand-soft);
+    color: var(--brand);
+  }
+
+  .settings-mobile-row__icon.is-security {
+    background-color: color-mix(in srgb, var(--success) 16%, transparent);
+    color: var(--success);
+  }
+
+  .settings-mobile-row__icon.is-sync {
+    background-color: color-mix(in srgb, var(--brand) 16%, transparent);
+    color: var(--brand);
+  }
+
+  .settings-mobile-row__icon.is-storage {
+    background-color: color-mix(in srgb, var(--warning) 16%, transparent);
+    color: var(--warning);
+  }
+
+  .settings-mobile-row__icon.is-system {
     background-color: var(--surface-container-high);
     color: var(--text-secondary);
   }
 
-  .settings-nav-hint {
-    display: block;
+  .settings-mobile-row__icon.is-about {
+    background-color: color-mix(in srgb, var(--brand) 12%, var(--surface-container-high));
+    color: var(--brand);
+  }
+
+  .settings-mobile-row__copy {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .settings-mobile-row__label {
+    font-size: var(--app-font-base);
+    font-weight: 600;
+    color: var(--text-main);
+    line-height: 1.3;
+  }
+
+  .settings-mobile-row__hint {
     font-size: var(--app-font-xs);
-    font-weight: 400;
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .settings-nav-chevron {
-    display: inline-flex;
+  .settings-mobile-row__chevron {
     flex: 0 0 auto;
     color: var(--text-muted);
-  }
-
-  .settings-nav-footer {
-    display: block;
-    padding-top: 0;
-    border-top: 0;
-  }
-
-  .settings-nav-footer .settings-exit-btn {
-    border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border-soft));
-    background-color: var(--danger-soft);
+    opacity: 0.72;
   }
 
   .settings-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 0;
     gap: 10px;
   }
 
@@ -2800,8 +3147,19 @@ watch(
   }
 
   .settings-card {
-    padding: 12px;
+    padding: 13px;
     gap: 10px;
+    border-radius: var(--radius-lg);
+  }
+
+  .setting-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .setting-row__actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .oss-grid,

@@ -39,6 +39,8 @@
         :editor-open="ui.editorOpen"
         :layout-mode="ui.activeLayout.mode"
         :list-style="ui.activeLayout.listStyle"
+        :mobile-layout-mode="ui.mobileLayoutMode"
+        :mobile-list-style="ui.mobileListStyle"
         :density="ui.activeLayout.density"
         :sidebar-view="vaultStore.sidebarView"
         :active-folder-id="vaultStore.activeFolderId"
@@ -153,6 +155,7 @@
             ref="headerRef"
             :is-desktop="ui.isWide"
             :show-sidebar-toggle="!ui.isWide"
+            :mobile-chrome-mode="ui.mobileLayoutMode"
             :search-open="ui.searchOpen"
             :keyword="vaultStore.keyword"
             :entry-filter="vaultStore.entryFilter"
@@ -208,15 +211,144 @@
             @update-custom-fields="vaultStore.form.customFields = $event"
           />
         </template>
+
+        <template #mobile-chrome>
+          <nav
+            v-if="!ui.isWide && ui.mobileLayoutMode === 'bottom-tabs'"
+            class="mobile-bottom-tabs"
+            aria-label="移动端底部导航"
+          >
+            <button
+              type="button"
+              class="mobile-bottom-tab"
+              :class="{ 'is-active': vaultStore.sidebarView === 'all' && !ui.searchOpen && !ui.mobileNavOpen }"
+              @click="handleSidebarSelectView('all')"
+            >
+              <UiIcon name="shield" :size="18" />
+              <span>全部</span>
+            </button>
+            <button
+              type="button"
+              class="mobile-bottom-tab"
+              :class="{ 'is-active': vaultStore.sidebarView === 'favorites' && !ui.searchOpen && !ui.mobileNavOpen }"
+              @click="handleSidebarSelectView('favorites')"
+            >
+              <UiIcon name="star" :size="18" />
+              <span>收藏</span>
+            </button>
+            <button
+              type="button"
+              class="mobile-bottom-tab is-create"
+              aria-label="新建条目"
+              @click="vaultStore.openCreate('login')"
+            >
+              <span class="mobile-bottom-tab__fab">
+                <UiIcon name="plus" :size="18" />
+              </span>
+            </button>
+            <button
+              type="button"
+              class="mobile-bottom-tab"
+              :class="{ 'is-active': ui.quickAccessOpen }"
+              @click="openMobileQuickSearch"
+            >
+              <UiIcon name="search" :size="18" />
+              <span>搜索</span>
+            </button>
+            <button
+              type="button"
+              class="mobile-bottom-tab"
+              :class="{ 'is-active': ui.drawerOpen }"
+              @click="openDrawer"
+            >
+              <UiIcon name="settings" :size="18" />
+              <span>设置</span>
+            </button>
+          </nav>
+
+          <template v-else-if="!ui.isWide && ui.mobileLayoutMode === 'floating-dock'">
+            <div
+              v-if="mobileFloatingBallOpen"
+              class="mobile-fab-backdrop"
+              aria-hidden="true"
+              @click="mobileFloatingBallOpen = false"
+            />
+            <div
+              class="mobile-floating-dock"
+              :class="{ 'is-open': mobileFloatingBallOpen, 'is-dragging': mobileFabDragging }"
+              :style="mobileFabContainerStyle"
+              role="group"
+              aria-label="移动端悬浮球菜单"
+            >
+              <button
+                type="button"
+                class="mobile-fab-item"
+                :style="mobileFabItemStyle('vertical')"
+                :tabindex="mobileFloatingBallOpen ? 0 : -1"
+                aria-label="新建条目"
+                @click="handleMobileFabAction('create')"
+              >
+                <UiIcon name="plus" :size="16" />
+                <span>新建</span>
+              </button>
+              <button
+                type="button"
+                class="mobile-fab-item"
+                :class="{ 'is-active': ui.quickAccessOpen }"
+                :style="mobileFabItemStyle('diagonal')"
+                :tabindex="mobileFloatingBallOpen ? 0 : -1"
+                aria-label="快速搜索"
+                @click="handleMobileFabAction('search')"
+              >
+                <UiIcon name="search" :size="16" />
+                <span>搜索</span>
+              </button>
+              <button
+                type="button"
+                class="mobile-fab-item"
+                :class="{ 'is-active': ui.drawerOpen }"
+                :style="mobileFabItemStyle('horizontal')"
+                :tabindex="mobileFloatingBallOpen ? 0 : -1"
+                aria-label="打开设置"
+                @click="handleMobileFabAction('settings')"
+              >
+                <UiIcon name="settings" :size="16" />
+                <span>设置</span>
+              </button>
+              <button
+                type="button"
+                class="mobile-fab-trigger"
+                :class="{ 'is-open': mobileFloatingBallOpen }"
+                :aria-expanded="mobileFloatingBallOpen"
+                :aria-label="mobileFloatingBallOpen ? '收起快捷菜单' : '展开快捷菜单'"
+                @pointerdown="startMobileFabDrag"
+                @click="handleMobileFabTriggerClick"
+              >
+                <UiIcon :name="mobileFloatingBallOpen ? 'close' : 'plus'" :size="20" />
+              </button>
+            </div>
+          </template>
+        </template>
       </VaultWorkspace>
     </section>
 
     <Teleport to="body">
+      <div
+        v-if="!ui.isWide && !ui.mobileNavOpen && mobileSwipeHint.active"
+        class="mobile-swipe-indicator"
+        :class="{ 'is-ready': mobileSwipeHint.ready }"
+        :style="mobileSwipeIndicatorStyle"
+        aria-hidden="true"
+      >
+        <UiIcon name="chevron-right" :size="15" />
+        <span>{{ mobileSwipeHint.ready ? '松手打开菜单' : '右滑打开菜单' }}</span>
+      </div>
+
       <Transition name="mobile-nav-fade">
         <div
           v-if="!ui.isWide && ui.mobileNavOpen"
           class="mobile-nav-backdrop"
-          @mousedown.self="ui.mobileNavOpen = false"
+          @click.self="ui.mobileNavOpen = false"
         >
           <div class="mobile-nav-drawer" role="dialog" aria-modal="true" aria-label="保险库导航菜单">
             <WorkspaceSidebar
@@ -303,7 +435,8 @@
       :search-index="vaultSearchIndex"
       :favorite-ids="vaultStore.favoriteEntryIds"
       :recent-ids="vaultStore.recentEntryIds"
-      @update:open="ui.quickAccessOpen = $event"
+      :show-commands="quickAccessShowCommands"
+      @update:open="handleQuickAccessOpenChange"
       @open-entry="vaultStore.openQuickAccessEntry"
       @copy="vaultStore.copyText"
       @copy-password="vaultStore.copyEntryPassword"
@@ -590,7 +723,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import AuthScreen from './components/auth/AuthScreen.vue'
 import DesktopTitleBar from './components/desktop/DesktopTitleBar.vue'
 import DetailContent from './components/DetailContent.vue'
@@ -600,14 +733,27 @@ import VaultWorkspace from './components/workspace/VaultWorkspace.vue'
 import WorkspaceHeader from './components/workspace/WorkspaceHeader.vue'
 import WorkspaceSidebar, { type WorkspaceSidebarFolderAction, type WorkspaceSidebarView } from './components/workspace/WorkspaceSidebar.vue'
 import WorkspaceTopNav from './components/workspace/WorkspaceTopNav.vue'
-import { UiBadge, UiButton, UiContextMenu, UiFeedbackHost, UiInput, UiModal, type UiContextMenuItem } from './components/ui'
+import { UiBadge, UiButton, UiContextMenu, UiFeedbackHost, UiIcon, UiInput, UiModal, type UiContextMenuItem } from './components/ui'
 import type { VaultEntry } from './types'
 import { useAndroidAutofillSettings } from './composables/useAndroidAutofillSettings'
 import { useAndroidPasskeyProviderSettings } from './composables/useAndroidPasskeyProviderSettings'
 import { useDesktopTraySettings } from './composables/useDesktopTraySettings'
 import { usePluginListenerSettings } from './composables/usePluginListenerSettings'
 import { api } from './services/api'
-import { isAndroidRuntime, isDesktopRuntime } from './services/runtime'
+import {
+  canStartMobileDrawerSwipe,
+  evaluateMobileDrawerSwipeMove
+} from './services/mobileDrawerSwipe'
+import {
+  MOBILE_FAB_DRAG_THRESHOLD_PX,
+  MOBILE_FAB_POSITION_KEY,
+  clampMobileFabPosition,
+  defaultMobileFabPosition,
+  parseStoredMobileFabPosition,
+  resolveMobileFabFanOffsets,
+  type MobileFabPosition
+} from './services/mobileFloatingBall'
+import { isAndroidRuntime, isDesktopRuntime, readLocalStorage, writeLocalStorage } from './services/runtime'
 import { activeConfirm, clearAllFeedback, showToast, uiFeedback } from './services/uiFeedback'
 import { createAppStores, provideAppStores } from './stores'
 
@@ -681,6 +827,265 @@ const sidebarCloudStatusText = computed(() => {
 })
 
 let lastBackRequestAt = 0
+const mobileFloatingBallOpen = ref(false)
+const mobileFabDragging = ref(false)
+const mobileFabViewport = reactive({
+  width: typeof window !== 'undefined' ? window.innerWidth : 390,
+  height: typeof window !== 'undefined' ? window.innerHeight : 844
+})
+
+function desktopTitleBarInset(): number {
+  return desktopTitleBarWindow ? 36 : 0
+}
+
+function loadInitialMobileFabPosition(): MobileFabPosition {
+  const stored = parseStoredMobileFabPosition(readLocalStorage(MOBILE_FAB_POSITION_KEY))
+  if (stored) {
+    return clampMobileFabPosition(stored, mobileFabViewport.width, mobileFabViewport.height, desktopTitleBarInset())
+  }
+  return defaultMobileFabPosition(mobileFabViewport.width, mobileFabViewport.height, desktopTitleBarInset())
+}
+
+const mobileFabPos = reactive<MobileFabPosition>(loadInitialMobileFabPosition())
+let mobileFabDragSession: {
+  pointerId: number
+  startX: number
+  startY: number
+  originX: number
+  originY: number
+  moved: boolean
+} | null = null
+let suppressNextMobileFabClick = false
+
+const mobileFabContainerStyle = computed(() => ({
+  left: `${mobileFabPos.x}px`,
+  top: `${mobileFabPos.y}px`
+}))
+
+const mobileFabFanOffsets = computed(() =>
+  resolveMobileFabFanOffsets(mobileFabPos, mobileFabViewport.width, mobileFabViewport.height, desktopTitleBarInset())
+)
+
+function mobileFabItemStyle(slot: 'vertical' | 'diagonal' | 'horizontal'): Record<string, string> {
+  if (!mobileFloatingBallOpen.value) {
+    return { transform: 'translate3d(0, 0, 0) scale(0.5)' }
+  }
+  const offset = mobileFabFanOffsets.value[slot]
+  return { transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(1)` }
+}
+
+function syncMobileFabViewport(): void {
+  if (typeof window === 'undefined') return
+  mobileFabViewport.width = window.innerWidth
+  mobileFabViewport.height = window.innerHeight
+  const clamped = clampMobileFabPosition(mobileFabPos, mobileFabViewport.width, mobileFabViewport.height, desktopTitleBarInset())
+  mobileFabPos.x = clamped.x
+  mobileFabPos.y = clamped.y
+}
+
+function startMobileFabDrag(event: PointerEvent): void {
+  if (event.button !== 0) return
+  mobileFabDragSession = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: mobileFabPos.x,
+    originY: mobileFabPos.y,
+    moved: false
+  }
+  window.addEventListener('pointermove', handleMobileFabDragMove)
+  window.addEventListener('pointerup', finishMobileFabDrag)
+  window.addEventListener('pointercancel', finishMobileFabDrag)
+}
+
+function handleMobileFabDragMove(event: PointerEvent): void {
+  if (!mobileFabDragSession || event.pointerId !== mobileFabDragSession.pointerId) return
+  const dx = event.clientX - mobileFabDragSession.startX
+  const dy = event.clientY - mobileFabDragSession.startY
+  if (!mobileFabDragSession.moved && Math.hypot(dx, dy) < MOBILE_FAB_DRAG_THRESHOLD_PX) return
+  if (!mobileFabDragSession.moved) {
+    mobileFabDragSession.moved = true
+    mobileFabDragging.value = true
+    mobileFloatingBallOpen.value = false
+  }
+  const next = clampMobileFabPosition(
+    { x: mobileFabDragSession.originX + dx, y: mobileFabDragSession.originY + dy },
+    mobileFabViewport.width,
+    mobileFabViewport.height,
+    desktopTitleBarInset()
+  )
+  mobileFabPos.x = next.x
+  mobileFabPos.y = next.y
+}
+
+function finishMobileFabDrag(event: PointerEvent): void {
+  if (!mobileFabDragSession || event.pointerId !== mobileFabDragSession.pointerId) return
+  const moved = mobileFabDragSession.moved
+  mobileFabDragSession = null
+  mobileFabDragging.value = false
+  window.removeEventListener('pointermove', handleMobileFabDragMove)
+  window.removeEventListener('pointerup', finishMobileFabDrag)
+  window.removeEventListener('pointercancel', finishMobileFabDrag)
+  if (moved) {
+    suppressNextMobileFabClick = true
+    writeLocalStorage(MOBILE_FAB_POSITION_KEY, JSON.stringify({ x: mobileFabPos.x, y: mobileFabPos.y }))
+  }
+}
+
+function handleMobileFabTriggerClick(): void {
+  if (suppressNextMobileFabClick) {
+    suppressNextMobileFabClick = false
+    return
+  }
+  mobileFloatingBallOpen.value = !mobileFloatingBallOpen.value
+}
+
+const quickAccessShowCommands = ref(true)
+
+watch(() => ui.quickAccessOpen, (open) => {
+  if (!open) {
+    quickAccessShowCommands.value = true
+  }
+})
+
+function handleQuickAccessOpenChange(open: boolean): void {
+  ui.quickAccessOpen = open
+  if (!open) {
+    quickAccessShowCommands.value = true
+  }
+}
+
+function openMobileQuickSearch(): void {
+  quickAccessShowCommands.value = false
+  vaultStore.openQuickAccess()
+  if (!ui.quickAccessOpen) {
+    quickAccessShowCommands.value = true
+  }
+}
+
+function handleMobileFabAction(action: 'create' | 'search' | 'settings'): void {
+  mobileFloatingBallOpen.value = false
+  if (action === 'create') {
+    vaultStore.openCreate('login')
+    return
+  }
+  if (action === 'search') {
+    openMobileQuickSearch()
+    return
+  }
+  openDrawer()
+}
+
+const mobileSwipeHint = reactive({
+  active: false,
+  progress: 0,
+  ready: false
+})
+
+const mobileSwipeIndicatorStyle = computed(() => {
+  const offset = Math.round(mobileSwipeHint.progress * 24 - 16)
+  const opacity = Math.min(1, Math.max(0.28, mobileSwipeHint.progress))
+  return {
+    transform: `translate3d(${offset}px, -50%, 0)${mobileSwipeHint.ready ? ' scale(1.03)' : ''}`,
+    opacity: String(opacity)
+  }
+})
+
+let mobileSwipeSession: {
+  startX: number
+  startY: number
+  drawerOpen: boolean
+  locked: boolean
+} | null = null
+
+function resetMobileSwipeState(): void {
+  mobileSwipeSession = null
+  mobileSwipeHint.active = false
+  mobileSwipeHint.progress = 0
+  mobileSwipeHint.ready = false
+}
+
+function isHorizontalScrollableAncestor(target: EventTarget | null): boolean {
+  let node = target instanceof HTMLElement ? target : null
+  while (node && node !== document.body) {
+    if (node.matches('input, textarea, select, [contenteditable="true"], [role="slider"], .mobile-floating-dock, .mobile-floating-dock *')) {
+      return true
+    }
+    if (node.scrollWidth > node.clientWidth + 4) {
+      const overflowX = window.getComputedStyle(node).overflowX
+      if (overflowX === 'auto' || overflowX === 'scroll') return true
+    }
+    node = node.parentElement
+  }
+  return false
+}
+
+function handleMobileTouchStart(event: TouchEvent): void {
+  if (ui.isWide || !session.unlocked || vaultStore.dragMode) {
+    resetMobileSwipeState()
+    return
+  }
+  if (event.touches.length !== 1) {
+    resetMobileSwipeState()
+    return
+  }
+  const drawerOpen = ui.mobileNavOpen
+  if (!drawerOpen && hasBlockingOverlay()) {
+    resetMobileSwipeState()
+    return
+  }
+  const touch = event.touches[0]
+  if (!touch || !canStartMobileDrawerSwipe(touch.clientX, drawerOpen)) {
+    resetMobileSwipeState()
+    return
+  }
+  if (!drawerOpen && isHorizontalScrollableAncestor(event.target)) {
+    resetMobileSwipeState()
+    return
+  }
+  mobileSwipeSession = {
+    startX: touch.clientX,
+    startY: touch.clientY,
+    drawerOpen,
+    locked: false
+  }
+}
+
+function handleMobileTouchMove(event: TouchEvent): void {
+  if (!mobileSwipeSession || event.touches.length !== 1) return
+  const touch = event.touches[0]
+  if (!touch) return
+  const dx = touch.clientX - mobileSwipeSession.startX
+  const dy = touch.clientY - mobileSwipeSession.startY
+  const evaluation = evaluateMobileDrawerSwipeMove(dx, dy, mobileSwipeSession.drawerOpen)
+  if (evaluation.status === 'cancelled') {
+    resetMobileSwipeState()
+    return
+  }
+  if (evaluation.status === 'active') {
+    mobileSwipeSession.locked = true
+    if (!mobileSwipeSession.drawerOpen) {
+      mobileSwipeHint.active = true
+      mobileSwipeHint.progress = evaluation.progress
+      mobileSwipeHint.ready = evaluation.ready
+    } else {
+      mobileSwipeHint.ready = evaluation.ready
+    }
+  }
+}
+
+function handleMobileTouchEnd(): void {
+  if (!mobileSwipeSession) return
+  const shouldTrigger = mobileSwipeSession.locked && mobileSwipeHint.ready
+  const wasOpen = mobileSwipeSession.drawerOpen
+  resetMobileSwipeState()
+  if (!shouldTrigger || ui.isWide || !session.unlocked) return
+  if (wasOpen) {
+    ui.mobileNavOpen = false
+  } else if (!hasBlockingOverlay()) {
+    ui.mobileNavOpen = true
+  }
+}
 
 function hasBlockingOverlay(): boolean {
   if (activeConfirm.value) return true
@@ -1244,6 +1649,11 @@ onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('pointerdown', session.handleSessionActivity, true)
   window.addEventListener('pointerdown', closeTopMenusOnOutside, true)
+  window.addEventListener('touchstart', handleMobileTouchStart, { passive: true })
+  window.addEventListener('touchmove', handleMobileTouchMove, { passive: true })
+  window.addEventListener('touchend', handleMobileTouchEnd, { passive: true })
+  window.addEventListener('touchcancel', resetMobileSwipeState, { passive: true })
+  window.addEventListener('resize', syncMobileFabViewport)
   window.addEventListener('scroll', ui.closeContextMenu, true)
   window.addEventListener('resize', ui.closeContextMenu)
   document.addEventListener('contextmenu', handleGlobalContextMenu)
@@ -1279,6 +1689,15 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown)
   window.removeEventListener('pointerdown', session.handleSessionActivity, true)
   window.removeEventListener('pointerdown', closeTopMenusOnOutside, true)
+  window.removeEventListener('touchstart', handleMobileTouchStart)
+  window.removeEventListener('touchmove', handleMobileTouchMove)
+  window.removeEventListener('touchend', handleMobileTouchEnd)
+  window.removeEventListener('touchcancel', resetMobileSwipeState)
+  window.removeEventListener('resize', syncMobileFabViewport)
+  window.removeEventListener('pointermove', handleMobileFabDragMove)
+  window.removeEventListener('pointerup', finishMobileFabDrag)
+  window.removeEventListener('pointercancel', finishMobileFabDrag)
+  resetMobileSwipeState()
   window.removeEventListener('scroll', ui.closeContextMenu, true)
   window.removeEventListener('resize', ui.closeContextMenu)
   document.removeEventListener('contextmenu', handleGlobalContextMenu)
@@ -1372,9 +1791,178 @@ onUnmounted(() => {
   min-height: 0;
 }
 
+.mobile-swipe-indicator {
+  position: fixed;
+  top: 50%;
+  left: 0;
+  z-index: calc(var(--z-modal) - 1);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 12px 8px 10px;
+  border-radius: 0 999px 999px 0;
+  border: 1px solid var(--border-soft);
+  border-left: 0;
+  background-color: var(--panel-bg);
+  color: var(--text-secondary);
+  font-size: var(--app-font-xs);
+  font-weight: 500;
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  transition: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+
+.mobile-swipe-indicator.is-ready {
+  background-color: var(--brand);
+  border-color: var(--brand);
+  color: var(--on-brand);
+}
+
+.mobile-bottom-tabs {
+  position: fixed;
+  left: 14px;
+  right: 14px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: calc(var(--z-dropdown) + 10);
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: center;
+  max-width: 420px;
+  margin: 0 auto;
+  min-height: 56px;
+  padding: 5px 8px;
+  border-radius: 24px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 45%, transparent);
+  background-color: color-mix(in srgb, var(--panel-bg) 68%, transparent);
+  backdrop-filter: blur(18px) saturate(160%);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+}
+
+.mobile-bottom-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+.mobile-bottom-tab.is-active {
+  color: var(--brand);
+  background-color: color-mix(in srgb, var(--brand) 14%, transparent);
+}
+
+.mobile-bottom-tab__fab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 36px;
+  border-radius: var(--radius-full);
+  background-color: color-mix(in srgb, var(--brand) 82%, transparent);
+  color: var(--on-brand);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--brand) 30%, transparent);
+}
+
+.mobile-fab-backdrop {
+  position: fixed;
+  inset: var(--desktop-titlebar-height, 0px) 0 0;
+  z-index: calc(var(--z-dropdown) + 9);
+  background: transparent;
+}
+
+.mobile-floating-dock {
+  position: fixed;
+  z-index: calc(var(--z-dropdown) + 10);
+  width: 50px;
+  height: 50px;
+  touch-action: none;
+}
+
+.mobile-fab-trigger {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  height: 50px;
+  border: 1px solid color-mix(in srgb, var(--on-brand) 28%, transparent);
+  border-radius: 50%;
+  background-color: color-mix(in srgb, var(--brand) 78%, transparent);
+  backdrop-filter: blur(14px) saturate(150%);
+  color: var(--on-brand);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+  cursor: grab;
+  touch-action: none;
+  transition: transform var(--duration-normal) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+.mobile-floating-dock.is-dragging .mobile-fab-trigger {
+  cursor: grabbing;
+  transform: scale(1.06);
+}
+
+.mobile-fab-trigger.is-open {
+  transform: rotate(90deg);
+}
+
+.mobile-fab-item {
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  z-index: 1;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 50%, transparent);
+  background-color: color-mix(in srgb, var(--panel-bg) 74%, transparent);
+  backdrop-filter: blur(16px) saturate(160%);
+  color: var(--text-main);
+  font-size: 10px;
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform var(--duration-normal) var(--ease-standard),
+    opacity var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.mobile-fab-item.is-active {
+  background-color: color-mix(in srgb, var(--brand) 22%, var(--panel-bg));
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.mobile-floating-dock.is-open .mobile-fab-item {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .mobile-nav-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--desktop-titlebar-height, 0px) 0 0;
   z-index: var(--z-modal);
   display: flex;
   background-color: var(--surface-overlay);

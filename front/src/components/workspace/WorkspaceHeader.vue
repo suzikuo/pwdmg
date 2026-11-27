@@ -47,7 +47,7 @@
 
       <div class="topbar-actions">
         <UiButton
-          v-if="!resolvedIsDesktop"
+          v-if="!resolvedIsDesktop && showMobilePrimaryActions"
           variant="ghost"
           size="sm"
           icon-only
@@ -59,6 +59,7 @@
         </UiButton>
 
         <UiButton
+          v-if="resolvedIsDesktop || showMobilePrimaryActions"
           variant="primary"
           size="sm"
           :icon-only="!resolvedIsDesktop"
@@ -187,10 +188,12 @@ const props = withDefaults(defineProps<{
   moreActions: WorkspaceAction[]
   showSidebarToggle?: boolean
   isDesktop?: boolean
+  mobileChromeMode?: 'classic' | 'bottom-tabs' | 'floating-dock'
 }>(), {
   entryFilter: 'all',
   showSidebarToggle: true,
-  isDesktop: undefined
+  isDesktop: undefined,
+  mobileChromeMode: 'classic'
 })
 
 const emit = defineEmits<{
@@ -217,6 +220,7 @@ const resolvedIsDesktop = computed(() =>
   typeof props.isDesktop === 'boolean' ? props.isDesktop : viewportDesktop.value
 )
 const showMenuButton = computed(() => props.showSidebarToggle)
+const showMobilePrimaryActions = computed(() => props.mobileChromeMode === 'classic')
 
 function handleResize() {
   viewportDesktop.value = window.innerWidth >= 768

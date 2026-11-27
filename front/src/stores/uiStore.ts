@@ -49,6 +49,8 @@ import {
 
 export type ThemeMode = 'light' | 'dark'
 export type ThemePreference = ThemeMode | 'system'
+export type MobileLayoutMode = 'classic' | 'bottom-tabs' | 'floating-dock'
+export type MobileListStyle = 'rows' | 'cards' | 'compact'
 export type CssVars = Record<string, string>
 
 export interface AppContextMenuState {
@@ -118,6 +120,26 @@ export const FONT_SIZE_KEY = 'mypwdmg.fontSizePercent'
 export const FONT_SIZE_MIN = 80
 export const FONT_SIZE_MAX = 130
 export const THEME_KEY = 'mypwdmg.theme'
+export const MOBILE_LAYOUT_MODE_KEY = 'mypwdmg.mobileLayoutMode.v1'
+export const MOBILE_LIST_STYLE_KEY = 'mypwdmg.mobileListStyle.v1'
+
+export function normalizeMobileLayoutMode(value: unknown): MobileLayoutMode {
+  if (value === 'bottom-tabs' || value === 'floating-dock') return value
+  return 'classic'
+}
+
+export function normalizeMobileListStyle(value: unknown): MobileListStyle {
+  if (value === 'cards' || value === 'compact') return value
+  return 'rows'
+}
+
+function loadMobileLayoutMode(): MobileLayoutMode {
+  return normalizeMobileLayoutMode(readLocalStorage(MOBILE_LAYOUT_MODE_KEY))
+}
+
+function loadMobileListStyle(): MobileListStyle {
+  return normalizeMobileListStyle(readLocalStorage(MOBILE_LIST_STYLE_KEY))
+}
 
 function resolveSystemTheme(): ThemeMode {
   if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
@@ -189,6 +211,12 @@ export function createUiStore() {
   )
   const hasLayoutOverride = computed<boolean>(() =>
     Boolean(layoutOverride.value.mode || layoutOverride.value.density || layoutOverride.value.listStyle)
+  )
+
+  const mobileLayoutMode = ref<MobileLayoutMode>(loadMobileLayoutMode())
+  const mobileListStyle = ref<MobileListStyle>(loadMobileListStyle())
+  const hasMobileLayoutOverride = computed<boolean>(() =>
+    mobileLayoutMode.value !== 'classic' || mobileListStyle.value !== 'rows' || Boolean(layoutOverride.value.density)
   )
 
   const uiScalePercent = ref(loadUiScale())
@@ -511,6 +539,24 @@ export function createUiStore() {
     updateLayoutOverride({ density })
   }
 
+  function setMobileLayoutMode(mode: MobileLayoutMode): void {
+    const next = normalizeMobileLayoutMode(mode)
+    mobileLayoutMode.value = next
+    writeLocalStorage(MOBILE_LAYOUT_MODE_KEY, next)
+  }
+
+  function setMobileListStyle(style: MobileListStyle): void {
+    const next = normalizeMobileListStyle(style)
+    mobileListStyle.value = next
+    writeLocalStorage(MOBILE_LIST_STYLE_KEY, next)
+  }
+
+  function resetMobileLayoutOverride(): void {
+    setMobileLayoutMode('classic')
+    setMobileListStyle('rows')
+    if (layoutOverride.value.density) updateLayoutOverride({ density: null })
+  }
+
   function resetLayoutOverride(): void {
     const prevMode = activeLayout.value.mode
     layoutOverride.value = {}
@@ -716,10 +762,16 @@ export function createUiStore() {
     layoutOverride,
     activeLayout,
     hasLayoutOverride,
+    mobileLayoutMode,
+    mobileListStyle,
+    hasMobileLayoutOverride,
     setSkin,
     setLayoutMode,
     setListStyle,
     setDensity,
+    setMobileLayoutMode,
+    setMobileListStyle,
+    resetMobileLayoutOverride,
     resetLayoutOverride,
     installSkinFromJson,
     removeCustomSkin,

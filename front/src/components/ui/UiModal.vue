@@ -158,7 +158,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .ui-modal-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--desktop-titlebar-height, 0px) 0 0;
   z-index: var(--z-modal);
   display: flex;
   align-items: center;
@@ -388,10 +388,8 @@ onBeforeUnmount(() => {
   .ui-modal--fullscreen-mobile {
     width: 100%;
     max-width: 100%;
-    height: 100vh;
-    height: 100dvh;
-    max-height: 100vh;
-    max-height: 100dvh;
+    height: 100%;
+    max-height: 100%;
     border-radius: 0;
     border: 0;
     box-shadow: none;
