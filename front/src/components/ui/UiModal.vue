@@ -9,6 +9,7 @@
           'ui-modal-backdrop--sheet-mobile': sheetOnMobile && !fullscreenOnMobile,
           'ui-modal-backdrop--fullscreen-mobile': fullscreenOnMobile
         }"
+        :style="backdropStyle"
         @mousedown.self="handleBackdropClick"
       >
         <div
@@ -66,7 +67,13 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref, useId, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
+import {
+  getModalStackOffset,
+  isTopModalInStack,
+  pushModalToStack,
+  removeModalFromStack
+} from '../../services/modalStack'
 import { activeConfirm } from '../../services/uiFeedback'
 import UiIcon from './UiIcon.vue'
 
@@ -102,7 +109,12 @@ const emit = defineEmits<{
 }>()
 
 const titleId = useId()
+const modalStackId = useId()
 const dialogEl = ref<HTMLElement | null>(null)
+const backdropStyle = computed(() => {
+  const offset = getModalStackOffset(modalStackId, props.stacked)
+  return offset > 0 ? { zIndex: `calc(var(--z-modal) + ${offset})` } : undefined
+})
 
 function handleBackdropClick(): void {
   if (!props.closeOnBackdrop) return
@@ -111,7 +123,7 @@ function handleBackdropClick(): void {
 
 function handleKeydown(event: KeyboardEvent): void {
   if (!props.open || event.key !== 'Escape' || event.defaultPrevented) return
-  if (activeConfirm.value) return
+  if (activeConfirm.value || !isTopModalInStack(modalStackId)) return
   event.preventDefault()
   event.stopPropagation()
   emit('close')
@@ -120,6 +132,11 @@ function handleKeydown(event: KeyboardEvent): void {
 watch(
   () => props.open,
   (isOpen) => {
+    if (isOpen) {
+      pushModalToStack(modalStackId)
+    } else {
+      removeModalFromStack(modalStackId)
+    }
     if (typeof window === 'undefined') return
     if (isOpen) {
       window.addEventListener('keydown', handleKeydown)
@@ -131,6 +148,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  removeModalFromStack(modalStackId)
   if (typeof window !== 'undefined') {
     window.removeEventListener('keydown', handleKeydown)
   }

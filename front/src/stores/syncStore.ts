@@ -10,6 +10,17 @@ import {
 import { DEFAULT_OSS_OBJECT_NAME, normalizeObjectName } from '../services/aliyunOss.ts'
 import { api } from '../services/api.ts'
 import { AutoSyncPasswordGate } from '../services/autoSyncPasswordGate.ts'
+import {
+  AUTO_SYNC_POSTPONE_DEFAULT_MINUTES,
+  AUTO_SYNC_POSTPONE_PRESET_MINUTES,
+  AUTO_SYNC_POSTPONE_UNTIL_KEY,
+  formatAutoSyncPostponePresetLabel,
+  formatAutoSyncPostponeTime,
+  isAutoSyncPostponedAt,
+  normalizeAutoSyncPostponeMinutes,
+  normalizeAutoSyncPostponedUntil,
+  remainingAutoSyncPostponeMs
+} from '../services/autoSyncPostpone.ts'
 import { readCloudEncryptionBinding } from '../services/cloudEncryptionBinding.ts'
 import {
   cloudSyncChangeLabel,
@@ -174,10 +185,18 @@ export function createSyncStore(deps: SyncStoreDeps) {
   const portableBackupSelection = ref<PortableBackupSelection | null>(null)
   const portableBackupPassword = ref('')
 
-  // Auto-sync timers
+  // Auto-sync timers & postpone state
   let autoCloudUploadTimer = 0
   let autoCloudDownloadTimer = 0
+  let autoSyncPostponeTimer = 0
   let lastAutoCloudDownloadCheckAt = 0
+  let pendingAutoUploadDuringPostpone = false
+  let pendingAutoDownloadDuringPostpone = false
+  const autoSyncPostponedUntil = ref(normalizeAutoSyncPostponedUntil(readLocalStorage(AUTO_SYNC_POSTPONE_UNTIL_KEY)))
+  const isAutoSyncPostponed = computed(() => isAutoSyncPostponedAt(autoSyncPostponedUntil.value))
+  const autoSyncPostponedUntilLabel = computed(() => (
+    isAutoSyncPostponed.value ? formatAutoSyncPostponeTime(autoSyncPostponedUntil.value) : ''
+  ))
 
   // ---- Settings helpers ----
   function updateOssSetting(field: keyof typeof settings.oss, value: string): void {
@@ -258,6 +277,9 @@ export function createSyncStore(deps: SyncStoreDeps) {
       return false
     }
     if (!deps.publishVaultPayload(result.data)) return false
+    if (!settings.oss.autoSync && autoSyncPostponedUntil.value > 0) {
+      resumeAutoSync({ triggerCheck: false, toast: false })
+    }
     if (options.closeDrawer) ui.drawerOpen.value = false
     if (options.toast) feedback.successToast('设置已保存')
     if (!options.skipAutoSync) {
@@ -536,9 +558,118 @@ export function createSyncStore(deps: SyncStoreDeps) {
     return `已绑定 · PBKDF2-SHA256 ${binding.kdf.iterations.toLocaleString()} 次 · ${formatDateTime(verifiedAt)}`
   })
 
-  // ---- Auto-Sync Scheduling ----
+  // ---- Auto-Sync Postpone & Scheduling ----
+  function clearAutoSyncPostponeTimer(): void {
+    if (typeof window !== 'undefined' && autoSyncPostponeTimer) {
+      window.clearTimeout(autoSyncPostponeTimer)
+    }
+    autoSyncPostponeTimer = 0
+  }
+
+  function expireAutoSyncPostponeIfNeeded(): boolean {
+    if (autoSyncPostponedUntil.value <= 0) return false
+    if (isAutoSyncPostponedAt(autoSyncPostponedUntil.value)) return true
+    autoSyncPostponedUntil.value = 0
+    writeLocalStorage(AUTO_SYNC_POSTPONE_UNTIL_KEY, '')
+    clearAutoSyncPostponeTimer()
+    return false
+  }
+
+  function armAutoSyncPostponeTimer(): void {
+    clearAutoSyncPostponeTimer()
+    if (typeof window === 'undefined') return
+    const remaining = remainingAutoSyncPostponeMs(autoSyncPostponedUntil.value)
+    if (remaining <= 0) return
+    const delay = Math.min(remaining, 2147483647)
+    autoSyncPostponeTimer = window.setTimeout(() => {
+      autoSyncPostponeTimer = 0
+      if (expireAutoSyncPostponeIfNeeded()) {
+        armAutoSyncPostponeTimer()
+        return
+      }
+      if (backupStatus.value.startsWith('自动同步已推迟')) {
+        backupStatus.value = ''
+      }
+      const hadUpload = pendingAutoUploadDuringPostpone
+      const hadDownload = pendingAutoDownloadDuringPostpone
+      pendingAutoUploadDuringPostpone = false
+      pendingAutoDownloadDuringPostpone = false
+      if (!settings.oss.autoSync) return
+      if (hadUpload) {
+        scheduleAutoCloudUpload()
+      } else if (hadDownload) {
+        scheduleAutoCloudDownloadCheck()
+      }
+    }, delay)
+  }
+
+  function postponeAutoSync(
+    minutes: number = AUTO_SYNC_POSTPONE_DEFAULT_MINUTES,
+    options: { fromReview?: boolean } = {}
+  ): void {
+    const normalizedMinutes = normalizeAutoSyncPostponeMinutes(minutes)
+    const until = Date.now() + normalizedMinutes * 60 * 1000
+    autoSyncPostponedUntil.value = until
+    writeLocalStorage(AUTO_SYNC_POSTPONE_UNTIL_KEY, String(until))
+    if (typeof window !== 'undefined') {
+      if (autoCloudUploadTimer) window.clearTimeout(autoCloudUploadTimer)
+      if (autoCloudDownloadTimer) window.clearTimeout(autoCloudDownloadTimer)
+    }
+    autoCloudUploadTimer = 0
+    autoCloudDownloadTimer = 0
+    armAutoSyncPostponeTimer()
+
+    const untilLabel = formatAutoSyncPostponeTime(until)
+    const statusMessage = `自动同步已推迟至 ${untilLabel}`
+    if (options.fromReview && cloudSyncPreview.value) {
+      const preview = cloudSyncPreview.value
+      const stats = cloudSyncSelectionStats(preview.items)
+      if (preview.direction === 'upload') pendingAutoUploadDuringPostpone = true
+      if (preview.direction === 'download') pendingAutoDownloadDuringPostpone = true
+      appendCloudSyncLog({
+        direction: preview.direction,
+        automatic: preview.automatic,
+        status: 'skipped',
+        objectName: preview.objectName,
+        message: statusMessage,
+        selected: 0,
+        total: stats.total,
+        ...cloudSyncDiffCountsForItems(preview.items)
+      })
+      closeCloudSyncReview()
+    }
+    backupStatus.value = statusMessage
+    feedback.toast(`已推迟自动同步 ${formatAutoSyncPostponePresetLabel(normalizedMinutes)}（至 ${untilLabel}）`)
+  }
+
+  function resumeAutoSync(options: { triggerCheck?: boolean; toast?: boolean } = {}): void {
+    clearAutoSyncPostponeTimer()
+    autoSyncPostponedUntil.value = 0
+    writeLocalStorage(AUTO_SYNC_POSTPONE_UNTIL_KEY, '')
+    if (backupStatus.value.startsWith('自动同步已推迟')) {
+      backupStatus.value = ''
+    }
+    const hadUpload = pendingAutoUploadDuringPostpone
+    const hadDownload = pendingAutoDownloadDuringPostpone
+    pendingAutoUploadDuringPostpone = false
+    pendingAutoDownloadDuringPostpone = false
+    if (options.toast !== false) {
+      feedback.toast('已恢复自动同步')
+    }
+    if (options.triggerCheck !== false && settings.oss.autoSync) {
+      if (hadUpload) {
+        scheduleAutoCloudUpload()
+      } else if (hadDownload) {
+        scheduleAutoCloudDownloadCheck()
+      } else {
+        scheduleAutoCloudDownloadCheck()
+      }
+    }
+  }
+
   function canScheduleAutoCloudSync(): boolean {
     if (!deps.getVault() || !settings.oss.autoSync || deps.isLocked()) return false
+    if (expireAutoSyncPostponeIfNeeded()) return false
     if (cloudBusy.value || ui.cloudSyncReviewOpen.value || hasPendingCloudSyncReview()) return false
     if (!hasCompleteOssSettings()) {
       backupStatus.value = '自动同步已开启，请补全 OSS 配置'
@@ -558,6 +689,11 @@ export function createSyncStore(deps: SyncStoreDeps) {
 
   function scheduleAutoCloudUpload(): void {
     if (!cloudSyncRuntime.canScheduleAutomaticUpload()) return
+    if (deps.getVault() && settings.oss.autoSync && !deps.isLocked() && expireAutoSyncPostponeIfNeeded()) {
+      pendingAutoUploadDuringPostpone = true
+      armAutoSyncPostponeTimer()
+      return
+    }
     if (!canScheduleAutoCloudSync()) return
     const objectName = normalizeObjectName(settings.oss.objectName)
     if (engine.isAutoSyncPasswordBlocked(objectName)) return
@@ -575,6 +711,11 @@ export function createSyncStore(deps: SyncStoreDeps) {
   }
 
   function scheduleAutoCloudDownloadCheck(forceOrEvent: boolean | Event = false): void {
+    if (deps.getVault() && settings.oss.autoSync && !deps.isLocked() && expireAutoSyncPostponeIfNeeded()) {
+      pendingAutoDownloadDuringPostpone = true
+      armAutoSyncPostponeTimer()
+      return
+    }
     if (!canScheduleAutoCloudSync()) return
     const objectName = normalizeObjectName(settings.oss.objectName)
     if (engine.isAutoSyncPasswordBlocked(objectName)) return
@@ -609,11 +750,20 @@ export function createSyncStore(deps: SyncStoreDeps) {
     }
     autoCloudUploadTimer = 0
     autoCloudDownloadTimer = 0
+    clearAutoSyncPostponeTimer()
   }
 
   function selectCloudBackup(objectName: string): void {
     selectedCloudObjectName.value = normalizeObjectName(objectName)
     backupStatus.value = `本次下载将使用：${selectedCloudObjectName.value}`
+  }
+
+  async function applyCloudSyncPreview(): Promise<void> {
+    const wasManual = Boolean(cloudSyncPreview.value && !cloudSyncPreview.value.automatic)
+    await engine.applyCloudSyncPreview()
+    if (wasManual && !cloudSyncPreview.value && autoSyncPostponedUntil.value > 0) {
+      resumeAutoSync({ triggerCheck: false, toast: false })
+    }
   }
 
   async function uploadCloudBackup(): Promise<void> {
@@ -813,10 +963,14 @@ export function createSyncStore(deps: SyncStoreDeps) {
     // Constants
     AUTO_CLOUD_SYNC_INTERVAL_MIN_MINUTES,
     AUTO_CLOUD_SYNC_INTERVAL_MAX_MINUTES,
+    AUTO_SYNC_POSTPONE_PRESET_MINUTES,
     CLOUD_SYNC_LOG_LIMIT_MIN,
     CLOUD_SYNC_LOG_LIMIT_MAX,
     // Settings & Cloud State
     settings,
+    autoSyncPostponedUntil,
+    isAutoSyncPostponed,
+    autoSyncPostponedUntilLabel,
     historyCleanupEnabled,
     cloudBusy,
     backupStatus,
@@ -861,7 +1015,7 @@ export function createSyncStore(deps: SyncStoreDeps) {
     rebindCloudEncryption: engine.rebindCloudEncryption,
     prepareCloudRewriteForPasswordChange: engine.prepareCloudRewriteForPasswordChange,
     rewriteCloudAfterPasswordChange: engine.rewriteCloudAfterPasswordChange,
-    applyCloudSyncPreview: engine.applyCloudSyncPreview,
+    applyCloudSyncPreview,
     uploadCloudBackup,
     downloadCloudBackup,
     backupCloudVault,
@@ -871,6 +1025,9 @@ export function createSyncStore(deps: SyncStoreDeps) {
     scheduleAutoCloudUpload,
     scheduleAutoCloudDownloadCheck,
     clearAutoSyncTimers,
+    postponeAutoSync,
+    resumeAutoSync,
+    formatAutoSyncPostponePresetLabel,
     clearAllAutoSyncPasswordGates,
     // Review UI Actions
     hasPendingCloudSyncReview,

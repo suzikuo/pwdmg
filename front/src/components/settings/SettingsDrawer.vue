@@ -810,6 +810,34 @@
               </div>
             </form>
 
+            <div v-if="sync.settings.oss.autoSync" class="setting-row setting-row--postpone">
+              <div class="setting-row__copy">
+                <strong>{{ sync.isAutoSyncPostponed ? '自动同步已推迟' : '推迟自动同步' }}</strong>
+                <small v-if="sync.isAutoSyncPostponed">
+                  暂停至 {{ sync.autoSyncPostponedUntilLabel }}，期间仍可手动同步，到期自动恢复
+                </small>
+                <small v-else>
+                  频繁编辑时可临时暂停自动同步与校验弹窗
+                </small>
+              </div>
+              <div v-if="sync.isAutoSyncPostponed" class="postpone-actions">
+                <UiButton variant="secondary" size="xs" @click="sync.resumeAutoSync()">
+                  立即恢复
+                </UiButton>
+              </div>
+              <div v-else class="postpone-actions">
+                <UiButton
+                  v-for="minutes in sync.AUTO_SYNC_POSTPONE_PRESET_MINUTES"
+                  :key="minutes"
+                  variant="subtle"
+                  size="xs"
+                  @click="sync.postponeAutoSync(minutes)"
+                >
+                  {{ sync.formatAutoSyncPostponePresetLabel(minutes) }}
+                </UiButton>
+              </div>
+            </div>
+
             <div class="setting-row">
               <div class="setting-row__copy">
                 <strong>整理云端同步历史</strong>
@@ -2516,6 +2544,18 @@ watch(
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.setting-row--postpone {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.postpone-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* About & Update */

@@ -161,9 +161,33 @@
 
     <template #footer>
       <div v-if="preview" class="sync-footer">
+        <div v-if="preview.automatic && postponeMenuOpen" class="sync-postpone-bar" role="group" aria-label="选择推迟自动同步时长">
+          <span class="sync-postpone-bar__label">暂停自动同步：</span>
+          <div class="sync-postpone-bar__presets">
+            <UiButton
+              v-for="minutes in AUTO_SYNC_POSTPONE_PRESET_MINUTES"
+              :key="minutes"
+              variant="subtle"
+              size="xs"
+              :disabled="busy"
+              @click="handlePostpone(minutes)"
+            >
+              {{ formatAutoSyncPostponePresetLabel(minutes) }}
+            </UiButton>
+          </div>
+        </div>
         <span v-if="preview.managedRemote && !allChangesSelected" class="sync-selected-count">勾选全部差异后可同步完整快照</span>
         <span v-else class="sync-selected-count">已选 <strong>{{ selectedCount }}</strong> 处变更</span>
         <div class="sync-footer-actions">
+          <UiButton
+            v-if="preview.automatic"
+            :variant="postponeMenuOpen ? 'secondary' : 'ghost'"
+            size="sm"
+            :disabled="busy"
+            @click="postponeMenuOpen = !postponeMenuOpen"
+          >
+            推迟同步
+          </UiButton>
           <UiButton variant="ghost" size="sm" :disabled="busy" @click="emit('discard')">
             放弃本次
           </UiButton>
@@ -186,6 +210,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { UiBadge, UiButton, UiEmpty, UiIcon, UiModal } from '../ui'
+import {
+  AUTO_SYNC_POSTPONE_PRESET_MINUTES,
+  formatAutoSyncPostponePresetLabel
+} from '../../services/autoSyncPostpone'
 import type { CloudSyncChangeDetail, CloudSyncDiffItem, CloudSyncPreview } from '../../services/sync/legacyDiff'
 
 const STATUS_META_KEYS = new Set(['statusReason', 'deletedAt'])
@@ -208,6 +236,7 @@ const emit = defineEmits<{
   close: []
   'select-all': [checked: boolean]
   discard: []
+  postpone: [minutes: number]
   'item-checked': [item: CloudSyncDiffItem, checked: boolean]
   'detail-checked': [item: CloudSyncDiffItem, detail: CloudSyncChangeDetail, checked: boolean]
   apply: []
@@ -216,6 +245,12 @@ const emit = defineEmits<{
 const allChangesSelected = computed(() => props.preview?.items.every(props.isItemChecked) ?? false)
 const expandedKeys = ref<Set<string>>(new Set())
 const metaExpandedKeys = ref<Set<string>>(new Set())
+const postponeMenuOpen = ref(false)
+
+function handlePostpone(minutes: number) {
+  postponeMenuOpen.value = false
+  emit('postpone', minutes)
+}
 
 function itemKey(item: CloudSyncDiffItem): string {
   return `${item.changeType}:${item.id}`
@@ -236,6 +271,7 @@ watch(
   () => [props.open, props.preview] as const,
   ([isOpen, nextPreview]) => {
     metaExpandedKeys.value = new Set()
+    postponeMenuOpen.value = false
     if (!isOpen || !nextPreview) {
       expandedKeys.value = new Set()
       return
@@ -614,6 +650,31 @@ function toggleDetail(item: CloudSyncDiffItem, detail: CloudSyncChangeDetail) {
 .sync-footer-actions {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
+}
+
+.sync-postpone-bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background-color: var(--surface-container);
+}
+
+.sync-postpone-bar__label {
+  font-size: var(--app-font-xs);
+  color: var(--text-secondary);
+}
+
+.sync-postpone-bar__presets {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 

@@ -490,6 +490,7 @@
       @close="sync.hideCloudSyncReview"
       @select-all="sync.setAllCloudSyncDiffs"
       @discard="sync.discardCloudSyncReview"
+      @postpone="sync.postponeAutoSync($event, { fromReview: true })"
       @item-checked="sync.setCloudSyncItemChecked"
       @detail-checked="sync.setCloudSyncDetailChecked"
       @apply="sync.applyCloudSyncPreview"
@@ -673,6 +674,9 @@ const drawerOpen = stores.ui.drawerOpen
 const sidebarCloudStatusText = computed(() => {
   if (sync.cloudBusy) return '正在同步…'
   if (!sync.hasCompleteOssSettings()) return '配置云同步'
+  if (sync.settings.oss.autoSync && sync.isAutoSyncPostponed) {
+    return `自动同步已推迟至 ${sync.autoSyncPostponedUntilLabel}`
+  }
   return sync.backupStatus || '云同步就绪'
 })
 
