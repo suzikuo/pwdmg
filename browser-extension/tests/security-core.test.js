@@ -1065,3 +1065,33 @@ test('late content responses cannot revive a page after pagehide', () => {
   assert.match(content, /queryGeneration !== queryRequestGeneration/)
   assert.match(content, /if \(!isCurrentPageRequest\(requestGeneration\)\) return \{ ok: false, code: 'PAGE_INACTIVE' \}/)
 })
+
+test('passwordRole distinguishes current, new, confirm, and generic password fields', () => {
+  assert.equal(Security.passwordRole({ type: 'password', autocomplete: 'current-password', text: 'password' }), 'current')
+  assert.equal(Security.passwordRole({ type: 'password', text: '当前密码' }), 'current')
+  assert.equal(Security.passwordRole({ type: 'password', autocomplete: 'new-password', text: 'password' }), 'new')
+  assert.equal(Security.passwordRole({ type: 'password', text: '设置新密码' }), 'new')
+  assert.equal(Security.passwordRole({ type: 'password', text: 'confirm password' }), 'confirm')
+  assert.equal(Security.passwordRole({ type: 'password', text: '请再次输入密码' }), 'confirm')
+  assert.equal(Security.passwordRole({ type: 'password', text: 'password' }), 'generic')
+  assert.equal(Security.passwordRole({ type: 'text', text: 'username' }), 'none')
+})
+
+test('autofill supports two-step login, ignored sites, Shadow DOM, iframe fill routing, and pointercancel cleanup', () => {
+  const content = source('content.js')
+  const background = source('background.js')
+  const popup = source('popup.js')
+
+  assert.match(content, /function selectFillablePasswordInput\(inputs\)/)
+  assert.match(content, /function isStrongTwoStepAccountInput\(input, scope\)/)
+  assert.match(content, /accountOnly: true/)
+  assert.match(content, /function collectInputsDeep\(scope = document/)
+  assert.match(content, /active\?\.shadowRoot\?\.activeElement/)
+  assert.match(content, /if \(!manualMode && \(!autoFillEnabled \|\| isCurrentSiteIgnored\(\)\)\)/)
+  assert.match(content, /window\.addEventListener\('pointercancel', stopPanelDrag, \{ once: true \}\)/)
+  assert.match(content, /if \(window !== window\.top\) return/)
+  assert.match(content, /IFRAME_FILL_YIELD_MS/)
+  assert.match(background, /target: \{ tabId, allFrames: true \}/)
+  assert.match(popup, /target: \{ tabId: activeTab\.id, allFrames: true \}/)
+  assert.match(popup, /response\?\.code === 'FILL_RISK_CONFIRMATION_REQUIRED'/)
+})

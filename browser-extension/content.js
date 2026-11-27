@@ -310,8 +310,26 @@ if (!window.__mypwdmgContentScriptLoaded) {
     return String(value || '').replace(/\s+/g, ' ').trim()
   }
 
+  const MAX_SHADOW_DEPTH = 8
+  const IFRAME_FILL_YIELD_MS = 120
+
+  function collectInputsDeep(scope = document, results = [], depth = 0) {
+    if (!scope || depth > MAX_SHADOW_DEPTH) return results
+    const elements = scope.querySelectorAll ? scope.querySelectorAll('*') : []
+    for (const element of elements) {
+      if (element.id === ROOT_ID) continue
+      if (element.matches?.(INPUT_SELECTOR) && isVisible(element)) {
+        results.push(element)
+      }
+      if (element.shadowRoot) {
+        collectInputsDeep(element.shadowRoot, results, depth + 1)
+      }
+    }
+    return results
+  }
+
   function allInputs(scope = document) {
-    return Array.from(scope.querySelectorAll(INPUT_SELECTOR)).filter(isVisible)
+    return collectInputsDeep(scope, [], 0)
   }
 
   function inputType(input) {
@@ -405,7 +423,10 @@ if (!window.__mypwdmgContentScriptLoaded) {
   }
 
   function activeInput() {
-    const active = document.activeElement
+    let active = document.activeElement
+    for (let depth = 0; active?.shadowRoot?.activeElement && depth < MAX_SHADOW_DEPTH; depth += 1) {
+      active = active.shadowRoot.activeElement
+    }
     if (!(active instanceof HTMLInputElement) && !(active instanceof HTMLTextAreaElement)) return null
     if (['hidden', 'submit', 'button', 'checkbox', 'radio', 'file', 'image'].includes(inputType(active))) return null
     return isVisible(active) ? active : null
@@ -461,6 +482,34 @@ if (!window.__mypwdmgContentScriptLoaded) {
     return !LOGIN_SCOPE_RE.test(text) || !SUBMIT_ACTION_RE.test(text)
   }
 
+  function selectFillablePasswordInput(inputs) {
+    const passwordInputs = inputs.filter(isPasswordInput)
+    if (!passwordInputs.length) return null
+    const classified = passwordInputs.map((input) => ({
+      input,
+      role: typeof Security.passwordRole === 'function' ? Security.passwordRole(fieldSignal(input)) : 'generic'
+    }))
+    const explicitCurrent = classified.find((item) => item.role === 'current')
+    if (explicitCurrent) return explicitCurrent.input
+    const hasNewOrConfirm = classified.some((item) => item.role === 'new' || item.role === 'confirm')
+    if (hasNewOrConfirm) return null
+    return classified.find((item) => item.role === 'generic')?.input || null
+  }
+
+  function isStrongTwoStepAccountInput(input, scope) {
+    if (!input || !isUsernameInput(input)) return false
+    const type = inputType(input)
+    const autocomplete = String(input.getAttribute('autocomplete') || '').toLowerCase()
+    const text = fieldText(input)
+    if (/(^|\s)(username|email|webauthn)(?=\s|$)/.test(autocomplete)) return true
+    const hasAccountSignal = type === 'email' || type === 'tel' || USER_RE.test(text)
+    if (!hasAccountSignal) return false
+    const enclosing = input.closest('form') || (scope !== document ? scope : scopeForFocusedInput(input))
+    if (!enclosing) return false
+    const context = scopeText(enclosing)
+    return LOGIN_SCOPE_RE.test(context) && SUBMIT_ACTION_RE.test(context)
+  }
+
   function detectLoginFields(scope = document) {
     const focused = activeInput()
     const focusedScope = scope === document ? scopeForFocusedInput(focused) : null
@@ -472,17 +521,33 @@ if (!window.__mypwdmgContentScriptLoaded) {
     }
 
     const inputs = allInputs(scope)
-    const passwordInput = inputs.find(isPasswordInput)
+    const passwordInput = selectFillablePasswordInput(inputs)
     if (!passwordInput) {
       const otpInput = inputs.find(isOtpInput)
-      if (!otpInput) return null
+      if (otpInput) {
+        return {
+          usernameInput: null,
+          usernameKind: 'generic',
+          passwordInput: null,
+          otpInput,
+          otpOnly: true,
+          anchor: otpInput
+        }
+      }
+      if (scopeLooksLikeNonLoginSecretEditor(scope)) return null
+      const accountInput =
+        (focused && inputs.includes(focused) && isStrongTwoStepAccountInput(focused, scope) ? focused : null) ||
+        inputs.find((input) => isStrongTwoStepAccountInput(input, scope)) ||
+        null
+      if (!accountInput) return null
       return {
-        usernameInput: null,
-        usernameKind: 'generic',
+        usernameInput: accountInput,
+        usernameKind: accountFieldKind(accountInput),
         passwordInput: null,
-        otpInput,
-        otpOnly: true,
-        anchor: otpInput
+        otpInput: null,
+        otpOnly: false,
+        accountOnly: true,
+        anchor: accountInput
       }
     }
 
@@ -570,6 +635,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     ignoredSites = normalizeIgnoredSites(settings.ignoredSites)
     manualPanelShortcut = parseShortcut(settings.manualPanelShortcut || SHOW_PANEL_SHORTCUT)
     if (isCurrentSiteIgnored() && pendingSave?.token) dismissSavePrompt()
+    if (isCurrentSiteIgnored() && !panelManualMode) removeRoot()
     if (!autoSaveEnabled && pendingSave?.token) dismissSavePrompt()
     else if (!autoSaveEnabled && rootView?.querySelector('[data-mypwdmg-auto-save]')) removeRoot()
     if (!autoSaveEnabled) clearCaptureHistory()
@@ -695,6 +761,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     event.preventDefault()
     window.addEventListener('pointermove', dragPanel)
     window.addEventListener('pointerup', stopPanelDrag, { once: true })
+    window.addEventListener('pointercancel', stopPanelDrag, { once: true })
   }
 
   function dragPanel(event) {
@@ -710,6 +777,8 @@ if (!window.__mypwdmgContentScriptLoaded) {
       panelDrag = null
     }
     window.removeEventListener('pointermove', dragPanel)
+    window.removeEventListener('pointerup', stopPanelDrag)
+    window.removeEventListener('pointercancel', stopPanelDrag)
   }
 
   function addTrustedClick(element, handler) {
@@ -1051,6 +1120,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     if (extensionContextInvalidated) return
     if (!pageActive) return
     if (!autoFillEnabled) return
+    if (isCurrentSiteIgnored()) return
     if (pendingSave?.token) return
     if (!force && panelManualMode && isRootOpen()) return
     window.clearTimeout(queryTimer)
@@ -1060,7 +1130,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   async function queryMatches(force = false, manualMode = false, manualSource = '') {
     if (extensionContextInvalidated) return
     if (!pageActive) return
-    if (!manualMode && !autoFillEnabled) {
+    if (!manualMode && (!autoFillEnabled || isCurrentSiteIgnored())) {
       removeRoot()
       return
     }
@@ -1460,7 +1530,21 @@ if (!window.__mypwdmgContentScriptLoaded) {
         sendResponse({ ok: false, code: 'TRUSTED_GESTURE_REQUIRED' })
         return
       }
-      fillEntry(message.entryId, Boolean(message.manual), true)
+      const manual = Boolean(message.manual)
+      const hasFieldsHere = Boolean(manual ? (lastManualFields || detectLoginFields() || detectManualFields()) : detectLoginFields())
+      if (!hasFieldsHere) {
+        if (window !== window.top) return
+        const hasChildIframes = Boolean(document.querySelector('iframe'))
+        if (hasChildIframes) {
+          window.setTimeout(() => {
+            sendResponse({ ok: false, code: 'NO_FILLABLE_FIELDS', message: '当前焦点附近没有可填充的登录字段。' })
+          }, IFRAME_FILL_YIELD_MS)
+          return true
+        }
+        sendResponse({ ok: false, code: 'NO_FILLABLE_FIELDS', message: '当前焦点附近没有可填充的登录字段。' })
+        return
+      }
+      fillEntry(message.entryId, manual, true)
         .then((response) => sendResponse(response || { ok: false, code: 'FILL_FAILED' }))
         .catch((error) => sendResponse({ ok: false, message: String(error?.message || error) }))
       return true

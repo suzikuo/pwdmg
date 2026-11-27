@@ -6,6 +6,9 @@
   'use strict'
 
   const PASSWORD_TOKEN_RE = /(^|[^a-z0-9])(password|passwd|pwd|passphrase|pass[\s_-]*phrase|pass)(?=$|[^a-z0-9])|\u5bc6\u7801/i
+  const CONFIRM_PASSWORD_RE = /(^|[^a-z0-9])(confirm[\s_-]*password|password[\s_-]*confirm(?:ation)?|repeat[\s_-]*password|retype[\s_-]*password|verify[\s_-]*password)(?=$|[^a-z0-9])|\u786e\u8ba4\u5bc6\u7801|\u78ba\u8a8d\u5bc6\u78bc|\u518d\u6b21\u8f93\u5165\u5bc6\u7801|\u91cd\u590d\u5bc6\u7801/i
+  const NEW_PASSWORD_RE = /(^|[^a-z0-9])(new[\s_-]*password|create[\s_-]*password|choose[\s_-]*password|set[\s_-]*password|reset[\s_-]*password)(?=$|[^a-z0-9])|\u65b0\u5bc6\u7801|\u65b0\u5bc6\u78bc|\u8bbe\u7f6e\u5bc6\u7801|\u521b\u5efa\u5bc6\u7801|\u91cd\u7f6e\u5bc6\u7801/i
+  const CURRENT_PASSWORD_RE = /(^|[^a-z0-9])(current[\s_-]*password|old[\s_-]*password|existing[\s_-]*password)(?=$|[^a-z0-9])|\u5f53\u524d\u5bc6\u7801|\u539f\u5bc6\u7801|\u65e7\u5bc6\u7801|\u820a\u5bc6\u78bc/i
   const OTP_STRONG_RE = /(^|[^a-z0-9])(otp|totp|2fa|mfa|one[\s_-]*time(?:[\s_-]*(?:password|code))?|verification[\s_-]*code|authenticator[\s_-]*(?:code|token)|passcode)(?=$|[^a-z0-9])|\u9a8c\u8bc1\u7801|\u52a8\u6001\u7801|\u52a8\u6001\u53e3\u4ee4|\u4e8c\u6b21\u9a8c\u8bc1/i
   const OTP_WEAK_RE = /(^|[^a-z0-9])(code|pin)(?=$|[^a-z0-9])/i
   const CARD_CODE_RE = /(^|[^a-z0-9])(cvv|cvc|card[\s_-]*security|card[\s_-]*code)(?=$|[^a-z0-9])/i
@@ -222,6 +225,16 @@
     return 'none'
   }
 
+  function passwordRole(values = {}) {
+    if (passwordEvidence(values) !== 'strong') return 'none'
+    const text = String(values.text || '').toLowerCase()
+    const autocomplete = String(values.autocomplete || '').toLowerCase()
+    if (CONFIRM_PASSWORD_RE.test(text)) return 'confirm'
+    if (/(^|\s)new-password(?=\s|$)/.test(autocomplete) || NEW_PASSWORD_RE.test(text)) return 'new'
+    if (/(^|\s)current-password(?=\s|$)/.test(autocomplete) || CURRENT_PASSWORD_RE.test(text)) return 'current'
+    return 'generic'
+  }
+
   function otpEvidence(values = {}) {
     const type = String(values.type || '').toLowerCase()
     const text = String(values.text || '').toLowerCase()
@@ -251,6 +264,7 @@
     normalizeUrlPrefix,
     otpEvidence,
     passwordEvidence,
+    passwordRole,
     sameDocumentContext,
     sameOriginFrame,
     webContext

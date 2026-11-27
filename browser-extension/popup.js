@@ -65,7 +65,7 @@ function sendToActiveTab(message) {
         resolve({ ok: false, message: String(error.message || error) })
         return
       }
-      chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['security-core.js', 'builtin-skins.js', 'appearance.js', 'content.js'] }, () => {
+      chrome.scripting.executeScript({ target: { tabId: activeTab.id, allFrames: true }, files: ['security-core.js', 'builtin-skins.js', 'appearance.js', 'content.js'] }, () => {
         const injectError = chrome.runtime.lastError
         if (injectError) {
           resolve({ ok: false, message: String(injectError.message || injectError) })
@@ -544,6 +544,10 @@ matchListEl.addEventListener('click', async (event) => {
   button.disabled = true
   button.textContent = '...'
   const response = await sendToActiveTab({ type: 'MYPWDMG_FILL_ENTRY', entryId: button.getAttribute('data-entry-id'), manual: true })
+  if (response?.code === 'FILL_RISK_CONFIRMATION_REQUIRED') {
+    window.close()
+    return
+  }
   if (!response?.ok) {
     button.disabled = false
     button.textContent = '填充'
