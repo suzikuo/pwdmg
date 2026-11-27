@@ -54,7 +54,7 @@ test('applyCloudDownload adopts alternatePassword locally and clears the passwor
 
 test('completed download review closes the popup and replaces the pending log', () => {
   assert.match(syncEngineSource, /const applied = await withCloudSyncTimeout\(/)
-  assert.match(syncEngineSource, /if \(applied && deps\.getCloudSyncPreview\(\) === preview\) deps\.closeCloudSyncReview\(\)/)
+  assert.match(syncEngineSource, /if \(applied && isSameRef\(deps\.getCloudSyncPreview\(\), preview\)\) deps\.closeCloudSyncReview\(\)/)
   assert.match(syncStoreSource, /\(item\.status === 'started' \|\| item\.status === 'review'\)/)
   assert.match(syncStoreSource, /normalizeObjectName\(item\.objectName\) === normalizeObjectName\(input\.objectName\)/)
 })

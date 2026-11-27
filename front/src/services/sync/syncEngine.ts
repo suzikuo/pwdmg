@@ -1,3 +1,4 @@
+import { toRaw } from 'vue'
 import type {
   CloudBackupInfo,
   CloudOperationHandle,
@@ -768,6 +769,12 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     }
   }
 
+  function isSameRef<T>(left: T | null | undefined, right: T | null | undefined): boolean {
+    if (left === right) return true
+    if (!left || !right) return false
+    return toRaw(left) === toRaw(right)
+  }
+
   function isCloudSyncPreviewCurrent(preview: CloudSyncPreview): boolean {
     return !deps.isLocked() &&
       preview.sessionGeneration === deps.getSessionGeneration() &&
@@ -776,7 +783,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
   }
 
   function syncCloudSyncPreviewAfterDownload(preview: CloudSyncPreview, appliedVault: VaultPayload): boolean {
-    if (deps.isLocked() || deps.getVault() !== appliedVault) return false
+    if (deps.isLocked() || !isSameRef(deps.getVault(), appliedVault)) return false
     preview.sessionGeneration = deps.getSessionGeneration()
     preview.cloudScopeId = currentCloudScopeId()
     return true
@@ -1870,7 +1877,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
         }),
         preview.direction === 'download' ? '应用下载差异' : '应用上传差异'
       )
-      if (applied && deps.getCloudSyncPreview() === preview) deps.closeCloudSyncReview()
+      if (applied && isSameRef(deps.getCloudSyncPreview(), preview)) deps.closeCloudSyncReview()
     } finally {
       deps.finishCloudOperation(cloudOperation)
     }
@@ -1961,7 +1968,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
 
   async function adoptCloudSyncReviewEncryption(context: CloudSyncApplyContext): Promise<CloudEncryptionAdoptionResult> {
     const { preview, options } = context
-    const isCurrent = () => deps.getCloudSyncPreview() === preview && isCloudSyncPreviewCurrent(preview)
+    const isCurrent = () => isSameRef(deps.getCloudSyncPreview(), preview) && isCloudSyncPreviewCurrent(preview)
     if (!options.closeReview || !isCurrent() || preview.alternatePassword === undefined || !preview.remoteEncryptionEnvelopeText) {
       return { ok: false, message: '云端加密参数来源缺失，请重新校验云端保险库' }
     }
@@ -2002,7 +2009,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
           message: validation.message,
           total: preview.items.length
         })
-        if (deps.getCloudSyncPreview() === preview) deps.closeCloudSyncReview()
+        if (isSameRef(deps.getCloudSyncPreview(), preview)) deps.closeCloudSyncReview()
         if (options.showErrors !== false) deps.feedback.failToast(validation.message)
         return false
       }
@@ -2041,7 +2048,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       })
       if (options.showErrors !== false) deps.feedback.failToast(message)
       deps.setBackupStatus(message)
-      if (options.clearPreview && deps.getCloudSyncPreview() === preview) deps.setCloudSyncPreview(null)
+      if (options.clearPreview && isSameRef(deps.getCloudSyncPreview(), preview)) deps.setCloudSyncPreview(null)
       return false
     }
   }
@@ -2076,7 +2083,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
 
     if (preview.alternatePassword !== undefined) {
       const adopted = await adoptCloudSyncReviewEncryption(context)
-      if (deps.getCloudSyncPreview() !== preview || !isCloudSyncPreviewCurrent(preview)) return false
+      if (!isSameRef(deps.getCloudSyncPreview(), preview) || !isCloudSyncPreviewCurrent(preview)) return false
       if (!adopted.ok) return failCloudSyncApply(context, `本地主密码同步失败：${adopted.message}`)
       appliedVault = adopted.payload
       deps.autoSyncPasswordGate.clear(...preview.passwordGateScopeKeys)
@@ -2207,7 +2214,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     if (!isCloudSyncPreviewCurrent(preview)) return false
     if (preview.alternatePassword !== undefined) {
       const adopted = await adoptCloudSyncReviewEncryption(context)
-      if (deps.getCloudSyncPreview() !== preview || !isCloudSyncPreviewCurrent(preview)) return false
+      if (!isSameRef(deps.getCloudSyncPreview(), preview) || !isCloudSyncPreviewCurrent(preview)) return false
       if (!adopted.ok) return failCloudSyncApply(context, `本地主密码同步失败：${adopted.message}`)
       appliedLocalPayload = adopted.payload
       preview.localFingerprint = await cloudSyncPayloadFingerprint(adopted.payload)
@@ -2302,14 +2309,14 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       ...cloudSyncDiffCountsForItems(selectedItems)
     })
     if (failure.showToast !== false && options.showErrors !== false) deps.feedback.failToast(message)
-    if (options.clearPreview && deps.getCloudSyncPreview() === preview) deps.setCloudSyncPreview(null)
+    if (options.clearPreview && isSameRef(deps.getCloudSyncPreview(), preview)) deps.setCloudSyncPreview(null)
     return false
   }
 
   function finishCloudSyncApplyPreview(preview: CloudSyncPreview, options: CloudSyncApplyOptions): void {
     if (options.closeReview) {
       deps.closeCloudSyncReview()
-    } else if (options.clearPreview && deps.getCloudSyncPreview() === preview) {
+    } else if (options.clearPreview && isSameRef(deps.getCloudSyncPreview(), preview)) {
       deps.setCloudSyncPreview(null)
     }
   }
