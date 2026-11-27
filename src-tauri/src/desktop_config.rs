@@ -1,15 +1,18 @@
-use pwdmg_core::paths::{desktop_config_file, ensure_app_dir};
+use pwdmg_core::paths::{atomic_write_file, desktop_config_file, ensure_app_dir};
 use serde_json::{json, Value};
-use std::fs;
+use std::{fs, sync::Mutex};
 
 pub const DEFAULT_CLOSE_BEHAVIOR: &str = "exit";
+static DESKTOP_CONFIG_WRITE: Mutex<()> = Mutex::new(());
 
 pub fn read_desktop_config() -> Value {
     let p = desktop_config_file();
     if p.exists() {
         if let Ok(text) = fs::read_to_string(&p) {
-            if let Ok(val) = serde_json::from_str(&text) {
-                return val;
+            if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                if val.is_object() {
+                    return val;
+                }
             }
         }
     }
@@ -34,19 +37,40 @@ pub fn configured_close_behavior(config: &Value) -> &'static str {
     }
 }
 
-pub fn write_desktop_config(val: &Value) -> Result<(), String> {
-    ensure_app_dir().map_err(|e| e.to_string())?;
-    let text = serde_json::to_string_pretty(val).map_err(|e| e.to_string())?;
-    fs::write(desktop_config_file(), text).map_err(|e| e.to_string())?;
-    Ok(())
+pub fn configured_gpu_acceleration(config: &Value) -> bool {
+    config.get("gpu_acceleration_enabled").and_then(Value::as_bool) == Some(true)
+}
+
+#[cfg(windows)]
+pub fn windows_webview_browser_args(config: &Value) -> Option<&'static str> {
+    if configured_gpu_acceleration(config) {
+        return None;
+    }
+
+    // Passing custom arguments replaces Wry's defaults, so keep them in software mode.
+    Some(concat!(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection ",
+        "--autoplay-policy=no-user-gesture-required ",
+        "--disable-gpu",
+    ))
+}
+
+pub fn update_desktop_config(update: impl FnOnce(&mut Value)) -> Result<Value, String> {
+    let _guard = DESKTOP_CONFIG_WRITE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = read_desktop_config();
+    update(&mut config);
+    ensure_app_dir().map_err(|error| format!("{error}"))?;
+    let bytes = serde_json::to_vec_pretty(&config).map_err(|error| format!("{error}"))?;
+    atomic_write_file(&desktop_config_file(), &bytes)?;
+    Ok(config)
 }
 
 pub fn save_window_state(window: &tauri::WebviewWindow) {
     let is_maximized = window.is_maximized().unwrap_or(false);
-    let mut cfg = read_desktop_config();
-
     let mut win_obj = serde_json::Map::new();
-    win_obj.insert("maximized".to_string(), json!(is_maximized));
+    win_obj.insert("maximized".to_owned(), json!(is_maximized));
 
     if !is_maximized {
         if let Ok(size) = window.inner_size() {
@@ -63,37 +87,51 @@ pub fn save_window_state(window: &tauri::WebviewWindow) {
                 win_obj.insert("y".to_string(), json!(logical_pos.y));
             }
         }
-    } else if let Some(existing_win) = cfg.get("window").and_then(|w| w.as_object()) {
-        if let Some(w) = existing_win.get("width") {
-            win_obj.insert("width".to_string(), w.clone());
-        }
-        if let Some(h) = existing_win.get("height") {
-            win_obj.insert("height".to_string(), h.clone());
-        }
-        if let Some(x) = existing_win.get("x") {
-            win_obj.insert("x".to_string(), x.clone());
-        }
-        if let Some(y) = existing_win.get("y") {
-            win_obj.insert("y".to_string(), y.clone());
-        }
     }
 
-    if let Some(root) = cfg.as_object_mut() {
-        if !is_maximized {
-            if let Some(w) = win_obj.get("width") {
-                root.insert("width".to_string(), w.clone());
+    let _ = update_desktop_config(|cfg| {
+        if is_maximized {
+            if let Some(existing_win) = cfg.get("window").and_then(Value::as_object) {
+                for key in ["width", "height", "x", "y"] {
+                    if let Some(value) = existing_win.get(key) {
+                        win_obj.insert(key.to_owned(), value.clone());
+                    }
+                }
             }
-            if let Some(h) = win_obj.get("height") {
-                root.insert("height".to_string(), h.clone());
-            }
-            if let Some(x) = win_obj.get("x") {
-                root.insert("x_position".to_string(), x.clone());
-            }
-            if let Some(y) = win_obj.get("y") {
-                root.insert("y_position".to_string(), y.clone());
+        } else {
+            for (window_key, config_key) in [
+                ("width", "width"),
+                ("height", "height"),
+                ("x", "x_position"),
+                ("y", "y_position"),
+            ] {
+                if let Some(value) = win_obj.get(window_key) {
+                    cfg[config_key] = value.clone();
+                }
             }
         }
-        root.insert("window".to_string(), Value::Object(win_obj));
+        cfg["window"] = Value::Object(win_obj);
+    });
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webview_uses_software_rendering_unless_gpu_acceleration_is_enabled() {
+        let legacy_config = json!({"tray_enabled": false});
+        let software_args = windows_webview_browser_args(&legacy_config).unwrap();
+        assert!(software_args
+            .split_whitespace()
+            .any(|arg| arg == "--disable-gpu"));
+        assert_eq!(
+            windows_webview_browser_args(&json!({"gpu_acceleration_enabled": false})),
+            Some(software_args)
+        );
+        assert_eq!(
+            windows_webview_browser_args(&json!({"gpu_acceleration_enabled": true})),
+            None
+        );
     }
-    let _ = write_desktop_config(&cfg);
 }

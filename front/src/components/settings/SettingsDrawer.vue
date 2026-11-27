@@ -412,7 +412,7 @@
           </div>
 
           <div v-if="showDesktopTraySettings" class="settings-card">
-            <h3 class="settings-card__title">桌面托盘与窗口行为</h3>
+            <h3 class="settings-card__title">桌面宿主</h3>
             <div class="setting-row">
               <div class="setting-row__copy">
                 <strong>系统托盘</strong>
@@ -455,6 +455,19 @@
                   关闭程序
                 </button>
               </div>
+            </div>
+
+            <div v-if="typeof desktopTraySettings?.gpuAccelerationEnabled === 'boolean'" class="setting-row">
+              <div class="setting-row__copy">
+                <strong>GPU 硬件加速</strong>
+                <small>更改后需完全退出并重新打开应用</small>
+              </div>
+              <UiSwitch
+                :model-value="desktopTraySettings.gpuAccelerationEnabled"
+                :loading="desktopTrayBusy"
+                aria-label="GPU 硬件加速"
+                @update:model-value="platform?.desktopTray.setGpuAcceleration($event)"
+              />
             </div>
           </div>
         </section>
@@ -796,6 +809,19 @@
                 </UiButton>
               </div>
             </form>
+
+            <div class="setting-row">
+              <div class="setting-row__copy">
+                <strong>整理云端同步历史</strong>
+                <small>仅本机。历史积累后，在成功同步时清理可删除的旧版本。</small>
+              </div>
+              <UiSwitch
+                :model-value="sync.historyCleanupEnabled"
+                :disabled="sync.cloudBusy || sync.isSettingsChanged() || !sync.hasCompleteOssSettings()"
+                aria-label="整理云端同步历史"
+                @update:model-value="sync.setHistoryCleanupEnabled($event)"
+              />
+            </div>
 
             <div class="backup-actions">
               <UiButton variant="secondary" size="sm" :loading="sync.cloudBusy" @click="sync.checkCloudBackupInfo()">
@@ -1198,8 +1224,14 @@
                 <span>{{ session.updateProgressLabel }}</span>
                 <strong v-if="session.updateProgressPercent > 0">{{ session.updateProgressPercent }}%</strong>
               </div>
-              <div class="update-progress__track">
-                <span :style="{ width: `${session.updateProgressPercent || 12}%` }" />
+              <div
+                class="update-progress__track"
+                :class="{ 'update-progress__track--indeterminate': session.updateProgressPercent === 0 }"
+                role="progressbar"
+                :aria-label="session.updateProgressLabel"
+                :aria-valuenow="session.updateProgressPercent || undefined"
+              >
+                <span :style="session.updateProgressPercent ? { width: `${session.updateProgressPercent}%` } : undefined" />
               </div>
             </div>
 
@@ -2549,6 +2581,22 @@ watch(
   border-radius: var(--radius-full);
   background-color: var(--brand);
   transition: width var(--duration-normal) var(--ease-standard);
+}
+
+.update-progress__track--indeterminate span {
+  width: 32%;
+  animation: update-progress-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes update-progress-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(313%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-progress__track--indeterminate span {
+    animation: none;
+  }
 }
 
 .settings-back-btn {

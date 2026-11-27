@@ -303,8 +303,7 @@ const viewBanner = computed<{
   display: flex;
   flex-direction: column;
   width: 100%;
-  height: 100vh;
-  height: 100dvh;
+  height: 100%;
   overflow: hidden;
   background-color: var(--app-bg);
 }

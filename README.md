@@ -195,6 +195,8 @@ The backup page uploads/downloads the encrypted `vault.json` envelope through a 
 
 For Aliyun OSS, configure Bucket, AccessKey, AccessKey Secret, Region, and the object name in the app. The bucket must allow browser CORS requests for `GET`, `PUT`, `HEAD` and the `Authorization`, `Content-Type`, `x-oss-date` headers.
 
+Optional sync history cleanup can be enabled on one device after all syncing devices have upgraded and synced successfully. Enable `DELETE` in bucket CORS and grant that device `oss:DeleteObject` on the vault's `.sync-v4/snapshots/` and `.sync-v4/versions/` prefixes. Cleanup checks for accumulated history after successful syncs and preserves the root and all current device indices and their objects. Old versions become eligible only when current device indices confirm their published IDs and the designated device observed the advances that supersede them at least 24 hours ago. Legacy history without publication evidence is kept. If bucket versioning is enabled, use a lifecycle rule for noncurrent versions under the sync prefixes to reclaim their storage.
+
 Downloading a backup overwrites the local vault, but the app first saves a local safety copy under `~/mypwdmg/backups/`. Only the latest 5 safety copies are kept.
 
 ## Public Repository Safety

@@ -1,5 +1,6 @@
 <template>
-  <main class="app-shell">
+  <main class="app-shell" :class="{ 'app-shell--desktop-titlebar': desktopTitleBarWindow }">
+    <DesktopTitleBar v-if="desktopTitleBarWindow" :app-window="desktopTitleBarWindow" />
     <div
       v-if="ui.wallpaperImageUrl"
       class="app-wallpaper-layer"
@@ -14,6 +15,7 @@
 
     <AuthScreen
       v-if="!session.unlocked"
+      class="app-auth"
       :state-loading="session.stateLoading"
       :state-error="session.stateError"
       :has-vault="session.state.hasVault"
@@ -498,6 +500,7 @@
       :open="pluginDetailOpen"
       title="浏览器插件监听"
       size="md"
+      :stacked="ui.topOverlay === 'pluginDetail'"
       @close="pluginDetailOpen = false"
     >
       <div class="plugin-detail-body">
@@ -526,6 +529,7 @@
             autocomplete="off"
             placeholder="扩展管理页里的 32 位 ID"
             monospace
+            autofocus
           />
           <div class="plugin-actions">
             <UiButton variant="primary" size="sm" :disabled="pluginListener?.enabled" :loading="pluginBusy" @click="enablePluginListener">
@@ -587,6 +591,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onMounted, onUnmounted, reactive, ref } from 'vue'
 import AuthScreen from './components/auth/AuthScreen.vue'
+import DesktopTitleBar from './components/desktop/DesktopTitleBar.vue'
 import DetailContent from './components/DetailContent.vue'
 import type { EntryFolderActionPayload } from './components/EntryList.vue'
 import QuickAccess from './components/workspace/QuickAccess.vue'
@@ -616,6 +621,9 @@ const MoveDestinationModal = defineAsyncComponent(() => import('./components/wor
 const SettingsDrawer = defineAsyncComponent(() => import('./components/settings/SettingsDrawer.vue'))
 
 const BACK_EXIT_INTERVAL = 1600
+const desktopTitleBarWindow = isDesktopRuntime && window.__mypwdmgDesktopTitleBar
+  ? window.__TAURI__?.window?.getCurrentWindow()
+  : undefined
 
 const androidAutofillSettings = useAndroidAutofillSettings()
 const androidPasskeyProviderSettings = useAndroidPasskeyProviderSettings()
@@ -1226,8 +1234,9 @@ function openDrawer() {
 }
 
 onMounted(() => {
-  sync.purgeLegacyCloudSyncState()
   ui.mountUi()
+  void api.showDesktopWindow()
+  sync.purgeLegacyCloudSyncState()
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('pointerdown', session.handleSessionActivity, true)
   window.addEventListener('pointerdown', closeTopMenusOnOutside, true)
@@ -1259,9 +1268,6 @@ onMounted(() => {
   void session.loadState()
   void androidAutofillSettings.load()
   void androidPasskeyProviderSettings.load()
-  window.setTimeout(() => {
-    void api.showDesktopWindow()
-  }, 250)
 })
 
 onUnmounted(() => {
@@ -1304,6 +1310,25 @@ onUnmounted(() => {
 .app-shell > :not(.app-wallpaper-layer) {
   position: relative;
   z-index: 1;
+}
+
+:global(body:has(.app-shell--desktop-titlebar)) {
+  --desktop-titlebar-height: 36px;
+}
+
+.app-shell--desktop-titlebar > .desktop-title-bar {
+  z-index: calc(var(--z-toast) + 1);
+}
+
+.app-shell--desktop-titlebar > .app-auth,
+.app-shell--desktop-titlebar > .workspace {
+  height: calc(100% - var(--desktop-titlebar-height));
+}
+
+.app-shell--desktop-titlebar > .app-auth {
+  min-height: 0;
+  align-items: safe center;
+  overflow: auto;
 }
 
 .app-wallpaper-layer {

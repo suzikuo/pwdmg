@@ -51,6 +51,7 @@ import type { ApiResult, PortableBackupSelection, VaultPayload } from '../types.
 
 export const CLOUD_SYNC_LOGS_KEY = 'mypwdmg.cloudSyncLogs.v1'
 export const CLOUD_SYNC_LOG_LIMIT_KEY = 'mypwdmg.cloudSyncLogLimit'
+const SYNC_HISTORY_CLEANUP_SCOPE_KEY = 'mypwdmg.syncHistoryCleanupScope'
 export const CLOUD_SYNC_LOG_LIMIT_DEFAULT = 50
 export const CLOUD_SYNC_LOG_LIMIT_MIN = 10
 export const CLOUD_SYNC_LOG_LIMIT_MAX = 200
@@ -90,7 +91,7 @@ function loadCloudSyncLogLimit(): number {
 function normalizeCloudSyncLog(value: unknown): CloudSyncLogEntry | null {
   const item = value as Partial<CloudSyncLogEntry>
   if (!item || typeof item !== 'object') return null
-  const direction = item.direction === 'download' || item.direction === 'upload' || item.direction === 'backup'
+  const direction = item.direction === 'download' || item.direction === 'upload' || item.direction === 'backup' || item.direction === 'history'
     ? item.direction
     : 'upload'
   const status = item.status === 'started' || item.status === 'success' || item.status === 'review' || item.status === 'error' || item.status === 'skipped'
@@ -155,6 +156,12 @@ export function createSyncStore(deps: SyncStoreDeps) {
 
   const autoSyncPasswordGate = new AutoSyncPasswordGate()
   const cloudEncryptionBindingVersion = ref(0)
+  const historyCleanupScope = ref(readLocalStorage(SYNC_HISTORY_CLEANUP_SCOPE_KEY))
+  const currentHistoryScope = computed(() => {
+    const { region, bucketName, objectName } = normalizeSettings(settings).oss
+    return JSON.stringify([region, bucketName, objectName])
+  })
+  const historyCleanupEnabled = computed(() => historyCleanupScope.value === currentHistoryScope.value)
 
   // Cloud password prompt state
   const cloudPasswordPromptValue = ref('')
@@ -213,6 +220,26 @@ export function createSyncStore(deps: SyncStoreDeps) {
     const current = deps.getVault()
     if (!current) return false
     return JSON.stringify(normalizeSettings(settings)) !== JSON.stringify(normalizeSettings(current.settings))
+  }
+
+  async function setHistoryCleanupEnabled(enabled: boolean): Promise<void> {
+    const scope = currentHistoryScope.value
+    if (enabled) {
+      if (!validateOssSettings() || isSettingsChanged()) return
+      try {
+        await feedback.confirm({
+          title: '启用云端同步历史整理',
+          message: '请确认其他同步设备已升级并至少成功同步一次。仅在一台常用设备上开启。此功能会删除符合条件的旧同步快照和版本记录。',
+          confirmButtonText: '启用整理',
+          danger: true
+        })
+      } catch {
+        return
+      }
+      if (scope !== currentHistoryScope.value || !deps.getVault() || deps.isLocked() || isSettingsChanged()) return
+    }
+    historyCleanupScope.value = enabled ? scope : ''
+    writeLocalStorage(SYNC_HISTORY_CLEANUP_SCOPE_KEY, historyCleanupScope.value)
   }
 
   async function persistSettings(options: { closeDrawer?: boolean; toast?: boolean; skipAutoSync?: boolean } = {}): Promise<boolean> {
@@ -472,6 +499,7 @@ export function createSyncStore(deps: SyncStoreDeps) {
     persistSettings,
     hasCompleteOssSettings,
     validateOssSettings,
+    isHistoryCleanupEnabled: (scope) => historyCleanupScope.value === scope,
     getSignal: () => cloudSyncRuntime.signal(),
     isCloudBusy: () => cloudBusy.value,
     getCloudSyncPreview: () => cloudSyncPreview.value,
@@ -789,6 +817,7 @@ export function createSyncStore(deps: SyncStoreDeps) {
     CLOUD_SYNC_LOG_LIMIT_MAX,
     // Settings & Cloud State
     settings,
+    historyCleanupEnabled,
     cloudBusy,
     backupStatus,
     cloudInfo,
@@ -815,6 +844,7 @@ export function createSyncStore(deps: SyncStoreDeps) {
     updateOssSetting,
     syncSettings,
     setAutoSyncIntervalMinutes,
+    setHistoryCleanupEnabled,
     hasCompleteOssSettings,
     validateOssSettings,
     isSettingsChanged,

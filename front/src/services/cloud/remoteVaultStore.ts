@@ -37,6 +37,7 @@ export interface RemoteVaultStore {
     options?: RemoteVaultWriteOptions
   ): Promise<RemoteVaultResult<string>>
   getObjectInfo(objectName: string): Promise<RemoteVaultResult<RemoteVaultObjectInfo>>
+  deleteObject?(objectName: string): Promise<RemoteVaultResult<string>>
   listObjects(prefix?: string, limit?: number, cursor?: string): Promise<RemoteVaultResult<RemoteVaultObjectInfo[]>>
 }
 

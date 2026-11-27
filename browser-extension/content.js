@@ -64,6 +64,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
   let extensionFilledPasswords = new WeakMap()
   let rootHost = null
   let rootView = null
+  const appearance = globalThis.MyPwdMgAppearance?.createController(() => rootView)
   let entryButtonIds = new WeakMap()
 
   function pruneCompletedSaveTokens(now = Date.now()) {
@@ -550,6 +551,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
     rootView.className = 'mypwdmg-root'
     shadow.append(stylesheet, rootView)
     document.documentElement.appendChild(rootHost)
+    void appearance?.refresh().catch(() => {})
     return rootView
   }
 
@@ -1527,6 +1529,7 @@ if (!window.__mypwdmgContentScriptLoaded) {
 
   window.__mypwdmgCleanup = () => {
     extensionContextInvalidated = true
+    appearance?.dispose()
     removeRoot()
     observer?.disconnect()
   }

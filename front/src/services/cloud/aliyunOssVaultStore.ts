@@ -15,7 +15,7 @@ import {
   type RemoteVaultWriteOptions
 } from './remoteVaultStore.ts'
 
-type AliyunOssClient = Pick<AliyunOSSAPI, 'downloadFile' | 'uploadFile' | 'getFileInfo' | 'listFiles'>
+type AliyunOssClient = Pick<AliyunOSSAPI, 'downloadFile' | 'uploadFile' | 'getFileInfo' | 'listFiles' | 'deleteFile'>
 
 export class AliyunOssVaultStore implements RemoteVaultStore {
   private readonly client: AliyunOssClient
@@ -40,6 +40,10 @@ export class AliyunOssVaultStore implements RemoteVaultStore {
       ? await this.client.uploadFile(objectName, content, contentType, options)
       : await this.client.uploadFile(objectName, content, contentType)
     return mapAliyunTextResult(response)
+  }
+
+  async deleteObject(objectName: string): Promise<RemoteVaultResult<string>> {
+    return mapAliyunTextResult(await this.client.deleteFile(objectName))
   }
 
   async getObjectInfo(objectName: string): Promise<RemoteVaultResult<RemoteVaultObjectInfo>> {

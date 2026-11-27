@@ -1,6 +1,9 @@
+import { normalizeDeviceCheckpointBasis, type DeviceCheckpointBasis } from './deviceRemoteVault.ts'
+
 const DATABASE_NAME = 'mypwdmg-sync-v1'
-const DATABASE_VERSION = 1
+const DATABASE_VERSION = 2
 const STORE_NAME = 'checkpoints'
+const WRITER_STORE_NAME = 'device-writers'
 const MAX_CHECKPOINT_ENVELOPE_LENGTH = 24 * 1024 * 1024
 const SHA256_RE = /^[a-f0-9]{64}$/i
 
@@ -9,6 +12,7 @@ export type SyncCheckpoint = {
   envelope: string
   payloadFingerprint: string
   remoteHeadIds: string[]
+  deviceBasis?: DeviceCheckpointBasis
   recordedAt: number
 }
 
@@ -37,6 +41,36 @@ export async function writeSyncCheckpoint(checkpoint: SyncCheckpoint): Promise<v
   }
 }
 
+type SyncWriterState = {
+  id: string
+  phase: 'idle' | 'staging' | 'publishing' | 'uncertain'
+  claimId?: string
+  claimedAt?: number
+  initializing?: boolean
+}
+
+export async function updateSyncWriterState(
+  key: string,
+  update: (previous: SyncWriterState | undefined) => SyncWriterState | undefined
+): Promise<SyncWriterState | undefined> {
+  const database = await openDatabase()
+  try {
+    const transaction = database.transaction(WRITER_STORE_NAME, 'readwrite')
+    const done = transactionDone(transaction)
+    void done.catch(() => {})
+    const records = transaction.objectStore(WRITER_STORE_NAME)
+    const previous = await requestResult(records.get(key)) as SyncWriterState | undefined
+    const next = update(previous)
+    if (next !== undefined && next !== previous) records.put(next, key)
+    await done
+    return next
+  } finally {
+    database.close()
+  }
+}
+
+export type { SyncWriterState }
+
 export function normalizeSyncCheckpoint(value: unknown): SyncCheckpoint | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const item = value as Partial<SyncCheckpoint>
@@ -51,11 +85,14 @@ export function normalizeSyncCheckpoint(value: unknown): SyncCheckpoint | null {
   if (!Array.isArray(item.remoteHeadIds) || item.remoteHeadIds.some((id) => typeof id !== 'string' || id.length > 512)) {
     return null
   }
+  const remoteHeadIds = [...new Set(item.remoteHeadIds)].sort()
+  const deviceBasis = normalizeDeviceCheckpointBasis(item.deviceBasis, remoteHeadIds)
   return {
     key,
     envelope,
     payloadFingerprint: payloadFingerprint.toLowerCase(),
-    remoteHeadIds: [...new Set(item.remoteHeadIds)].sort(),
+    remoteHeadIds,
+    ...(deviceBasis ? { deviceBasis } : {}),
     recordedAt
   }
 }
@@ -66,6 +103,7 @@ function openDatabase(): Promise<IDBDatabase> {
     request.onupgradeneeded = () => {
       const database = request.result
       if (!database.objectStoreNames.contains(STORE_NAME)) database.createObjectStore(STORE_NAME, { keyPath: 'key' })
+      if (!database.objectStoreNames.contains(WRITER_STORE_NAME)) database.createObjectStore(WRITER_STORE_NAME)
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error || new Error('Could not open sync checkpoint database'))

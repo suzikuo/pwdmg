@@ -78,6 +78,7 @@ export interface PasswordManagerApiAdapter {
   disablePluginListener: () => Promise<ApiResult<PluginListenerState>>
   getDesktopTraySettings: () => Promise<ApiResult<DesktopTraySettings>>
   setDesktopTraySettings: (trayEnabled: boolean, closeBehavior: DesktopCloseBehavior) => Promise<ApiResult<DesktopTraySettings>>
+  setDesktopGpuAcceleration: (enabled: boolean) => Promise<ApiResult<DesktopTraySettings>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
   getAndroidPasskeyProviderState: () => Promise<ApiResult<AndroidPasskeyProviderState>>

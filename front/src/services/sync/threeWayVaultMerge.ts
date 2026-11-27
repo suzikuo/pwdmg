@@ -7,7 +7,7 @@ export type VaultMergeConflict = {
   scope: 'entry' | 'passkey' | 'order' | 'attachment-key'
   id: string
   field: string
-  reason: 'concurrent-update' | 'delete-update' | 'parent-missing' | 'order-cycle' | PasskeyMergeConflict['reason']
+  reason: 'concurrent-update' | 'delete-update' | 'parent-missing' | 'parent-cycle' | 'order-cycle' | PasskeyMergeConflict['reason']
 }
 
 export type VaultMergeResult = {
@@ -26,24 +26,30 @@ const ENTRY_FIELDS: (keyof FlatEntry)[] = [
 export function mergeVaultPayloads(
   ancestor: VaultPayload,
   local: VaultPayload,
-  remote: VaultPayload
+  remote: VaultPayload,
+  reviewConcurrentEntryChanges = false
 ): VaultMergeResult {
   const conflicts: VaultMergeConflict[] = []
   const baseIndex = flattenEntries(ancestor.entries)
   const localIndex = flattenEntries(local.entries)
   const remoteIndex = flattenEntries(remote.entries)
   const merged = new Map<string, FlatEntry>()
+  const entryTombstones = new Set([
+    ...(ancestor.entryTombstones ?? []), ...(local.entryTombstones ?? []), ...(remote.entryTombstones ?? [])
+  ])
   const ids = new Set([...baseIndex.nodes.keys(), ...localIndex.nodes.keys(), ...remoteIndex.nodes.keys()])
 
   for (const id of [...ids].sort()) {
-    const value = mergeEntry(
-      id,
-      baseIndex.nodes.get(id),
-      localIndex.nodes.get(id),
-      remoteIndex.nodes.get(id),
-      remote.updatedAt,
-      conflicts
-    )
+    const baseEntry = baseIndex.nodes.get(id)
+    const localEntry = localIndex.nodes.get(id)
+    const remoteEntry = remoteIndex.nodes.get(id)
+    if (entryTombstones.has(id)) {
+      if (baseEntry && ((localEntry && !same(localEntry, baseEntry)) || (remoteEntry && !same(remoteEntry, baseEntry)))) {
+        conflicts.push({ scope: 'entry', id, field: '*', reason: 'delete-update' })
+      }
+      continue
+    }
+    const value = mergeEntry(id, baseEntry, localEntry, remoteEntry, remote.updatedAt, conflicts, reviewConcurrentEntryChanges)
     if (value) merged.set(id, value)
   }
 
@@ -77,6 +83,7 @@ export function mergeVaultPayloads(
       ...(passkeys.version === 2 ? { passkeySchemaVersion: 1 as const } : { passkeySchemaVersion: undefined }),
       revision: local.revision,
       entries,
+      ...(entryTombstones.size ? { entryTombstones: [...entryTombstones].sort() } : {}),
       passkeys: passkeys.passkeys,
       passkeyTombstones: passkeys.passkeyTombstones,
       updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0)
@@ -104,7 +111,8 @@ function mergeEntry(
   local: FlatEntry | undefined,
   remote: FlatEntry | undefined,
   remoteUpdatedAt: number,
-  conflicts: VaultMergeConflict[]
+  conflicts: VaultMergeConflict[],
+  reviewConcurrentEntryChanges: boolean
 ): FlatEntry | undefined {
   if (same(local, remote)) return cloneOptional(local)
   if (same(local, base)) return cloneOptional(remote)
@@ -126,8 +134,9 @@ function mergeEntry(
     else if (same(remoteValue, baseValue)) setField(result, field, cloneOptional(localValue))
     else if (field === 'history') {
       setField(result, field, mergeHistory(local.history, remote.history))
-    } else if (field === 'parentId') {
-      // Parent changes are structural and still require an explicit conflict.
+    } else if (reviewConcurrentEntryChanges && field === 'statusUpdatedAt') {
+      setField(result, field, Math.max(local.statusUpdatedAt ?? 0, remote.statusUpdatedAt ?? 0))
+    } else if (field === 'parentId' || reviewConcurrentEntryChanges) {
       conflicts.push({ scope: 'entry', id, field, reason: 'concurrent-update' })
     } else {
       // Keep the local value active, but retain the complete remote snapshot so
@@ -155,6 +164,7 @@ function rebuildEntries(
     byParent.set(entry.parentId, siblings)
   }
 
+  const visited = new Set<string>()
   const build = (parentId: string): VaultEntry[] => {
     const ids = byParent.get(parentId) || []
     const order = mergeSiblingOrder(
@@ -166,6 +176,7 @@ function rebuildEntries(
       conflicts
     )
     return order.map((id) => {
+      visited.add(id)
       const flat = nodes.get(id) as FlatEntry
       const { parentId: _parentId, ...entry } = clone(flat)
       return {
@@ -174,7 +185,11 @@ function rebuildEntries(
       }
     })
   }
-  return build('')
+  const entries = build('')
+  for (const id of nodes.keys()) {
+    if (!visited.has(id)) conflicts.push({ scope: 'entry', id, field: 'parentId', reason: 'parent-cycle' })
+  }
+  return entries
 }
 
 function mergeSiblingOrder(

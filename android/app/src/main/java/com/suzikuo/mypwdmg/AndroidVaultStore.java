@@ -1456,6 +1456,17 @@ final class AndroidVaultStore {
             .put("passkeyTombstones", passkeyState.passkeyTombstones)
             .put("settings", normalizedSettings)
             .put("updatedAt", input.optLong("updatedAt", nowSeconds()));
+        JSONArray entryTombstones = input.optJSONArray("entryTombstones");
+        if (input.has("entryTombstones")) {
+            if (entryTombstones == null) throw new JSONException("Invalid entry tombstones");
+            for (int index = 0; index < entryTombstones.length(); index += 1) {
+                Object id = entryTombstones.get(index);
+                if (!(id instanceof String) || ((String) id).isEmpty()) {
+                    throw new JSONException("Invalid entry tombstone ID");
+                }
+            }
+            if (entryTombstones.length() > 0) normalized.put("entryTombstones", entryTombstones);
+        }
         String attachmentKey = normalizeAttachmentKey(input.opt("attachmentKey"));
         if (attachmentKey.isEmpty() && entriesContainAttachments(normalized.getJSONArray("entries"))) {
             throw new JSONException("Vault attachment key is missing");

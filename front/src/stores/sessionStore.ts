@@ -300,7 +300,6 @@ export function createSessionStore(deps: SessionStoreDeps) {
       }
     } finally {
       stateLoading.value = false
-      void api.showDesktopWindow()
     }
 
     if (shouldAutoUnlock && typeof window !== 'undefined') {
@@ -764,7 +763,7 @@ export function createSessionStore(deps: SessionStoreDeps) {
     if (!manifestUrl) return
 
     updateBusy.value = 'check'
-    updateProgress.value = { action: 'check', phase: 'check', progress: 8, message: '正在获取版本信息' }
+    updateProgress.value = { action: 'check', phase: 'check', progress: isAndroidRuntime ? 8 : 0, message: '正在获取版本信息' }
     updateStatus.value = '正在获取版本信息'
     downloadedUpdatePath.value = ''
     try {
@@ -798,8 +797,8 @@ export function createSessionStore(deps: SessionStoreDeps) {
     if (!manifestUrl) return
 
     updateBusy.value = 'download'
-    updateProgress.value = { action: 'download', phase: 'download', progress: 3, message: '正在准备下载' }
-    updateStatus.value = '正在准备下载'
+    updateStatus.value = isAndroidRuntime ? '正在准备下载' : '正在下载更新包'
+    updateProgress.value = { action: 'download', phase: 'download', progress: isAndroidRuntime ? 3 : 0, message: updateStatus.value }
     try {
       const result = await api.downloadAppUpdate(manifestUrl, handleUpdateProgress)
       if (!result.ok || !result.data) {
@@ -851,11 +850,16 @@ export function createSessionStore(deps: SessionStoreDeps) {
     }
 
     updateBusy.value = 'apply'
+    if (!isAndroidUpdate) {
+      updateStatus.value = '正在校验并准备安装更新'
+      updateProgress.value = { action: 'apply', phase: 'verify', message: updateStatus.value }
+    }
     let keepBusyUntilExit = false
     try {
       const result = await api.applyAppUpdate(downloadedUpdatePath.value)
       if (!result.ok) {
-        feedback.failToast(result.message || '安装更新失败')
+        updateStatus.value = result.message || '安装更新失败'
+        feedback.failToast(updateStatus.value)
         return
       }
       if (result.data?.permissionRequired) {
@@ -870,6 +874,7 @@ export function createSessionStore(deps: SessionStoreDeps) {
       updateStatus.value = '安装更新失败'
       feedback.failToast(updateStatus.value)
     } finally {
+      updateProgress.value = null
       if (!keepBusyUntilExit) updateBusy.value = ''
     }
   }

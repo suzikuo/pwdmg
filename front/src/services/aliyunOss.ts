@@ -95,7 +95,7 @@ export class AliyunOSSAPI {
   }
 
   async generateSignature(
-    method: 'GET' | 'HEAD' | 'PUT',
+    method: 'GET' | 'HEAD' | 'PUT' | 'DELETE',
     contentMD5: string,
     contentType: string,
     date: string,
@@ -162,6 +162,9 @@ export class AliyunOSSAPI {
       const errorText = await readTextResponseLimited(response, 64 * 1024)
       if (response.status === 403 && errorText.includes('QuotaExceeded')) {
         return { status: APIResponseStatus.QuotaExceeded, content: '存储空间配额已满' }
+      }
+      if (response.status === 401 || response.status === 403) {
+        return { status: APIResponseStatus.AuthFail, content: formatOssHttpError('上传', response.status, errorText) }
       }
       if (response.status === 409 || response.status === 412 || errorText.includes('FileAlreadyExists')) {
         return { status: APIResponseStatus.Conflict, content: '远端对象已存在，已拒绝覆盖' }
@@ -265,6 +268,29 @@ export class AliyunOSSAPI {
     }
   }
 
+  async deleteFile(fileName: string): Promise<OSSApiResponse> {
+    if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
+
+    try {
+      const objectName = normalizeObjectName(fileName)
+      const date = this.getGMTDate()
+      const signature = await this.generateSignature('DELETE', '', '', date, `x-oss-date:${date}`, `/${this.bucketName}/${objectName}`)
+      const response = await this.request(`${this.getEndpoint()}/${encodeObjectName(objectName)}`, {
+        method: 'DELETE',
+        headers: {
+          'x-oss-date': date,
+          Authorization: `OSS ${this.accessKeyId}:${signature}`
+        }
+      })
+      if (response.status === 204) return { status: APIResponseStatus.Success, content: '' }
+      const errorText = await readTextResponseLimited(response, 64 * 1024)
+      const status = response.status === 401 || response.status === 403 ? APIResponseStatus.AuthFail : APIResponseStatus.Fail
+      return { status, content: formatOssHttpError('清理历史对象', response.status, errorText) }
+    } catch (error) {
+      return { status: APIResponseStatus.Fail, content: formatOssError(error) }
+    }
+  }
+
   async listFiles(prefix = '', maxKeys = 30, marker = ''): Promise<OSSApiResponse<OSSFileInfo[] | string>> {
     if (!this.verify()) return { status: APIResponseStatus.AuthFail, content: '配置信息不完整' }
 
@@ -297,9 +323,14 @@ export class AliyunOSSAPI {
         name: xmlElementText(node, 'Key'),
         exists: true,
         size: Number(xmlElementText(node, 'Size') || 0),
-        lastModified: xmlElementText(node, 'LastModified')
+        lastModified: xmlElementText(node, 'LastModified'),
+        etag: xmlElementText(node, 'ETag') || undefined
       })).filter((item) => item.name)
-      const isTruncated = xmlTextContent(doc, 'IsTruncated').toLowerCase() === 'true'
+      const truncated = xmlTextContent(doc, 'IsTruncated').toLowerCase()
+      if (truncated !== 'true' && truncated !== 'false') {
+        return { status: APIResponseStatus.Fail, content: '列表响应格式无效' }
+      }
+      const isTruncated = truncated === 'true'
       const nextMarker = isTruncated ? xmlTextContent(doc, 'NextMarker') : ''
       if (isTruncated && !nextMarker) {
         return { status: APIResponseStatus.Fail, content: '列表响应缺少分页游标' }

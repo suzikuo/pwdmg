@@ -1,5 +1,6 @@
 import type { EntryKind, VaultEntry, VaultPayload } from '../../types'
 import type { ResolvedPasskeyState } from './passkeyRemoteGate'
+import type { DeviceCheckpointBasis } from './deviceRemoteVault.ts'
 
 export type CloudSyncDirection = 'upload' | 'download'
 export type CloudSyncChangeType = 'added' | 'modified' | 'deleted'
@@ -76,7 +77,7 @@ export type CloudSyncPreview = {
   remoteExists: boolean
   managedRemote: boolean
   remoteHeadIds: string[]
-  legacyObjectNames: string[]
+  deviceBasis?: DeviceCheckpointBasis
   remoteEnvelopeText: string
   /** The remote envelope whose password-derived KDF parameters are canonical for this sync. */
   remoteEncryptionEnvelopeText: string

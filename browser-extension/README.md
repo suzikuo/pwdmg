@@ -4,10 +4,12 @@
 2. Open Chrome or Edge extension management.
 3. Enable developer mode and load this `browser-extension` folder as an unpacked extension.
 4. Copy the generated extension ID.
-5. Open the desktop app, go to `设置 -> 插件监听`, paste the extension ID, and click `开启插件监听`.
+5. Open the desktop app, go to `设置 → 安全与解锁 → 浏览器插件 → 配置`, paste the extension ID, and click `开启`.
 
 The app registers a Native Messaging host for the current Windows user. Chrome/Edge starts that host on demand, so do not manually run `mypwdmg_native_host.cmd` in a terminal.
 When plugin listening is turned off in the desktop app, existing native host connections stop returning fill data immediately. Reloading the browser extension is only needed to clear any old extension UI state.
+
+Open `外观设置` from the toolbar popup or the extension's options menu. Choose an included skin or import a My Password skin JSON file. The extension stores its own skin, light/dark preference, layout, list style, and density in the browser. The toolbar popup and in-page panels both apply these settings. You can export the selected skin with its current layout or restore the layout defined by the skin.
 
 Manual development fallback:
 
@@ -22,8 +24,10 @@ Automatic save notifications stay collapsed as a compact icon in the page's uppe
 Fill payloads require a real click in extension-owned UI and a short-lived authorization bound to the current tab, frame, document, and origin. Run the extension regression tests with:
 
 ```powershell
-node --test .\browser-extension\tests\security-core.test.js .\browser-extension\tests\passkey-proxy-probe.test.js
+node --test .\browser-extension\tests\*.test.js
 ```
+
+The included skins are packaged from the desktop presets. After editing those presets, run `node scripts/extension/generate_builtin_skins.mjs` from the repository root to refresh the extension's bundled presets.
 
 ## Developer-only Passkey Probe
 

@@ -105,6 +105,7 @@ export interface VaultPayload {
   passkeySchemaVersion?: 1
   revision: number
   entries: VaultEntry[]
+  entryTombstones?: string[]
   passkeys: VaultPasskey[]
   passkeyTombstones: VaultPasskeyTombstone[]
   settings: {
@@ -169,6 +170,7 @@ export interface DesktopTraySettings {
   trayEnabled: boolean
   trayAvailable: boolean
   closeBehavior: DesktopCloseBehavior
+  gpuAccelerationEnabled?: boolean
 }
 
 export interface PluginListenerState {

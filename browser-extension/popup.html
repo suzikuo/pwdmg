@@ -1,46 +1,52 @@
 <!doctype html>
 <html lang="zh-CN">
-
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>My Password</title>
+  <link rel="stylesheet" href="appearance.css" />
   <link rel="stylesheet" href="popup.css" />
 </head>
-
 <body>
   <main class="popup-shell">
     <header class="popup-header">
-      <div class="brand-mark" aria-hidden="true">MP</div>
-      <div class="header-copy">
-        <h1>My Password</h1>
-        <p id="siteHost">读取当前页面中</p>
-      </div>
+      <span class="brand-mark" aria-hidden="true"><span></span></span>
+      <h1>My Password</h1>
       <span id="stateBadge" class="state-badge" data-state="checking">检测中</span>
     </header>
 
-    <section class="status-panel" aria-live="polite">
-      <div class="status-line">
-        <span class="status-dot" aria-hidden="true"></span>
-        <p id="status">正在连接本地保险库...</p>
-      </div>
-      <p id="matchInfo" class="match-info"></p>
-    </section>
+    <div class="popup-body">
+      <section class="site-panel" aria-labelledby="siteHost">
+        <div class="site-status" aria-live="polite">
+          <h2 id="siteHost">正在读取当前网站</h2>
+          <p id="status">正在连接本地保险库…</p>
+        </div>
+        <button id="showPanelButton" class="primary-action" type="button" hidden>
+          <span id="showPanelLabel">打开网页填充面板</span>
+          <kbd id="showPanelShortcut">Alt+T</kbd>
+        </button>
+        <form id="unlockForm" class="unlock-form" hidden>
+          <label for="password">主密码</label>
+          <div class="password-row">
+            <input id="password" type="password" placeholder="输入主密码" autocomplete="current-password" />
+            <button id="unlockButton" type="submit">解锁</button>
+          </div>
+          <button id="quickUnlockButton" class="secondary" type="button" hidden>设备快速解锁</button>
+        </form>
+      </section>
 
-    <button id="showPanelButton" class="primary-action" type="button">页面弹窗 <span>Alt+T</span></button>
+      <section id="matches" class="surface-card matches" aria-labelledby="matchHeading" hidden>
+        <div class="section-heading">
+          <h2 id="matchHeading">匹配账号</h2>
+          <span id="matchCount" class="match-count" hidden></span>
+        </div>
+        <p id="matchInfo" class="match-info" role="status"></p>
+        <div id="matchList" class="match-list"></div>
+      </section>
+    </div>
 
-    <form id="unlockForm" class="unlock-form">
-      <label for="password">主密码</label>
-      <div class="password-row">
-        <input id="password" type="password" placeholder="输入主密码" autocomplete="current-password" />
-        <button id="unlockButton" type="submit">解锁</button>
-      </div>
-      <button id="quickUnlockButton" class="secondary" type="button" hidden style="margin-top: 8px; width: 100%;">设备快速解锁</button>
-    </form>
-
-    <div id="matchList" class="match-list" aria-label="当前网站匹配账号"></div>
-
-    <section class="quick-settings" aria-label="自动功能">
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section class="surface-card quick-settings" aria-label="自动功能">
       <label class="auto-toggle">
         <span>自动填充</span>
         <input id="autoFillToggle" type="checkbox" role="switch" />
@@ -51,14 +57,11 @@
       </label>
     </section>
 
-    <details class="advanced-settings">
-      <summary>
-        <span>更多设置</span>
-        <small>网站规则与快捷键</small>
-      </summary>
+    <details class="surface-card advanced-settings">
+      <summary>网站规则与快捷键</summary>
       <div class="advanced-settings-body">
         <section id="ignoredSiteSetting" class="ignored-site-setting" hidden>
-          <div class="ignored-current">
+          <div class="ignored-current" id="ignoredCurrent">
             <div class="ignored-copy">
               <strong>当前站点</strong>
               <span id="ignoredCurrentState">未忽略</span>
@@ -72,7 +75,7 @@
         </section>
 
         <section class="shortcut-setting">
-          <label for="shortcutInput">页面弹窗快捷键</label>
+          <label for="shortcutInput">网页填充快捷键</label>
           <div class="shortcut-row">
             <input id="shortcutInput" type="text" readonly value="Alt+T" />
             <button id="resetShortcutButton" class="secondary" type="button">重置</button>
@@ -82,11 +85,13 @@
     </details>
 
     <footer class="popup-actions">
-      <button id="refreshButton" class="secondary" type="button">刷新</button>
-      <button id="lockButton" class="secondary danger" type="button">锁定</button>
+      <button id="appearanceButton" class="text-button" type="button">外观设置</button>
+      <button id="refreshButton" class="text-button" type="button">刷新状态</button>
+      <button id="lockButton" class="text-button" type="button" hidden>锁定保险库</button>
     </footer>
   </main>
+  <script src="builtin-skins.js"></script>
+  <script src="appearance.js"></script>
   <script src="popup.js"></script>
 </body>
-
 </html>

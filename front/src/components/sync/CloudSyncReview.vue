@@ -161,7 +161,8 @@
 
     <template #footer>
       <div v-if="preview" class="sync-footer">
-        <span class="sync-selected-count">已选 <strong>{{ selectedCount }}</strong> 处变更</span>
+        <span v-if="preview.managedRemote && !allChangesSelected" class="sync-selected-count">勾选全部差异后可同步完整快照</span>
+        <span v-else class="sync-selected-count">已选 <strong>{{ selectedCount }}</strong> 处变更</span>
         <div class="sync-footer-actions">
           <UiButton variant="ghost" size="sm" :disabled="busy" @click="emit('discard')">
             放弃本次
@@ -169,7 +170,7 @@
           <UiButton
             variant="primary"
             size="sm"
-            :disabled="selectedCount === 0 && (preview.items.length > 0 || !preview.usedAlternatePassword)"
+            :disabled="(preview.managedRemote && !allChangesSelected) || (selectedCount === 0 && (preview.items.length > 0 || !preview.usedAlternatePassword))"
             :loading="busy"
             @click="emit('apply')"
           >
@@ -212,6 +213,7 @@ const emit = defineEmits<{
   apply: []
 }>()
 
+const allChangesSelected = computed(() => props.preview?.items.every(props.isItemChecked) ?? false)
 const expandedKeys = ref<Set<string>>(new Set())
 const metaExpandedKeys = ref<Set<string>>(new Set())
 

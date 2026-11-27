@@ -363,7 +363,7 @@ function receivingEndMissing(error) {
 async function ensureContentScript(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ['security-core.js', 'content.js']
+    files: ['security-core.js', 'builtin-skins.js', 'appearance.js', 'content.js']
   })
 }
 

@@ -1,16 +1,23 @@
 const statusEl = document.getElementById('status')
+const noticeEl = document.getElementById('notice')
+const matchesEl = document.getElementById('matches')
+const matchCountEl = document.getElementById('matchCount')
 const matchInfoEl = document.getElementById('matchInfo')
 const siteHostEl = document.getElementById('siteHost')
 const stateBadgeEl = document.getElementById('stateBadge')
 const form = document.getElementById('unlockForm')
 const passwordInput = document.getElementById('password')
+const unlockButton = document.getElementById('unlockButton')
 const quickUnlockButton = document.getElementById('quickUnlockButton')
 const lockButton = document.getElementById('lockButton')
 const refreshButton = document.getElementById('refreshButton')
 const showPanelButton = document.getElementById('showPanelButton')
+const showPanelLabel = document.getElementById('showPanelLabel')
+const showPanelShortcut = document.getElementById('showPanelShortcut')
 const autoFillToggle = document.getElementById('autoFillToggle')
 const autoSaveToggle = document.getElementById('autoSaveToggle')
 const ignoredSiteSettingEl = document.getElementById('ignoredSiteSetting')
+const ignoredCurrentEl = document.getElementById('ignoredCurrent')
 const ignoredCurrentStateEl = document.getElementById('ignoredCurrentState')
 const toggleIgnoredSiteButton = document.getElementById('toggleIgnoredSiteButton')
 const ignoredSiteCountEl = document.getElementById('ignoredSiteCount')
@@ -18,6 +25,8 @@ const ignoredSiteListEl = document.getElementById('ignoredSiteList')
 const shortcutInput = document.getElementById('shortcutInput')
 const resetShortcutButton = document.getElementById('resetShortcutButton')
 const matchListEl = document.getElementById('matchList')
+const appearance = MyPwdMgAppearance.createController(() => document.documentElement)
+const appearanceButton = document.getElementById('appearanceButton')
 
 const DEFAULT_MANUAL_PANEL_SHORTCUT = 'Alt+T'
 let activeTab = null
@@ -56,7 +65,7 @@ function sendToActiveTab(message) {
         resolve({ ok: false, message: String(error.message || error) })
         return
       }
-      chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['security-core.js', 'content.js'] }, () => {
+      chrome.scripting.executeScript({ target: { tabId: activeTab.id }, files: ['security-core.js', 'builtin-skins.js', 'appearance.js', 'content.js'] }, () => {
         const injectError = chrome.runtime.lastError
         if (injectError) {
           resolve({ ok: false, message: String(injectError.message || injectError) })
@@ -134,14 +143,12 @@ async function toggleCurrentSiteIgnored() {
     ? await send({ type: 'MYPWDMG_REMOVE_IGNORED_SITE', hostname: activeHost })
     : await send({ type: 'MYPWDMG_ADD_IGNORED_SITE', hostname: activeHost })
   if (!response?.ok) {
-    statusEl.textContent = response?.message || '更新忽略站点失败。'
+    setNotice(response?.message || '更新忽略站点失败。', true)
     return
   }
   ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
   renderIgnoredSites()
-  statusEl.textContent = current
-    ? `已取消忽略 ${activeHost}。`
-    : `已忽略 ${activeHost}。`
+  setNotice(current ? `已取消忽略 ${activeHost}。` : `已忽略 ${activeHost}。`)
   await refreshActiveTab()
 }
 
@@ -150,12 +157,12 @@ async function removeIgnoredSite(site) {
   if (!target) return
   const response = await send({ type: 'MYPWDMG_REMOVE_IGNORED_SITE', hostname: target })
   if (!response?.ok) {
-    statusEl.textContent = response?.message || '移除忽略站点失败。'
+    setNotice(response?.message || '移除忽略站点失败。', true)
     return
   }
   ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
   renderIgnoredSites()
-  statusEl.textContent = `已移除 ${target}。`
+  setNotice(`已移除 ${target}。`)
   await refreshActiveTab()
 }
 
@@ -163,17 +170,21 @@ async function refreshActiveTab() {
   await sendToActiveTab({ type: 'MYPWDMG_REFRESH' })
 }
 
-async function loadAutoSettings() {
-  const response = await send({ type: 'MYPWDMG_GET_AUTO_SETTINGS' })
-  autoFillEnabled = response?.data?.autoFillEnabled !== false
-  autoSaveEnabled = response?.data?.autoSaveEnabled !== false
-  ignoredSites = normalizeIgnoredSites(response?.data?.ignoredSites)
-  manualPanelShortcut = response?.data?.manualPanelShortcut || DEFAULT_MANUAL_PANEL_SHORTCUT
+function applyAutoSettings(settings = {}) {
+  autoFillEnabled = settings.autoFillEnabled !== false
+  autoSaveEnabled = settings.autoSaveEnabled !== false
+  ignoredSites = normalizeIgnoredSites(settings.ignoredSites)
+  manualPanelShortcut = settings.manualPanelShortcut || DEFAULT_MANUAL_PANEL_SHORTCUT
   autoFillToggle.checked = autoFillEnabled
   autoSaveToggle.checked = autoSaveEnabled
   shortcutInput.value = manualPanelShortcut
-  updateShowPanelShortcutLabel()
+  showPanelShortcut.textContent = manualPanelShortcut
   renderIgnoredSites()
+}
+
+async function loadAutoSettings() {
+  const response = await send({ type: 'MYPWDMG_GET_AUTO_SETTINGS' })
+  applyAutoSettings(response?.data)
 }
 
 async function setAutoSettings(nextSettings) {
@@ -181,19 +192,13 @@ async function setAutoSettings(nextSettings) {
   if (!response?.ok) {
     autoFillToggle.checked = autoFillEnabled
     autoSaveToggle.checked = autoSaveEnabled
-    statusEl.textContent = response?.message || '切换自动设置失败。'
+    shortcutInput.value = manualPanelShortcut
+    setNotice(response?.message || '保存设置失败。', true)
     return
   }
-  autoFillEnabled = response.data?.autoFillEnabled !== false
-  autoSaveEnabled = response.data?.autoSaveEnabled !== false
-  ignoredSites = normalizeIgnoredSites(response.data?.ignoredSites)
-  manualPanelShortcut = response.data?.manualPanelShortcut || DEFAULT_MANUAL_PANEL_SHORTCUT
-  autoFillToggle.checked = autoFillEnabled
-  autoSaveToggle.checked = autoSaveEnabled
-  shortcutInput.value = manualPanelShortcut
-  updateShowPanelShortcutLabel()
-  renderIgnoredSites()
-  statusEl.textContent = `自动填充${autoFillEnabled ? '已开启' : '已关闭'}，自动保存${autoSaveEnabled ? '已开启' : '已关闭'}。`
+  applyAutoSettings(response.data)
+  const changedToggle = 'autoFillEnabled' in nextSettings || 'autoSaveEnabled' in nextSettings
+  setNotice(changedToggle ? '自动功能设置已更新。' : `快捷键已设为 ${manualPanelShortcut}。`)
   await refreshActiveTab()
 }
 
@@ -202,15 +207,16 @@ function setBadge(text, state) {
   stateBadgeEl.dataset.state = state
 }
 
-function updateShowPanelShortcutLabel() {
-  showPanelButton.innerHTML = `页面弹窗 <span>${escapeHtml(manualPanelShortcut)}</span>`
+function setNotice(message = '', error = false) {
+  noticeEl.hidden = !message
+  noticeEl.textContent = message
+  noticeEl.toggleAttribute('data-error', error)
 }
 
 function renderIgnoredSites() {
-  if (!ignoredSiteSettingEl || !ignoredCurrentStateEl || !toggleIgnoredSiteButton || !ignoredSiteCountEl || !ignoredSiteListEl) return
-
   const currentMatch = findMatchingIgnoredSite()
   ignoredSiteSettingEl.hidden = false
+  ignoredCurrentEl.hidden = !activeHost
   ignoredCurrentStateEl.textContent = currentMatch ? `已忽略 ${currentMatch}` : '未忽略'
   toggleIgnoredSiteButton.textContent = currentMatch ? '取消忽略' : '忽略该网站'
   toggleIgnoredSiteButton.dataset.action = currentMatch ? 'remove' : 'add'
@@ -272,25 +278,30 @@ function shortcutKeyFromEvent(event) {
   return aliases[event.code] || ''
 }
 
-async function showLocked(message = '请输入主密码解锁插件。') {
+function resetMatches() {
+  matchesEl.hidden = true
+  matchCountEl.hidden = true
+  matchInfoEl.textContent = ''
+  matchListEl.replaceChildren()
+}
+
+async function showLocked(message = '输入主密码解锁保险库。') {
   setBadge('已锁定', 'locked')
   statusEl.textContent = message
-  matchInfoEl.textContent = ''
-  matchListEl.innerHTML = ''
+  resetMatches()
   form.hidden = false
   lockButton.hidden = true
   showPanelButton.hidden = true
-  if (quickUnlockButton) {
-    const duState = await send({ type: 'MYPWDMG_DEVICE_UNLOCK_STATE' }).catch(() => null)
-    quickUnlockButton.hidden = !(duState?.ok && duState?.data?.enabled)
-  }
-  window.setTimeout(() => passwordInput.focus(), 20)
+  quickUnlockButton.hidden = true
+  passwordInput.focus()
+  const deviceState = await send({ type: 'MYPWDMG_DEVICE_UNLOCK_STATE' })
+  quickUnlockButton.hidden = form.hidden || !(deviceState?.ok && deviceState?.data?.enabled)
 }
 
 function showUnlocked() {
   setBadge('已解锁', 'unlocked')
   form.hidden = true
-  if (quickUnlockButton) quickUnlockButton.hidden = true
+  quickUnlockButton.hidden = true
   lockButton.hidden = false
   showPanelButton.hidden = !activeHost
 }
@@ -298,8 +309,7 @@ function showUnlocked() {
 function showUnavailable(message, state = 'error') {
   setBadge(state === 'empty' ? '未创建' : '不可用', state)
   statusEl.textContent = message
-  matchInfoEl.textContent = ''
-  matchListEl.innerHTML = ''
+  resetMatches()
   form.hidden = true
   lockButton.hidden = true
   showPanelButton.hidden = true
@@ -308,13 +318,13 @@ function showUnavailable(message, state = 'error') {
 async function unlock(password, silent = false) {
   if (!silent) {
     setBadge('解锁中', 'checking')
-    statusEl.textContent = '正在解锁...'
+    statusEl.textContent = '正在解锁…'
   }
 
   const response = await send({ type: 'MYPWDMG_UNLOCK', password })
   passwordInput.value = ''
   if (!response?.ok) {
-    if (!silent) showLocked(response?.message || '解锁失败。')
+    if (!silent) await showLocked(response?.message || '解锁失败。')
     return false
   }
 
@@ -325,33 +335,39 @@ async function unlock(password, silent = false) {
 }
 
 async function loadMatches() {
+  resetMatches()
   if (!activeHost) {
-    statusEl.textContent = '当前页面不是可填充的网站。'
-    matchInfoEl.textContent = ''
-    matchListEl.innerHTML = ''
+    statusEl.textContent = '切换到网站后可查找并填充账号。'
     showPanelButton.hidden = true
     return
   }
 
   statusEl.textContent = '已连接本地保险库。'
-  matchInfoEl.textContent = autoFillEnabled ? '正在查询当前站点...' : '自动填充已关闭，下面账号仍可手动填充。'
+  matchesEl.hidden = false
+  matchInfoEl.textContent = '正在查找账号…'
   const response = await send({ type: 'MYPWDMG_QUERY_MATCHES' })
   if (!response?.ok) {
     if (response?.code === 'LOCKED' || response?.code === 'BAD_PASSWORD') {
-      showLocked('请输入主密码解锁插件。')
+      await showLocked()
       return
     }
     matchInfoEl.textContent = response?.message || '无法读取当前网站账号。'
-    matchListEl.innerHTML = ''
     return
   }
 
   const matches = Array.isArray(response.data) ? response.data : []
-  matchInfoEl.textContent = matches.length ? `当前站点有 ${matches.length} 个匹配账号。` : '当前站点暂无匹配账号。'
+  if (!matches.length) {
+    matchInfoEl.textContent = '当前网站暂无匹配账号。'
+    return
+  }
+  matchCountEl.textContent = String(matches.length)
+  matchCountEl.hidden = false
+  matchInfoEl.textContent = ''
   matchListEl.innerHTML = matches.map(renderMatch).join('')
 }
 
 function renderMatch(entry) {
+  const title = entry.title || '未命名账号'
   const label = entry.username || entry.email || entry.phone || entry.domains?.[0] || '未设置账号'
   const badges = [
     sourceLabel(entry.loginAccountSource),
@@ -360,12 +376,12 @@ function renderMatch(entry) {
   return `
     <div class="match-row">
       <div class="match-copy">
-        <strong>${escapeHtml(entry.title || 'Untitled')}</strong>
+        <strong>${escapeHtml(title)}</strong>
         <span>${escapeHtml(label)}</span>
       </div>
       <div class="match-meta">
         <small>${escapeHtml(badges.join(' · '))}</small>
-        <button class="fill-button" type="button" data-entry-id="${escapeAttr(entry.id)}">填充</button>
+        <button class="fill-button" type="button" data-entry-id="${escapeAttr(entry.id)}" aria-label="填充 ${escapeAttr(title)}">填充</button>
       </div>
     </div>
   `
@@ -394,8 +410,10 @@ async function loadState() {
   form.hidden = true
   lockButton.hidden = true
   showPanelButton.hidden = true
-  matchListEl.innerHTML = ''
+  resetMatches()
+  setNotice()
   setBadge('检测中', 'checking')
+  statusEl.textContent = '正在连接本地保险库…'
 
   await getActiveTab()
   await loadAutoSettings()
@@ -418,35 +436,49 @@ async function loadState() {
   }
 
   setBadge('解锁中', 'checking')
-  statusEl.textContent = '正在尝试空密码解锁...'
+  statusEl.textContent = '正在检查解锁状态…'
   const unlocked = await unlock('', true)
-  if (!unlocked) showLocked('请输入主密码解锁插件。')
+  if (!unlocked) await showLocked()
 }
 
-form.addEventListener('submit', async (event) => {
-  event.preventDefault()
-  await unlock(passwordInput.value, false)
-})
-
-quickUnlockButton?.addEventListener('click', async () => {
-  await unlock('', false)
-})
-
-lockButton.addEventListener('click', async () => {
-  setBadge('锁定中', 'checking')
-  statusEl.textContent = '正在锁定...'
-  const response = await send({ type: 'MYPWDMG_LOCK' })
-  if (!response?.ok) {
-    statusEl.textContent = response?.message || '锁定失败。'
-    return
+async function runVaultAction(action) {
+  if (refreshButton.disabled) return
+  const buttons = [unlockButton, quickUnlockButton, refreshButton, lockButton]
+  for (const button of buttons) button.disabled = true
+  try {
+    await action()
+  } finally {
+    for (const button of buttons) button.disabled = false
   }
-  showLocked('插件已锁定。')
-  await refreshActiveTab()
+}
+
+form.addEventListener('submit', (event) => {
+  event.preventDefault()
+  void runVaultAction(() => unlock(passwordInput.value))
 })
 
-refreshButton.addEventListener('click', async () => {
-  await refreshActiveTab()
-  await loadState()
+quickUnlockButton.addEventListener('click', () => {
+  void runVaultAction(() => unlock(''))
+})
+
+lockButton.addEventListener('click', () => {
+  void runVaultAction(async () => {
+    setNotice()
+    const response = await send({ type: 'MYPWDMG_LOCK' })
+    if (!response?.ok) {
+      setNotice(response?.message || '锁定失败。', true)
+      return
+    }
+    await showLocked('保险库已锁定。')
+    await refreshActiveTab()
+  })
+})
+
+refreshButton.addEventListener('click', () => {
+  void runVaultAction(async () => {
+    await refreshActiveTab()
+    await loadState()
+  })
 })
 
 autoFillToggle.addEventListener('change', async () => {
@@ -476,6 +508,7 @@ shortcutInput.addEventListener('blur', () => {
 })
 
 shortcutInput.addEventListener('keydown', async (event) => {
+  if (!event.ctrlKey && !event.altKey && !event.metaKey && ['Tab', 'Escape'].includes(event.key)) return
   event.preventDefault()
   event.stopPropagation()
   const shortcut = shortcutFromEvent(event)
@@ -493,12 +526,12 @@ resetShortcutButton.addEventListener('click', async () => {
 
 showPanelButton.addEventListener('click', async () => {
   showPanelButton.disabled = true
-  showPanelButton.textContent = '...'
+  showPanelLabel.textContent = '正在打开…'
   const response = await sendToActiveTab({ type: 'MYPWDMG_SHOW_PANEL' })
   if (!response?.ok) {
     showPanelButton.disabled = false
-    showPanelButton.textContent = '页面弹窗'
-    statusEl.textContent = response?.message || '无法在当前页面显示弹窗。'
+    showPanelLabel.textContent = '打开网页填充面板'
+    setNotice(response?.message || '无法在当前页面显示弹窗。', true)
     return
   }
   window.close()
@@ -514,10 +547,14 @@ matchListEl.addEventListener('click', async (event) => {
   if (!response?.ok) {
     button.disabled = false
     button.textContent = '填充'
-    statusEl.textContent = response?.message || '无法向当前页面填充。'
+    setNotice(response?.message || '无法向当前页面填充。', true)
     return
   }
   window.close()
 })
+appearanceButton.addEventListener('click', () => {
+  chrome.runtime.openOptionsPage().catch(() => setNotice('无法打开外观设置。', true))
+})
 
-loadState()
+void appearance.refresh().catch(() => {})
+void runVaultAction(loadState)

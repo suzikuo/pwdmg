@@ -50,13 +50,14 @@ export function hasLocalCloudChanges(input: {
 }
 
 export function buildCloudSyncTargetPayload(
-  preview: Pick<CloudSyncPreview, 'basePayload' | 'sourcePayload' | 'resolvedPasskeyState' | 'items'>,
+  preview: Pick<CloudSyncPreview, 'basePayload' | 'sourcePayload' | 'resolvedPasskeyState' | 'items'> & { managedRemote?: boolean },
   selectedItems: CloudSyncDiffItem[],
   settings: VaultPayload['settings']
 ): VaultPayload {
-  const target = clone(preview.basePayload)
+  const target = clone(preview.managedRemote ? preview.sourcePayload : preview.basePayload)
   applyResolvedPasskeyState(target, preview.resolvedPasskeyState)
   target.settings = clone(settings)
+  if (preview.managedRemote) return target
   for (const item of selectedItems) {
     applyCloudSyncDiffItem(target.entries, preview.sourcePayload.entries, item)
   }
@@ -86,6 +87,7 @@ export async function createCloudSyncPlan(input: {
   remotePayload: VaultPayload
   ancestorPayload: VaultPayload | null
   pullStrategy?: CloudPullStrategy
+  reviewConcurrentEntryChanges?: boolean
   fingerprint: (payload: VaultPayload) => Promise<string>
 }): Promise<CloudSyncPlanResult> {
   const {
@@ -94,6 +96,7 @@ export async function createCloudSyncPlan(input: {
     remotePayload,
     ancestorPayload,
     pullStrategy = 'snapshot',
+    reviewConcurrentEntryChanges = false,
     fingerprint
   } = input
   let convergedPayload: VaultPayload | null = null
@@ -133,7 +136,7 @@ export async function createCloudSyncPlan(input: {
       pullStrategy === 'integrate' &&
       (requestedDirection === 'download' || (requestedDirection === 'upload' && divergentSinceBase))
     ) {
-      const merged = mergeVaultPayloads(ancestorPayload, localPayload, remotePayload)
+      const merged = mergeVaultPayloads(ancestorPayload, localPayload, remotePayload, reviewConcurrentEntryChanges)
       if (merged.conflicts.length) {
         return {
           ok: false,

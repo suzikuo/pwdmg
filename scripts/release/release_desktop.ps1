@@ -47,7 +47,8 @@ function Show-Help {
     Write-Host "  3. Runs scripts\package_desktop.ps1."
     Write-Host "  4. Builds the Android release APK unless -DesktopOnly is used."
     Write-Host "  5. Generates and Ed25519-signs release\update-manifest.json for GitHub Releases."
-    Write-Host "  6. Publishes the GitHub Release unless -NoPublish is used."
+    Write-Host "  6. Uploads the new release as a draft, removes older published releases, then publishes the draft."
+    Write-Host "     Cleanup removes old release assets and retains their Git tags. -Draft and -NoPublish skip cleanup."
     Write-Host "  If no flow option is provided in an interactive shell, a release mode menu is shown."
     Write-Host ""
     Write-Host "Examples:"
@@ -88,8 +89,8 @@ function Show-Help {
     Write-Host "  -Publish                 Legacy alias; publish is enabled by default."
     Write-Host "  -NoPublish               Build packages and manifest only, without creating a GitHub Release."
     Write-Host "  -PublishOnly             Publish existing release files without rebuilding or rewriting versions."
-    Write-Host "  -Draft                   Publish GitHub Release as draft."
-    Write-Host "  -Prerelease              Mark GitHub Release as prerelease."
+    Write-Host "  -Draft                   Save the new release as a draft without removing published releases."
+    Write-Host "  -Prerelease              Publish the sole release as a prerelease, which GitHub omits from /releases/latest."
     Write-Host "  -Help                    Show this help."
 }
 
@@ -966,8 +967,22 @@ function Assert-SignedManifest {
     Assert-LastExitCode "Update manifest signature verification"
 }
 
+function Get-GitHubReleases {
+    param([string] $Gh, [string] $Repository)
+
+    $Rows = & $Gh api "repos/$Repository/releases?per_page=100" --hostname github.com --paginate `
+        --jq '.[] | {id, tag_name, draft, published_at} | @json'
+    Assert-LastExitCode "GitHub release listing"
+    foreach ($Row in $Rows) {
+        $Row | ConvertFrom-Json
+    }
+}
+
 function Publish-GitHubRelease {
     param([string] $Repository, [string] $ReleaseVersion)
+    if ($Repository -notmatch '^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$') {
+        throw "Specify the GitHub repository as -Repo OWNER/REPO."
+    }
     Assert-SignedManifest $ManifestPath
     $Gh = Resolve-GitHubCli
     if (-not $Gh) {
@@ -984,18 +999,61 @@ function Publish-GitHubRelease {
     if ($ShouldIncludeAndroid) {
         $ReleaseFiles += $AndroidArchivePath
     }
-    $GhArgs = @("release", "create", $Tag) + $ReleaseFiles + @("--title", $Title, "--notes", $ReleaseNotes)
-    if ($Repository) {
-        $GhArgs += @("--repo", $Repository)
+    foreach ($File in $ReleaseFiles) {
+        Require-ReleaseFile $File
+    }
+
+    $RepoArgs = @("--repo", "github.com/$Repository")
+    $TargetReleases = @(Get-GitHubReleases $Gh $Repository | Where-Object { $_.tag_name -ceq $Tag })
+    if ($TargetReleases.Count -gt 1) {
+        throw "Multiple releases already use tag $Tag. Resolve the duplicate drafts before publishing."
+    }
+    if ($TargetReleases.Count -eq 1 -and -not $TargetReleases[0].draft) {
+        throw "Release $Tag is already published. Choose a new version to replace it."
+    }
+
+    $ReleaseDetails = @("--title", $Title, "--notes", $ReleaseNotes)
+    $PrereleaseFlag = if ($Prerelease) { "--prerelease" } else { "--prerelease=false" }
+    if ($TargetReleases.Count -eq 0) {
+        $CreateArgs = @("release", "create", $Tag) + $ReleaseFiles + $ReleaseDetails + $RepoArgs + @("--draft", $PrereleaseFlag)
+        & $Gh @CreateArgs
+        Assert-LastExitCode "Uploading GitHub draft $Tag"
+    }
+    else {
+        $UploadArgs = @("release", "upload", $Tag) + $ReleaseFiles + $RepoArgs + @("--clobber")
+        & $Gh @UploadArgs
+        Assert-LastExitCode "Refreshing assets for GitHub draft $Tag"
+        & $Gh release edit $Tag @RepoArgs @ReleaseDetails $PrereleaseFlag
+        Assert-LastExitCode "Updating details for GitHub draft $Tag"
     }
     if ($Draft) {
-        $GhArgs += "--draft"
+        return
     }
-    if ($Prerelease) {
-        $GhArgs += "--prerelease"
+
+    $Releases = @(Get-GitHubReleases $Gh $Repository)
+    $Staged = @($Releases | Where-Object { $_.tag_name -ceq $Tag })
+    if ($Staged.Count -ne 1 -or -not $Staged[0].draft) {
+        throw "Expected a single uploaded draft for $Tag. No published releases were removed."
     }
-    & $Gh @GhArgs
-    Assert-LastExitCode "GitHub release publish"
+    # Keep the newest old release available until the final deletion.
+    $Published = @($Releases | Where-Object { -not $_.draft } | Sort-Object published_at, id)
+    foreach ($Release in $Published) {
+        Write-Host "Removing published release $($Release.tag_name) from $Repository"
+        & $Gh api "repos/$Repository/releases/$($Release.id)" --hostname github.com --method DELETE --silent
+        Assert-LastExitCode "Removing published release $($Release.tag_name)"
+    }
+
+    $PublishArgs = @("release", "edit", $Tag, "--draft=false") + $RepoArgs
+    if (-not $Prerelease) {
+        $PublishArgs += "--latest"
+    }
+    & $Gh @PublishArgs
+    Assert-LastExitCode "Publishing uploaded draft $Tag"
+
+    $Published = @(Get-GitHubReleases $Gh $Repository | Where-Object { -not $_.draft })
+    if ($Published.Count -ne 1 -or $Published[0].id -ne $Staged[0].id) {
+        throw "Published $Tag, but GitHub did not report it as the repository's sole published release."
+    }
 }
 
 $CurrentVersion = Get-CurrentVersion

@@ -37,10 +37,14 @@ export async function ensureRemoteAttachmentObjects(
   remote: RemoteVaultStore,
   vaultObjectName: string,
   payload: VaultPayload,
-  local: LocalAttachmentObjectApi
+  local: LocalAttachmentObjectApi,
+  verifiedRemotePayload?: VaultPayload
 ) {
   const references = collectAttachmentReferences(payload.entries)
+  const verified = new Map(collectAttachmentReferences(verifiedRemotePayload?.entries ?? []).map((item) => [item.id, item]))
   for (const reference of references) {
+    const remoteReference = verified.get(reference.id)
+    if (remoteReference?.ciphertextSha256 === reference.ciphertextSha256) continue
     let localResult = await local.readAttachmentCiphertext(reference)
     if (!localResult.ok || !localResult.data) {
       await ensureLocalAttachmentObjects(remote, vaultObjectName, { ...payload, entries: entriesForAttachment(payload.entries, reference.id) }, local)

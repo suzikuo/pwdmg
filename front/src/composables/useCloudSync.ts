@@ -12,7 +12,7 @@ export type CloudSyncLogStatus = 'started' | 'success' | 'review' | 'error' | 's
 export type CloudSyncLogEntry = {
   id: string
   at: number
-  direction: CloudSyncDirection | 'backup'
+  direction: CloudSyncDirection | 'backup' | 'history'
   automatic: boolean
   status: CloudSyncLogStatus
   objectName: string

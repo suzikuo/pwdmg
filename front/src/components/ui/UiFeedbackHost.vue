@@ -137,7 +137,7 @@ onBeforeUnmount(() => {
 /* Non-blocking Toast Stack */
 .ui-toast-stack {
   position: fixed;
-  top: 16px;
+  top: calc(16px + var(--desktop-titlebar-height, 0px));
   left: 50%;
   transform: translateX(-50%);
   z-index: var(--z-toast);
@@ -230,7 +230,7 @@ onBeforeUnmount(() => {
 /* Accessible Confirm Dialog */
 .ui-confirm-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--desktop-titlebar-height, 0px) 0 0;
   z-index: var(--z-confirm);
   display: flex;
   align-items: center;

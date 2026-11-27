@@ -29,6 +29,7 @@ import {
   toggleFavoriteEntryId
 } from '../services/entryListPreferences.ts'
 import { removeTrashedEntries } from '../services/entryTrash.ts'
+import { recordPermanentEntryDeletions } from '../services/entryTombstones.ts'
 import { filterVaultEntries, type EntryFilterMode } from '../services/entryWorkspace.ts'
 import {
   clearIgnoredHealthFindingsForEntry,
@@ -1636,6 +1637,7 @@ export function createVaultStore(deps: VaultStoreDeps) {
         feedback.toast('所选条目已变化')
         return
       }
+      recordPermanentEntryDeletions(vault.value.entries, payload)
       const result = await deps.saveVaultForCurrentSession(payload)
       if (!result.ok || !result.data) {
         await handleVaultWriteError(result, '批量彻底删除失败')
@@ -1960,6 +1962,7 @@ export function createVaultStore(deps: VaultStoreDeps) {
         : false
       const payload = cloneVault()
       removeEntry(payload.entries, entryId)
+      recordPermanentEntryDeletions(vault.value.entries, payload)
       const result = await deps.saveVaultForCurrentSession(payload)
       if (!result.ok || !result.data) {
         await handleVaultWriteError(result, '彻底删除失败')
@@ -2003,6 +2006,7 @@ export function createVaultStore(deps: VaultStoreDeps) {
         return
       }
       const selectedId = selectedEntry.value?.id || ''
+      recordPermanentEntryDeletions(vault.value.entries, payload)
       const result = await deps.saveVaultForCurrentSession(payload)
       if (!result.ok || !result.data) {
         await handleVaultWriteError(result, '清空回收站失败')

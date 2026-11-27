@@ -1,6 +1,7 @@
 import type { EntryKind, EntryStatus, LoginAccountSource, VaultAttachment, VaultCustomField, VaultCustomFieldType, VaultEntry, VaultPayload } from '../types'
 import { normalizeAutofillMatchMode } from './autofillRules.ts'
 import { limitEntryHistory } from './entryHistory.ts'
+import { normalizeEntryTombstones } from './entryTombstones.ts'
 import { normalizePasskeyState } from './passkeySchema.ts'
 import { secureRandomId } from './secureRandom.ts'
 
@@ -44,12 +45,14 @@ export function normalizeVaultPayload(payload: Partial<VaultPayload>): VaultPayl
   const passkeyState = normalizePasskeyState(payload as unknown as Record<string, unknown>)
   const attachmentKey = normalizeAttachmentKey(payload.attachmentKey)
   const entries = normalizeEntries(payload.entries || [])
+  const entryTombstones = normalizeEntryTombstones(payload.entryTombstones)
   if (!attachmentKey && entriesContainAttachments(entries)) throw new Error('Vault attachment key is missing')
   return {
     version: passkeyState.version,
     ...(attachmentKey ? { attachmentKey } : {}),
     ...(passkeyState.passkeySchemaVersion ? { passkeySchemaVersion: passkeyState.passkeySchemaVersion } : {}),
     revision: normalizeRevision(payload.revision),
+    ...(entryTombstones.length ? { entryTombstones } : {}),
     entries,
     passkeys: passkeyState.passkeys,
     passkeyTombstones: passkeyState.passkeyTombstones,

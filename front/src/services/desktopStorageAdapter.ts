@@ -111,7 +111,10 @@ export function subscribeDesktopVaultLocked(handler: (reason: string) => void): 
 
 async function invokeTauriDesktopApi<T>(invoke: TauriInvoke, method: string, args: unknown[]): Promise<ApiResult<T>> {
   try {
-    const res = (await invoke('desktop_api', { method, args })) as ApiResult<T>
+    const command = window.__mypwdmgAsyncDesktopUpdateMethods?.includes(method) ? 'desktop_update' : 'desktop_api'
+    const res = (method === 'unlock' && window.__mypwdmgAsyncDesktopUnlock
+      ? await invoke('desktop_unlock', { args })
+      : await invoke(command, { method, args })) as ApiResult<T>
     if (res && typeof res === 'object' && 'ok' in res) return res
     return ok(res as T)
   } catch (err) {

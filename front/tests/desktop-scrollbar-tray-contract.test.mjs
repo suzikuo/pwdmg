@@ -51,6 +51,16 @@ test('desktop tray settings use the native device config instead of vault settin
   assert.match(desktopMainSource, /"minimize-to-tray"/)
 })
 
+test('desktop settings show and save GPU acceleration through the Windows host', () => {
+  assert.match(settingsSource, /v-if="typeof desktopTraySettings\?\.gpuAccelerationEnabled === 'boolean'"/)
+  assert.match(settingsSource, /:model-value="desktopTraySettings\.gpuAccelerationEnabled"/)
+  assert.match(settingsSource, /@update:model-value="platform\?\.desktopTray\.setGpuAcceleration\(\$event\)"/)
+  assert.match(desktopTrayComposableSource, /api\.setDesktopGpuAcceleration\(enabled\)/)
+  assert.match(apiSource, /setDesktopGpuAcceleration: async \(enabled\) => useDesktopStorage\(\)/)
+  assert.match(desktopBridgeSource, /"setDesktopGpuAcceleration" if cfg!\(windows\)/)
+  assert.match(desktopMainSource, /#\[cfg\(windows\)\]\s+if let Some\(args\) = desktop_config::windows_webview_browser_args\(&config\)/)
+})
+
 test('desktop close exits the process unless tray minimization was explicitly selected', () => {
   assert.match(desktopBridgeSource, /DEFAULT_CLOSE_BEHAVIOR: &str = "exit"/)
   assert.match(desktopBridgeSource, /"close_behavior_user_set"/)

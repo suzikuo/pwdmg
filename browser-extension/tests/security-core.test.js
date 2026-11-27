@@ -1010,9 +1010,11 @@ test('background does not mask repeated detach failure with another probe error'
 
 test('manifest loads shared policy and keeps postponed passkey UI disabled', () => {
   const manifest = JSON.parse(source('manifest.json'))
-  assert.deepEqual(manifest.content_scripts[0].js, ['security-core.js', 'content.js'])
+  assert.deepEqual(manifest.content_scripts[0].js, ['security-core.js', 'builtin-skins.js', 'appearance.js', 'content.js'])
+  assert.equal(manifest.options_ui.page, 'options.html')
   assert.equal(manifest.content_scripts[0].css, undefined)
   assert.ok(manifest.web_accessible_resources[0].resources.includes('content.css'))
+  assert.ok(manifest.web_accessible_resources[0].resources.includes('appearance.css'))
   assert.equal(manifest.optional_permissions, undefined)
 
   const background = source('background.js')

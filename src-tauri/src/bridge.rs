@@ -1,6 +1,5 @@
-pub use crate::desktop_config::{
-    configured_close_behavior, read_desktop_config, save_window_state, write_desktop_config,
-};
+use crate::desktop_config::{configured_gpu_acceleration, update_desktop_config};
+pub use crate::desktop_config::{configured_close_behavior, read_desktop_config, save_window_state};
 use crate::desktop_update::{apply_desktop_update, download_desktop_update};
 use crate::updater::VerifiedUpdate;
 use pwdmg_core::api_error::api_error_code;
@@ -17,6 +16,7 @@ use pwdmg_core::vault::VaultService;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use url::Url;
@@ -28,6 +28,7 @@ pub struct DesktopState {
     pub vault: VaultService,
     pub attachments: AttachmentStore,
     pub clipboard: SecureClipboard,
+    pub startup_window_shown: AtomicBool,
     verified_update: Mutex<Option<VerifiedUpdate>>,
     pub portable_backup_selection: Mutex<Option<(String, PathBuf)>>,
 }
@@ -39,6 +40,7 @@ impl Default for DesktopState {
             vault: VaultService::default(),
             attachments: AttachmentStore::new(attachment_dir()),
             clipboard: SecureClipboard::default(),
+            startup_window_shown: AtomicBool::new(false),
             verified_update: Mutex::new(None),
             portable_backup_selection: Mutex::new(None),
         }
@@ -66,6 +68,19 @@ fn parse_payload_arg(arg: Option<&Value>) -> Result<Value, String> {
         }
         _ => Err("Missing payload".to_string()),
     }
+}
+
+fn desktop_tray_settings(app: &AppHandle, config: &Value) -> Value {
+    let mut settings = json!({
+        "supported": true,
+        "trayAvailable": app.tray_by_id(TRAY_ID).is_some(),
+        "trayEnabled": config.get("tray_enabled").and_then(Value::as_bool).unwrap_or(true),
+        "closeBehavior": configured_close_behavior(config),
+    });
+    if cfg!(windows) {
+        settings["gpuAccelerationEnabled"] = json!(configured_gpu_acceleration(config));
+    }
+    settings
 }
 
 fn dispatch_api(
@@ -330,40 +345,30 @@ fn dispatch_api(
             Ok(serde_json::to_value(state).unwrap())
         }
 
-        // Desktop Tray Settings
-        "getDesktopTraySettings" => {
-            let cfg = read_desktop_config();
-            let tray_enabled = cfg
-                .get("tray_enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let close_behavior = configured_close_behavior(&cfg);
-            Ok(json!({
-                "supported": true,
-                "trayAvailable": app.tray_by_id(TRAY_ID).is_some(),
-                "trayEnabled": tray_enabled,
-                "closeBehavior": close_behavior
-            }))
-        }
+        // Desktop Host Settings
+        "getDesktopTraySettings" => Ok(desktop_tray_settings(app, &read_desktop_config())),
         "setDesktopTraySettings" => {
-            let tray_enabled = args.first().and_then(|v| v.as_bool()).unwrap_or(true);
-            let close_behavior = match args.get(1).and_then(|v| v.as_str()) {
+            let tray_enabled = args.first().and_then(Value::as_bool).unwrap_or(true);
+            let close_behavior = match args.get(1).and_then(Value::as_str) {
                 Some("minimize-to-tray") => "minimize-to-tray",
                 _ => DEFAULT_CLOSE_BEHAVIOR,
             };
-            let mut cfg = read_desktop_config();
-            if let Some(obj) = cfg.as_object_mut() {
-                obj.insert("tray_enabled".to_string(), json!(tray_enabled));
-                obj.insert("close_behavior".to_string(), json!(close_behavior));
-                obj.insert("close_behavior_user_set".to_string(), json!(true));
-            }
-            write_desktop_config(&cfg)?;
-            Ok(json!({
-                "supported": true,
-                "trayAvailable": app.tray_by_id(TRAY_ID).is_some(),
-                "trayEnabled": tray_enabled,
-                "closeBehavior": close_behavior
-            }))
+            let config = update_desktop_config(|config| {
+                config["tray_enabled"] = json!(tray_enabled);
+                config["close_behavior"] = json!(close_behavior);
+                config["close_behavior_user_set"] = json!(true);
+            })?;
+            Ok(desktop_tray_settings(app, &config))
+        }
+        "setDesktopGpuAcceleration" if cfg!(windows) => {
+            let enabled = args
+                .first()
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "GPU 硬件加速设置必须为布尔值".to_owned())?;
+            let config = update_desktop_config(|config| {
+                config["gpu_acceleration_enabled"] = json!(enabled);
+            })?;
+            Ok(desktop_tray_settings(app, &config))
         }
 
         // Updates
@@ -393,7 +398,8 @@ fn dispatch_api(
         // System actions
         "showWindow" => {
             if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
+                w.show().map_err(|error| format!("{error}"))?;
+                state.startup_window_shown.store(true, Ordering::Relaxed);
                 let _ = w.set_focus();
             }
             Ok(json!(true))

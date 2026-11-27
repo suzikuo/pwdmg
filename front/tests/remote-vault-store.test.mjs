@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { APIResponseStatus } from '../src/services/aliyunOss.ts'
+import { AliyunOSSAPI, APIResponseStatus } from '../src/services/aliyunOss.ts'
 import { AliyunOssVaultStore } from '../src/services/cloud/aliyunOssVaultStore.ts'
 import { RemoteVaultStatus } from '../src/services/cloud/remoteVaultStore.ts'
 
@@ -73,6 +73,22 @@ test('delegates remote vault operations and preserves revision metadata', async 
   assert.equal(read.revision, 'remote-revision')
   assert.equal(write.status, RemoteVaultStatus.Success)
   assert.equal(write.etag, 'uploaded-etag')
+})
+
+test('signs and sends a DELETE for the exact OSS object path', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const client = new AliyunOSSAPI('bucket', 'id', 'secret', 'oss-cn-test')
+  const path = 'pwd/my vault.sync-v4/snapshots/abc.vault'
+  globalThis.fetch = async (url, request) => {
+    assert.equal(url, 'https://bucket.oss-cn-test.aliyuncs.com/pwd/my%20vault.sync-v4/snapshots/abc.vault')
+    assert.equal(request.method, 'DELETE')
+    const date = request.headers['x-oss-date']
+    const expected = await client.generateSignature('DELETE', '', '', date, `x-oss-date:${date}`, `/bucket/${path}`)
+    assert.equal(request.headers.Authorization, `OSS id:${expected}`)
+    return new Response(null, { status: 204 })
+  }
+  assert.equal((await new AliyunOssVaultStore(client).deleteObject(path)).status, RemoteVaultStatus.Success)
 })
 
 test('maps Aliyun result statuses to provider-neutral statuses', async () => {

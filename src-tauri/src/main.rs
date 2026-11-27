@@ -32,16 +32,21 @@ const SHIM_SCRIPT: &str = r#"
   function setupBridge() {
     const invoke = getInvoke();
     if (invoke) {
+      const updateMethods = ['checkDesktopUpdate', 'downloadDesktopUpdate', 'applyDesktopUpdate'];
       const api = new Proxy({}, {
         get(_target, prop) {
           return async function(...args) {
-            return await invoke('desktop_api', { method: String(prop), args: args });
+            const method = String(prop);
+            const command = updateMethods.includes(method) ? 'desktop_update' : 'desktop_api';
+            return await invoke(command, { method, args });
           };
         }
       });
 
       window.pywebview = { api: api };
       window.isTauri = true;
+      window.__mypwdmgAsyncDesktopUnlock = true;
+      window.__mypwdmgAsyncDesktopUpdateMethods = updateMethods;
       window.dispatchEvent(new CustomEvent('pywebviewready'));
     } else {
       setTimeout(setupBridge, 10);
@@ -62,6 +67,30 @@ fn desktop_api(
     handle_api_call(&state, &app, &method, &args)
 }
 
+#[tauri::command]
+async fn desktop_unlock(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        handle_api_call(&app.state(), &app, "unlock", &args)
+    })
+    .await
+    .map_err(|error| format!("{error}"))
+}
+
+#[tauri::command]
+async fn desktop_update(app: AppHandle, method: String, args: Vec<Value>) -> Result<Value, String> {
+    if !matches!(
+        method.as_str(),
+        "checkDesktopUpdate" | "downloadDesktopUpdate" | "applyDesktopUpdate"
+    ) {
+        return Err("Invalid desktop update method".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        handle_api_call(&app.state(), &app, &method, &args)
+    })
+    .await
+    .map_err(|error| format!("{error}"))
+}
+
 fn main() {
     let app_state = DesktopState::default();
 
@@ -75,7 +104,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(app_state)
-        .invoke_handler(tauri::generate_handler![desktop_api])
+        .invoke_handler(tauri::generate_handler![desktop_api, desktop_unlock, desktop_update])
         .setup(|app| {
             let config = read_desktop_config();
             let tray_enabled = config.get("tray_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -187,6 +216,16 @@ fn main() {
                 .visible(false)
                 .background_color(tauri::utils::config::Color(17, 24, 39, 255))
                 .initialization_script(SHIM_SCRIPT);
+            #[cfg(windows)]
+            {
+                builder = builder
+                    .decorations(false)
+                    .initialization_script("window.__mypwdmgDesktopTitleBar = true;");
+            }
+            #[cfg(windows)]
+            if let Some(args) = desktop_config::windows_webview_browser_args(&config) {
+                builder = builder.additional_browser_args(args);
+            }
             #[cfg(debug_assertions)]
             {
                 builder = builder.devtools(true);
@@ -223,11 +262,17 @@ fn main() {
                 let _ = window.center();
             }
 
-            // Safety fallback: reveal window after 600ms even if frontend call is delayed
+            // Reveal the startup page if the frontend cannot request it.
             let w = window.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(600));
-                let _ = w.show();
+                let app_handle = w.app_handle().clone();
+                let _ = app_handle.run_on_main_thread(move || {
+                    let state = w.app_handle().state::<DesktopState>();
+                    if !state.startup_window_shown.load(Ordering::Relaxed) && w.show().is_ok() {
+                        state.startup_window_shown.store(true, Ordering::Relaxed);
+                    }
+                });
             });
 
             use std::sync::atomic::{AtomicU64, Ordering};
@@ -239,6 +284,11 @@ fn main() {
             window.on_window_event(move |event| {
                 match event {
                     tauri::WindowEvent::CloseRequested { api, .. } => {
+                        window_clone
+                            .app_handle()
+                            .state::<DesktopState>()
+                            .startup_window_shown
+                            .store(true, Ordering::Relaxed);
                         save_window_state(&window_clone);
                         let cfg = read_desktop_config();
                         let behavior = configured_close_behavior(&cfg);

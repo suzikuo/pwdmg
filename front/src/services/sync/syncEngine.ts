@@ -19,10 +19,22 @@ import {
   type RemoteVaultStore
 } from '../cloud/remoteVaultStore.ts'
 import {
-  appendRemoteVaultCommit,
-  loadAppendOnlyVault,
-  type AppendOnlyVaultRead
-} from './appendOnlyRemoteVault.ts'
+  DEVICE_HISTORY_CLEANUP_THRESHOLD,
+  DEVICE_HISTORY_GRACE_MS,
+  deviceVaultPrefix,
+  estimateDeviceVaultHistory,
+  loadDeviceVault,
+  loadDeviceVaultCommonAncestor,
+  makeDeviceCheckpointBasis,
+  normalizeDeviceCheckpointBasis,
+  pruneDeviceVaultHistory,
+  validateDeviceVaultCheckpoint,
+  type DeviceCheckpointBasis,
+  type DeviceHistoryObservation,
+  type DeviceVaultRead
+} from './deviceRemoteVault.ts'
+import { publishLocalDeviceVault } from './deviceSyncWriter.ts'
+import { recordPermanentEntryDeletions } from '../entryTombstones.ts'
 import { canonicalJson } from './canonicalJson.ts'
 import {
   autoCloudSyncManualReviewLabels,
@@ -42,7 +54,7 @@ import {
   isCloudSyncDownloadTargetApplied
 } from './cloudSyncPlan.ts'
 import { readSyncCheckpoint, writeSyncCheckpoint } from './syncCheckpointStore.ts'
-import { mergeVaultPayloads, type VaultMergeConflict } from './threeWayVaultMerge.ts'
+import { mergeVaultPayloads } from './threeWayVaultMerge.ts'
 import {
   ensureLocalAttachmentObjects,
   ensureRemoteAttachmentObjects
@@ -53,7 +65,6 @@ import {
   versionedVaultObjectName
 } from './passkeyRemoteGate.ts'
 import { AutoSyncPasswordGate } from '../autoSyncPasswordGate.ts'
-import { secureRandomId } from '../secureRandom.ts'
 import {
   formatBytes,
   readLocalStorage,
@@ -82,8 +93,7 @@ export type CloudVaultRead = {
   response: RemoteVaultResult<string>
   managedRemote: boolean
   remoteHeadIds: string[]
-  legacyObjectNames: string[]
-  appendOnlyRead?: AppendOnlyVaultRead
+  deviceRead?: DeviceVaultRead
 }
 
 export type CloudSyncRemoteSnapshot = {
@@ -132,7 +142,6 @@ export type CloudSyncApplyContext = {
 export type CloudRewritePlan = {
   objectName: string
   remoteHeadIds: string[]
-  legacyObjectNames: string[]
 }
 
 export type OssSettingsState = VaultPayload['settings']['oss']
@@ -239,7 +248,9 @@ export async function cloudSyncPayloadFingerprint(payload: VaultPayload): Promis
   return sha256Text(canonicalJson({
     version: payload.version,
     passkeySchemaVersion: payload.passkeySchemaVersion,
+    attachmentKey: payload.attachmentKey,
     entries: (payload.entries || []).map(cloudSyncEntryFingerprint),
+    entryTombstones: [...new Set(payload.entryTombstones ?? [])].sort(),
     passkeyState: passkeyStateFingerprint(payload)
   }))
 }
@@ -296,6 +307,7 @@ export function resolveAutoCloudSyncDecision(preview: CloudSyncPreview): { apply
 export function cloudSyncDirectionLabel(direction: CloudSyncLogEntry['direction']): string {
   if (direction === 'download') return '下载'
   if (direction === 'backup') return '备份'
+  if (direction === 'history') return '历史整理'
   return '上传'
 }
 
@@ -362,19 +374,6 @@ export function loadCloudSyncStateMap(): Record<string, CloudSyncStateRecord> {
   }
 }
 
-export function cloudSyncClientId(): string {
-  const key = 'mypwdmg.cloud-sync.client-id.v1'
-  try {
-    const existing = readLocalStorage(key)
-    if (existing && /^[A-Za-z0-9._-]{8,128}$/.test(existing)) return existing
-    const created = `client-${secureRandomId()}`
-    writeLocalStorage(key, created)
-    return created
-  } catch {
-    return `ephemeral-${secureRandomId()}`
-  }
-}
-
 // ---- Remote Vault Store Protocol Helpers ----
 
 export async function readCloudVaultForSync(
@@ -391,48 +390,26 @@ export async function readCloudVaultForSync(
       objectName: requested,
       response: await client.readObject(requested),
       managedRemote: false,
-      remoteHeadIds: [],
-      legacyObjectNames: []
+      remoteHeadIds: []
     }
   }
 
-  const legacyObjectNames: string[] = []
-  const appendOnlyRead = await loadAppendOnlyVault(client, configured, { legacyObjectNames })
-  if (appendOnlyRead.status === 'success') {
-    const head = appendOnlyRead.heads[0]
-    return {
-      objectName: configured,
-      response: {
-        status: RemoteVaultStatus.Success,
-        content: head.content,
-        revision: head.revision
-      },
-      managedRemote: true,
-      remoteHeadIds: appendOnlyRead.heads.map((item) => item.id).sort(),
-      legacyObjectNames,
-      appendOnlyRead
-    }
-  }
-  if (appendOnlyRead.status === 'not-found') {
-    return {
-      objectName: configured,
-      response: { status: RemoteVaultStatus.NotFound, content: appendOnlyRead.message },
-      managedRemote: true,
-      remoteHeadIds: [],
-      legacyObjectNames,
-      appendOnlyRead
-    }
-  }
+  const deviceRead = await loadDeviceVault(client, configured)
+  const head = deviceRead.heads[0]
+  const status = {
+    success: RemoteVaultStatus.Success,
+    'not-found': RemoteVaultStatus.NotFound,
+    conflict: RemoteVaultStatus.Conflict,
+    error: RemoteVaultStatus.Error
+  }[deviceRead.status]
   return {
     objectName: configured,
-    response: {
-      status: appendOnlyRead.status === 'conflict' ? RemoteVaultStatus.Conflict : RemoteVaultStatus.Error,
-      content: appendOnlyRead.message
-    },
+    response: status === RemoteVaultStatus.Success
+      ? { status, content: head.content, revision: head.contentSha256 }
+      : { status, content: deviceRead.message },
     managedRemote: true,
-    remoteHeadIds: appendOnlyRead.heads.map((item) => item.id).sort(),
-    legacyObjectNames,
-    appendOnlyRead
+    remoteHeadIds: deviceRead.heads.map((item) => item.id).sort(),
+    deviceRead
   }
 }
 
@@ -440,14 +417,9 @@ export async function writeManagedCloudVault(
   client: RemoteVaultStore,
   objectName: string,
   content: string,
-  expectedHeadIds: string[],
-  _legacyObjectNames: string[] = []
+  expectedHeadIds: string[]
 ) {
-  return appendRemoteVaultCommit(client, normalizeObjectName(objectName), content, {
-    expectedHeadIds,
-    legacyObjectNames: [],
-    clientId: cloudSyncClientId()
-  })
+  return publishLocalDeviceVault(client, normalizeObjectName(objectName), content, expectedHeadIds)
 }
 
 export async function loadCloudBackupItems(client: RemoteVaultStore, fixedName: string): Promise<CloudBackupInfo[]> {
@@ -473,7 +445,7 @@ export async function loadCloudBackupItems(client: RemoteVaultStore, fixedName: 
       if (!item?.name || seen.has(item.name)) return false
       seen.add(item.name)
       if (item.name === fixedName || item.name === v2FixedName) return false
-      if (item.name.includes('.sync-v3/') || item.name.includes('.attachments/')) return false
+      if (item.name.startsWith(deviceVaultPrefix(fixedName)) || item.name.includes('.sync-v3/') || item.name.includes('.attachments/')) return false
       if (item.name.startsWith(backupDir)) return true
       if (item.name.startsWith(`${fixedName}.`)) return true
       if (fixedName.startsWith('pwd/') && item.name.startsWith(`${fixedName.slice('pwd/'.length)}.`)) return true
@@ -509,6 +481,7 @@ export type SyncEngineDeps = {
   persistSettings: (options?: { closeDrawer?: boolean; toast?: boolean; skipAutoSync?: boolean }) => Promise<boolean>
   hasCompleteOssSettings: () => boolean
   validateOssSettings: () => boolean
+  isHistoryCleanupEnabled?: (scope: string) => boolean
   getSignal: () => AbortSignal | undefined
   isCloudBusy: () => boolean
   getCloudSyncPreview: () => CloudSyncPreview | null
@@ -540,8 +513,12 @@ export type SyncEngineDeps = {
   finishCloudPasswordPrompt: () => void
 }
 
+type DeviceHistoryObservations = { latest?: DeviceHistoryObservation; previous?: DeviceHistoryObservation }
+type DeviceHistoryRetry = { commits: number; after?: number }
+
 export function createSyncEngine(deps: SyncEngineDeps) {
   let cloudSyncRequestInFlight = false
+  let historyCleanupInFlight = false
 
   function createRemoteVaultStore(): RemoteVaultStore {
     const oss = normalizeSettings(deps.getSettings()).oss
@@ -582,8 +559,76 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     }
   }
 
+  function syncStateStorageKey(objectName: string, managedRemote: boolean): string {
+    const scope = cloudSyncStateKey(objectName)
+    return managedRemote ? `${scope}/sync-v4` : scope
+  }
+
   function readCloudSyncState(objectName: string): CloudSyncStateRecord | null {
     return loadCloudSyncStateMap()[cloudSyncStateKey(objectName)] || null
+  }
+
+  function maybePruneCloudHistory(objectName: string, headId: string, basis: DeviceCheckpointBasis): void {
+    const scope = cloudSyncStateKey(objectName)
+    if (historyCleanupInFlight || !deps.isHistoryCleanupEnabled?.(scope)) return
+    const generation = deps.getSessionGeneration()
+    const signal = deps.getSignal()
+    const canContinue = () => !signal?.aborted && !deps.isLocked() && deps.isSessionGenerationCurrent(generation) &&
+      !deps.isSettingsChanged() && cloudSyncStateKey(normalizeSettings(deps.getSettings()).oss.objectName) === scope &&
+      deps.isHistoryCleanupEnabled?.(scope) === true
+    if (!canContinue()) return
+
+    const observationKey = `mypwdmg.syncHistoryObservations.${scope}.${basis.rootId}`
+    const now = Date.now()
+    let observations: DeviceHistoryObservations = {}
+    try {
+      observations = JSON.parse(readLocalStorage(observationKey) || '{}') ?? {}
+    } catch {
+      // A fresh observation can be used once it has aged.
+    }
+    const validObservation = (observation: DeviceHistoryObservation | undefined) => observation &&
+      Number.isSafeInteger(observation.observedAt) && observation.observedAt > 0 && observation.observedAt <= now &&
+      normalizeDeviceCheckpointBasis(observation.basis, [observation.headId])
+    const latest = observations.latest
+    if (!latest || !validObservation(latest) || now - latest.observedAt >= DEVICE_HISTORY_GRACE_MS) {
+      observations = {
+        latest: { headId, basis, observedAt: now },
+        previous: validObservation(latest) ? latest : undefined
+      }
+      writeLocalStorage(observationKey, JSON.stringify(observations))
+    }
+    const previous = observations.previous
+    if (!previous || now - previous.observedAt < DEVICE_HISTORY_GRACE_MS || !validObservation(previous)) return
+
+    const { commits, objects } = estimateDeviceVaultHistory(basis)
+    if (objects < DEVICE_HISTORY_CLEANUP_THRESHOLD) return
+    const attemptKey = `mypwdmg.syncHistoryCleanup.${scope}.${basis.rootId}`
+    let retry: DeviceHistoryRetry | undefined
+    try {
+      retry = JSON.parse(readLocalStorage(attemptKey) || 'null') ?? undefined
+    } catch {
+      // An unreadable retry record does not prevent cleanup.
+    }
+    if (retry && commits < retry.commits && now < (retry.after ?? Infinity)) return
+    const client = createRemoteVaultStore()
+    historyCleanupInFlight = true
+    const after = now + DEVICE_HISTORY_GRACE_MS
+    writeLocalStorage(attemptKey, JSON.stringify({ commits: commits + 5, after }))
+    void pruneDeviceVaultHistory(client, objectName, headId, previous, canContinue).then((result) => {
+      if (result.remaining !== undefined && result.remaining < DEVICE_HISTORY_CLEANUP_THRESHOLD) {
+        const delay = Math.ceil((DEVICE_HISTORY_CLEANUP_THRESHOLD - result.remaining) / 2)
+        writeLocalStorage(attemptKey, JSON.stringify({ commits: commits + delay }))
+      }
+      if (!canContinue() || (!result.removed && !result.error)) return
+      const summary = `已清理 ${result.removed} 个历史同步对象`
+      deps.appendCloudSyncLog({
+        direction: 'history',
+        automatic: true,
+        status: result.error ? 'error' : 'success',
+        objectName,
+        message: result.error ? `云端历史整理暂停（${summary}）：${result.error}` : summary
+      })
+    }).finally(() => { historyCleanupInFlight = false })
   }
 
   async function rememberCloudSyncState(
@@ -591,39 +636,59 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     remotePayload: VaultPayload,
     localPayload: VaultPayload = remotePayload,
     ancestorEnvelope = '',
-    remoteHeadIds: string[] = []
+    remoteHeadIds: string[] = [],
+    managedRemote = false,
+    deviceBasis?: DeviceCheckpointBasis
   ): Promise<void> {
     try {
+      const key = syncStateStorageKey(objectName, managedRemote)
       const remoteFingerprint = await cloudSyncPayloadFingerprint(remotePayload)
+      const localFingerprint = await cloudSyncPayloadFingerprint(localPayload)
       const stateMap = loadCloudSyncStateMap()
-      stateMap[cloudSyncStateKey(objectName)] = {
+      if (ancestorEnvelope) {
+        let checkpoint = await readSyncCheckpoint(key)
+        if (checkpoint?.payloadFingerprint !== remoteFingerprint || checkpoint.remoteHeadIds.join(',') !== remoteHeadIds.join(',') ||
+          (deviceBasis && !checkpoint.deviceBasis)) {
+          const localEnvelope = await api.exportVaultBackupForPayload(remotePayload)
+          if (localEnvelope.ok && localEnvelope.data?.content) {
+            checkpoint = {
+              key,
+              envelope: localEnvelope.data.content,
+              payloadFingerprint: remoteFingerprint,
+              remoteHeadIds,
+              ...(deviceBasis ? { deviceBasis } : {}),
+              recordedAt: Date.now()
+            }
+            await writeSyncCheckpoint(checkpoint)
+          } else {
+            checkpoint = null
+          }
+        }
+        if (globalThis.indexedDB && checkpoint?.deviceBasis && deviceBasis && remoteHeadIds.length === 1) {
+          maybePruneCloudHistory(objectName, remoteHeadIds[0], deviceBasis)
+        }
+      }
+      stateMap[key] = {
         remoteUpdatedAt: cloudSyncPayloadUpdatedAt(remotePayload),
         remoteFingerprint,
-        localFingerprint: await cloudSyncPayloadFingerprint(localPayload),
+        localFingerprint,
         recordedAt: Date.now()
       }
       writeLocalStorage(CLOUD_SYNC_STATE_KEY, JSON.stringify(stateMap))
-      if (ancestorEnvelope) {
-        const localEnvelope = await api.exportVaultBackupForPayload(remotePayload)
-        if (localEnvelope.ok && localEnvelope.data?.content) {
-          await writeSyncCheckpoint({
-            key: cloudSyncStateKey(objectName),
-            envelope: localEnvelope.data.content,
-            payloadFingerprint: remoteFingerprint,
-            remoteHeadIds,
-            recordedAt: Date.now()
-          })
-        }
-      }
     } catch {
-      // Sync state is only a safety hint; failing to persist it must not block vault use.
+      // If persistent storage fails, the next sync will require a verifiable baseline again.
     }
   }
 
-  async function loadCloudSyncAncestor(objectName: string): Promise<VaultPayload | null> {
+  async function loadCloudSyncAncestor(client: RemoteVaultStore, remote: CloudVaultRead): Promise<VaultPayload | null> {
     try {
-      const checkpoint = await readSyncCheckpoint(cloudSyncStateKey(objectName))
+      const checkpoint = await readSyncCheckpoint(syncStateStorageKey(remote.objectName, remote.managedRemote))
       if (!checkpoint) return null
+      if (remote.deviceRead && !await validateDeviceVaultCheckpoint(
+        client, remote.objectName, remote.deviceRead.heads, checkpoint.remoteHeadIds, checkpoint.deviceBasis
+      )) {
+        return null
+      }
       const preview = await api.previewVaultBackup(checkpoint.envelope)
       if (!preview.ok || !preview.data) return null
       if (await cloudSyncPayloadFingerprint(preview.data) !== checkpoint.payloadFingerprint) return null
@@ -706,7 +771,8 @@ export function createSyncEngine(deps: SyncEngineDeps) {
   function isCloudSyncPreviewCurrent(preview: CloudSyncPreview): boolean {
     return !deps.isLocked() &&
       preview.sessionGeneration === deps.getSessionGeneration() &&
-      preview.cloudScopeId === currentCloudScopeId()
+      preview.cloudScopeId === currentCloudScopeId() &&
+      (!preview.managedRemote || preview.uploadObjectName === normalizeObjectName(deps.getSettings().oss.objectName))
   }
 
   function syncCloudSyncPreviewAfterDownload(preview: CloudSyncPreview, appliedVault: VaultPayload): boolean {
@@ -765,7 +831,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     requestedObjectName: string
     objectName: string
     preferred: CloudVaultRead
-    ancestorPayload: VaultPayload | null
+    client: RemoteVaultStore
     remoteFingerprint?: string
     operation: CloudOperationHandle | null
     sessionIsCurrent: () => boolean
@@ -777,7 +843,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       requestedObjectName,
       objectName,
       preferred,
-      ancestorPayload,
+      client,
       operation,
       sessionIsCurrent,
       operationGateKeys
@@ -848,18 +914,10 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       ? response.content
       : ''
 
-    if (response.status === RemoteVaultStatus.Conflict && preferred.appendOnlyRead?.heads.length) {
-      if (!ancestorPayload) {
-        const message = '检测到并发远端分支，但本机没有可验证的共同祖先；所有代际已保留，请先选择可信备份恢复'
-        deps.finishCloudOperation(operation, 'error', message)
-        deps.setBackupStatus(message)
-        deps.appendCloudSyncLog({ direction, automatic, status: 'error', objectName, message })
-        if (!automatic) deps.feedback.failToast(message)
-        return null
-      }
-
+    if (response.status === RemoteVaultStatus.Conflict && preferred.deviceRead?.heads.length) {
+      const heads = preferred.deviceRead.heads
       const branchPayloads: VaultPayload[] = []
-      for (const head of preferred.appendOnlyRead.heads) {
+      for (const head of heads) {
         const result = await previewEnvelope(head.content)
         if (!sessionIsCurrent()) return null
         if (pauseAutomaticPasswordMismatch(result) || passwordPromptWasCancelled()) return null
@@ -875,19 +933,19 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       }
 
       let mergedBranches = branchPayloads[0]
-      const branchConflicts: VaultMergeConflict[] = []
-      for (const branch of branchPayloads.slice(1)) {
-        const merged = mergeVaultPayloads(ancestorPayload, mergedBranches, branch)
+      for (let index = 1; index < heads.length; index += 1) {
+        const ancestor = await loadDeviceVaultCommonAncestor(client, objectName, heads.slice(0, index), heads[index])
+        if (!sessionIsCurrent()) return null
+        if (!ancestor) throw new Error('远端分支缺少唯一可验证的共同祖先，已停止合并')
+        const decrypted = await previewEnvelope(ancestor.content)
+        if (!sessionIsCurrent()) return null
+        if (pauseAutomaticPasswordMismatch(decrypted) || passwordPromptWasCancelled()) return null
+        if (!decrypted.ok || !decrypted.data) throw new Error('远端共同祖先无法解密，已停止合并')
+        const merged = mergeVaultPayloads(decrypted.data, mergedBranches, branchPayloads[index], true)
+        if (merged.conflicts.length) {
+          throw new Error(`远端分支存在 ${merged.conflicts.length} 项冲突；已保留所有分支`)
+        }
         mergedBranches = merged.payload
-        branchConflicts.push(...merged.conflicts)
-      }
-      if (branchConflicts.length) {
-        const message = `远端分支存在 ${branchConflicts.length} 项真实冲突，已停止自动合并`
-        deps.finishCloudOperation(operation, 'error', message)
-        deps.setBackupStatus(message)
-        deps.appendCloudSyncLog({ direction, automatic, status: 'error', objectName, message })
-        if (!automatic) deps.feedback.failToast(message)
-        return null
       }
 
       payload = mergedBranches
@@ -1260,8 +1318,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     }
     return {
       objectName,
-      remoteHeadIds: preferred.remoteHeadIds,
-      legacyObjectNames: preferred.legacyObjectNames
+      remoteHeadIds: preferred.remoteHeadIds
     }
   }
 
@@ -1282,8 +1339,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       client,
       cloudRewrite.objectName,
       exported.data.content,
-      cloudRewrite.remoteHeadIds,
-      cloudRewrite.legacyObjectNames
+      cloudRewrite.remoteHeadIds
     )
     if (!isCurrent()) return ''
     if (response.status !== 'success') {
@@ -1301,7 +1357,9 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       currentVault,
       currentVault,
       exported.data.content,
-      response.commitId ? [response.commitId] : []
+      [response.commitId],
+      true,
+      makeDeviceCheckpointBasis([response.record])
     )
     return ''
   }
@@ -1342,6 +1400,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     cloudSyncRequestInFlight = true
     const operationOss = normalizeSettings(deps.getSettings()).oss
     const operationCloudScopeId = JSON.stringify([operationOss.region, operationOss.bucketName])
+    const configuredObjectNameAtStart = operationOss.objectName
     const operationGateKeys = (...objectNames: string[]) => objectNames.map((name) => (
       JSON.stringify([operationOss.region, operationOss.bucketName, normalizeObjectName(name)])
     ))
@@ -1349,7 +1408,8 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     const sessionIsCurrent = () => (
       deps.isSessionGenerationCurrent(generation) &&
       !deps.isLocked() &&
-      operationCloudScopeId === currentCloudScopeId()
+      operationCloudScopeId === currentCloudScopeId() &&
+      configuredObjectNameAtStart === normalizeObjectName(deps.getSettings().oss.objectName)
     )
     let objectName = requestedObjectName
 
@@ -1425,7 +1485,32 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       }
       objectName = preferred.objectName
       const response = preferred.response
-      const ancestorPayload = await withCloudSyncTimeout(loadCloudSyncAncestor(objectName), '读取同步检查点')
+      const localHasData = Boolean(localPayload.entries.length || localPayload.passkeys.length ||
+        localPayload.passkeyTombstones.length || localPayload.entryTombstones?.length)
+      if (preferred.managedRemote && response.status === RemoteVaultStatus.NotFound && direction === 'upload') {
+        const key = syncStateStorageKey(objectName, true)
+        if (loadCloudSyncStateMap()[key] || await readSyncCheckpoint(key)) {
+          throw new Error('已同步的云端设备索引缺失，已停止发布，请检查 OSS')
+        }
+        if (options.automatic || !localHasData) {
+          const message = '新格式云端保险库尚未初始化，请在基准设备手动上传'
+          deps.setBackupStatus(message)
+          deps.appendCloudSyncLog({ direction, automatic: options.automatic === true, status: 'skipped', objectName, message })
+          if (!options.automatic) deps.feedback.toast(message)
+          return
+        }
+        try {
+          await deps.feedback.confirm({
+            title: '初始化新格式云同步',
+            message: '将使用此设备的当前密码库创建新格式云同步。其他设备请在升级并清空本地数据后选择下载。',
+            confirmButtonText: '使用此设备初始化'
+          })
+        } catch {
+          deps.finishCloudOperation(cloudOperation, 'cancelled', '已取消初始化云同步')
+          return
+        }
+      }
+      const ancestorPayload = await withCloudSyncTimeout(loadCloudSyncAncestor(client, preferred), '读取同步检查点')
       if (!sessionIsCurrent()) {
         finishStaleCloudSync()
         return
@@ -1438,7 +1523,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
         requestedObjectName,
         objectName,
         preferred,
-        ancestorPayload,
+        client,
         remoteFingerprint: response.revision,
         operation: cloudOperation,
         sessionIsCurrent,
@@ -1452,6 +1537,12 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       const remoteEnvelopeText = remoteSnapshot.envelopeText
       const remoteEncryptionEnvelopeText = remoteSnapshot.sourceEnvelopeText
       const usedAlternateRemotePassword = remoteSnapshot.usedAlternatePassword
+      if (preferred.managedRemote && response.status !== RemoteVaultStatus.NotFound && !ancestorPayload) {
+        if (direction === 'upload' && !localHasData) throw new Error('此设备尚未初始化，请先从云端下载')
+        if (localHasData && await cloudSyncPayloadFingerprint(localPayload) !== await cloudSyncPayloadFingerprint(remotePayload)) {
+          throw new Error('本机缺少可验证的同步基线，已保留两端数据，请先备份本机数据并检查同步状态')
+        }
+      }
 
       deps.markCloudOperation(cloudOperation, 'building-diff', '正在计算两端差异')
       const remoteBaselinePayload = clonePayload(remotePayload)
@@ -1460,7 +1551,8 @@ export function createSyncEngine(deps: SyncEngineDeps) {
         localPayload,
         remotePayload,
         ancestorPayload,
-        pullStrategy: direction === 'upload' || options.automatic ? 'integrate' : 'snapshot',
+        pullStrategy: preferred.managedRemote || direction === 'upload' || options.automatic ? 'integrate' : 'snapshot',
+        reviewConcurrentEntryChanges: preferred.managedRemote,
         fingerprint: cloudSyncPayloadFingerprint
       })
       if (!sessionIsCurrent()) {
@@ -1491,10 +1583,10 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       const effectiveDirection = activePlan.direction
       const sourcePayload = activePlan.sourcePayload
       const basePayload = activePlan.basePayload
-      let targetNeedsWrite = activePlan.targetNeedsWrite
+      let targetNeedsWrite = activePlan.targetNeedsWrite || (direction === 'upload' && preferred.remoteHeadIds.length > 1)
       const items = activePlan.items
 
-      if (!usedAncestor && direction === 'upload' && await shouldPreferCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)) {
+      if (!preferred.managedRemote && !usedAncestor && direction === 'upload' && await shouldPreferCloudDownload(objectName, localPayload, remotePayload, localPayloadBeforePersist)) {
         if (!sessionIsCurrent()) {
           finishStaleCloudSync()
           return
@@ -1544,6 +1636,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
 
       if (
         options.automatic &&
+        !preferred.managedRemote &&
         !usedAncestor &&
         effectiveDirection === 'download' &&
         items.length > 0 &&
@@ -1572,14 +1665,17 @@ export function createSyncEngine(deps: SyncEngineDeps) {
         return
       }
 
-      if (!items.length && !targetNeedsWrite && !activePlan.mergedPayload) {
+      const deviceBasis = preferred.deviceRead ? makeDeviceCheckpointBasis(preferred.deviceRead.heads) : undefined
+      if (!items.length && !targetNeedsWrite && (!activePlan.mergedPayload || (preferred.managedRemote && effectiveDirection === 'download'))) {
         deps.setCloudSyncPreview(null)
         await rememberCloudSyncState(
           objectName,
           remotePayload,
           localPayload,
           remoteEnvelopeText,
-          preferred.remoteHeadIds
+          preferred.remoteHeadIds,
+          preferred.managedRemote,
+          deviceBasis
         )
         if (!sessionIsCurrent()) {
           finishStaleCloudSync()
@@ -1633,7 +1729,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
         remoteExists: response.status === RemoteVaultStatus.Success || response.status === RemoteVaultStatus.Conflict,
         managedRemote: preferred.managedRemote,
         remoteHeadIds: preferred.remoteHeadIds,
-        legacyObjectNames: preferred.legacyObjectNames,
+        deviceBasis,
         remoteEnvelopeText,
         remoteEncryptionEnvelopeText,
         usedAlternatePassword: usedAlternateRemotePassword,
@@ -1648,6 +1744,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       }
       const message = error instanceof Error ? error.message : String(error || '同步校验失败')
       deps.finishCloudOperation(cloudOperation, 'error', message)
+      deps.setBackupStatus(message)
       if (!options.automatic) deps.feedback.failToast(message)
       deps.appendCloudSyncLog({
         direction,
@@ -1694,7 +1791,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
           clearPreview: true,
           showSuccess: !options.automatic,
           showErrors: !options.automatic,
-          successMessage: '通行密钥状态已同步'
+          successMessage: preview.managedRemote ? '加密快照已同步' : '通行密钥状态已同步'
         }),
         preview.direction === 'download' ? '应用下载差异' : '应用上传差异'
       )
@@ -1753,6 +1850,10 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     const preview = deps.getCloudSyncPreview()
     if (!preview || deps.isCloudBusy()) return
     const selectedItems = getCloudSyncSelectedItems(preview.items)
+    if (preview.managedRemote && (selectedItems.length !== preview.items.length || selectedItems.some((item) => !isCloudSyncItemChecked(item)))) {
+      deps.feedback.toast('云端同步按完整快照提交，请勾选全部差异，或取消此次同步')
+      return
+    }
     if (!selectedItems.length && (preview.items.length || !preview.usedAlternatePassword)) {
       deps.feedback.toast('没有选中差异')
       return
@@ -1811,11 +1912,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
     })
 
     if (preview.managedRemote) {
-      const currentRemote = await loadAppendOnlyVault(
-        createRemoteVaultStore(),
-        preview.uploadObjectName,
-        { legacyObjectNames: preview.legacyObjectNames }
-      )
+      const currentRemote = await loadDeviceVault(createRemoteVaultStore(), preview.uploadObjectName)
       if (!isCloudSyncPreviewCurrent(preview)) {
         return { ok: false, message: '保险库会话或云配置已变化，请重新检测同步差异' }
       }
@@ -1829,7 +1926,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       }
       if (preview.remoteExists && currentRemote.heads.length === 1) {
         const currentHead = currentRemote.heads[0]
-        if (!currentHead || currentHead.revision !== preview.remoteObjectFingerprint) {
+        if (!currentHead || currentHead.contentSha256 !== preview.remoteObjectFingerprint) {
           return { ok: false, message: '远端保险库内容在确认期间已变化，请重新检测同步差异' }
         }
       } else if (!preview.remoteExists && currentRemote.status !== 'not-found') {
@@ -1993,7 +2090,9 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       preview.remoteBaselinePayload,
       appliedVault,
       preview.remoteEnvelopeText,
-      preview.remoteHeadIds
+      preview.remoteHeadIds,
+      preview.managedRemote,
+      preview.deviceBasis
     )
     if (!syncCloudSyncPreviewAfterLocalApply(preview, appliedVault)) return false
 
@@ -2070,7 +2169,9 @@ export function createSyncEngine(deps: SyncEngineDeps) {
         preview.remoteBaselinePayload,
         appliedLocalPayload || deps.getVault() || currentLocal,
         preview.remoteEnvelopeText,
-        preview.remoteHeadIds
+        preview.remoteHeadIds,
+        preview.managedRemote,
+        preview.deviceBasis
       )
       if (!isCloudSyncPreviewCurrent(preview)) return false
       const message = appliedLocalPayload
@@ -2092,12 +2193,16 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       return true
     }
 
+    if (preview.managedRemote) {
+      recordPermanentEntryDeletions(preview.remoteBaselinePayload.entries, nextPayload, preview.remoteBaselinePayload.entryTombstones)
+    }
     deps.markCloudOperation(options.operation || null, 'writing-remote', '正在校验并上传附件对象')
     await ensureRemoteAttachmentObjects(
       remoteClient,
       normalizeObjectName(deps.getSettings().oss.objectName),
       nextPayload,
-      api
+      api,
+      preview.managedRemote ? preview.remoteBaselinePayload : undefined
     )
     if (!isCloudSyncPreviewCurrent(preview)) return false
     if (preview.alternatePassword !== undefined) {
@@ -2121,8 +2226,7 @@ export function createSyncEngine(deps: SyncEngineDeps) {
           remoteClient,
           preview.uploadObjectName,
           exported.data.content,
-          preview.remoteHeadIds,
-          preview.legacyObjectNames
+          preview.remoteHeadIds
         )
       : null
     const directWrite = preview.managedRemote
@@ -2153,7 +2257,9 @@ export function createSyncEngine(deps: SyncEngineDeps) {
       uploadedPayload,
       appliedLocalPayload || deps.getVault() || uploadedPayload,
       exported.data.content,
-      managedWrite?.commitId ? [managedWrite.commitId] : []
+      managedWrite?.status === 'success' ? [managedWrite.commitId] : [],
+      preview.managedRemote,
+      managedWrite?.status === 'success' ? makeDeviceCheckpointBasis([managedWrite.record]) : undefined
     )
     if (!isCloudSyncPreviewCurrent(preview)) return false
 

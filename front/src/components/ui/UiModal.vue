@@ -5,6 +5,7 @@
         v-if="open"
         class="ui-modal-backdrop"
         :class="{
+          'ui-modal-backdrop--stacked': stacked,
           'ui-modal-backdrop--sheet-mobile': sheetOnMobile && !fullscreenOnMobile,
           'ui-modal-backdrop--fullscreen-mobile': fullscreenOnMobile
         }"
@@ -80,6 +81,7 @@ const props = withDefaults(
     sheetOnMobile?: boolean
     fullscreenOnMobile?: boolean
     fixedHeight?: boolean
+    stacked?: boolean
   }>(),
   {
     title: undefined,
@@ -89,7 +91,8 @@ const props = withDefaults(
     showClose: true,
     sheetOnMobile: true,
     fullscreenOnMobile: false,
-    fixedHeight: false
+    fixedHeight: false,
+    stacked: false
   }
 )
 
@@ -145,6 +148,10 @@ onBeforeUnmount(() => {
   padding: 20px;
   background-color: var(--surface-overlay);
   backdrop-filter: blur(3px);
+}
+
+.ui-modal-backdrop--stacked {
+  z-index: calc(var(--z-modal) + 1);
 }
 
 .ui-modal {
