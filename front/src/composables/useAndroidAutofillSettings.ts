@@ -7,6 +7,8 @@ export function useAndroidAutofillSettings() {
   const state = ref<AndroidAutofillState | null>(null)
   const busy = ref(false)
   const showSettings = computed(() => state.value?.supported === true)
+  const inlineSupported = computed(() => state.value?.inlineSupported === true)
+  const inlineEnabled = computed(() => state.value?.inlineEnabled === true)
   const status = computed(() => {
     const current = state.value
     if (!current) return '未检测'
@@ -17,6 +19,24 @@ export function useAndroidAutofillSettings() {
   async function load() {
     const result = await api.getAndroidAutofillState()
     if (result.ok && result.data) state.value = result.data
+  }
+
+  async function setInlineEnabled(enabled: boolean) {
+    if (busy.value) return
+    busy.value = true
+    try {
+      const result = await api.setAndroidAutofillInlineEnabled(enabled)
+      if (!result.ok || !result.data) {
+        showFailToast(result.message || '无法更新键盘内联填充设置')
+        return
+      }
+      state.value = result.data
+      showToast(result.data.inlineEnabled ? '已开启键盘内联填充' : '已关闭键盘内联填充')
+    } catch {
+      showFailToast('无法更新键盘内联填充设置')
+    } finally {
+      busy.value = false
+    }
   }
 
   async function openSettings() {
@@ -38,5 +58,5 @@ export function useAndroidAutofillSettings() {
     }
   }
 
-  return { state, busy, showSettings, status, load, openSettings }
+  return { state, busy, showSettings, inlineSupported, inlineEnabled, status, load, openSettings, setInlineEnabled }
 }

@@ -4,6 +4,7 @@ import android.app.PendingIntent;
 import android.app.assist.AssistStructure;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.service.autofill.AutofillService;
@@ -12,6 +13,7 @@ import android.service.autofill.FillCallback;
 import android.service.autofill.FillContext;
 import android.service.autofill.FillRequest;
 import android.service.autofill.FillResponse;
+import android.service.autofill.InlinePresentation;
 import android.service.autofill.SaveCallback;
 import android.service.autofill.SaveInfo;
 import android.service.autofill.SaveRequest;
@@ -23,7 +25,11 @@ import android.view.ViewStructure;
 import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.AutofillValue;
+import android.view.inputmethod.InlineSuggestionsRequest;
 import android.widget.RemoteViews;
+import android.widget.inline.InlinePresentationSpec;
+
+import androidx.autofill.inline.v1.InlineSuggestionUi;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -87,44 +93,35 @@ public class PwdAutofillService extends AutofillService {
 
             AndroidVaultStore store = new AndroidVaultStore(this);
             JSONObject payload = store.tryUnlockWithEmptyPasswordForAutofill();
+            InlineSuggestionsRequest inlineRequest = activeInlineSuggestionsRequest(request);
             if (payload == null) {
                 if (BuildConfig.DEBUG) {
                     Log.d(TAG, "Vault locked, showing unlock suggestion");
                 }
-                callback.onSuccess(buildUnlockResponse(fields, request));
+                callback.onSuccess(buildUnlockResponse(fields, inlineRequest));
                 return;
             }
 
             boolean includeAll = fields.shouldFallbackToAllMatches();
             JSONArray matches = store.queryMatchesFromPayload(payload, target, includeAll);
-            if (matches.length() == 0) {
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "Found " + matches.length() + " matches for: " + target + ", includeAll=" + includeAll);
+            }
+            FillResponse.Builder response = new FillResponse.Builder();
+            InlineSpecAllocator inlineAllocator = new InlineSpecAllocator(inlineRequest);
+            int maxDirectInline = inlineAllocator.maxDirectSuggestions();
+            int datasetCount = addDirectDatasets(this, response, store, payload, fields, matches, inlineAllocator, maxDirectInline);
+            Dataset pickerDataset = buildPickerDataset(this, fields, target, includeAll, inlineAllocator.nextSpec());
+            if (pickerDataset != null) response.addDataset(pickerDataset);
+            if (datasetCount == 0 && pickerDataset == null) {
                 if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "No matches found for: " + target + ", includeAll=" + includeAll);
+                    Log.d(TAG, "No fillable datasets built");
                 }
                 callback.onSuccess(buildSaveOnlyResponse(fields));
                 return;
             }
 
-            if (BuildConfig.DEBUG) {
-                Log.d(TAG, "Found " + matches.length() + " matches");
-            }
-            FillResponse.Builder response = new FillResponse.Builder();
-            int datasetCount = addDirectDatasets(response, store, payload, fields, matches);
-            Dataset pickerDataset = buildPickerDataset(fields, target, includeAll);
-            if (pickerDataset != null) response.addDataset(pickerDataset);
-            if (datasetCount == 0) {
-                if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "No fillable datasets built");
-                }
-                if (pickerDataset != null) {
-                    configureSaveInfo(response, fields);
-                    callback.onSuccess(response.build());
-                }
-                else callback.onSuccess(null);
-                return;
-            }
-
-            configureFillDialog(response, fields, request);
+            configureFillDialog(this, response, fields, request);
             configureSaveInfo(response, fields);
             callback.onSuccess(response.build());
         } catch (Exception error) {
@@ -177,17 +174,16 @@ public class PwdAutofillService extends AutofillService {
         }
     }
 
-    private FillResponse buildUnlockResponse(LoginFields fields, FillRequest request) {
+    private InlineSuggestionsRequest activeInlineSuggestionsRequest(FillRequest request) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || request == null) return null;
+        if (!AutofillSettings.isInlineEnabled(this)) return null;
+        return request.getInlineSuggestionsRequest();
+    }
+
+    private FillResponse buildUnlockResponse(LoginFields fields, InlineSuggestionsRequest inlineRequest) {
         Intent intent = new Intent(this, MainActivity.class);
-        intent.addFlags(
-            Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_SINGLE_TOP
-        );
-        // Pass the request so the activity knows it's an autofill auth request
-        List<FillContext> contexts = request.getFillContexts();
-        intent.putExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, contexts.get(contexts.size() - 1).getStructure());
-        
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+
         PendingIntent pendingIntent = PendingIntent.getActivity(
             this,
             1001,
@@ -195,16 +191,29 @@ public class PwdAutofillService extends AutofillService {
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
         );
 
-        return new FillResponse.Builder()
-            .setAuthentication(fields.autofillIds(), pendingIntent.getIntentSender(), presentation(this, "点击解锁 My Password"))
-            .build();
-    }
-
-    private FillResponse buildPickerResponse(LoginFields fields, String target, boolean includeAll) {
-        Dataset dataset = buildPickerDataset(fields, target, includeAll);
-        if (dataset == null) return null;
-        FillResponse.Builder builder = new FillResponse.Builder().addDataset(dataset);
-        configureSaveInfo(builder, fields);
+        FillResponse.Builder builder = new FillResponse.Builder();
+        InlineSpecAllocator inlineAllocator = new InlineSpecAllocator(inlineRequest);
+        InlinePresentation inlinePresentation = buildInlinePresentation(
+            this,
+            inlineAllocator.nextSpec(),
+            "解锁 My Password",
+            "点击解锁以自动填充",
+            pendingIntent
+        );
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && inlinePresentation != null) {
+            builder.setAuthentication(
+                fields.autofillIds(),
+                pendingIntent.getIntentSender(),
+                presentation(this, "点击解锁 My Password"),
+                inlinePresentation
+            );
+        } else {
+            builder.setAuthentication(
+                fields.autofillIds(),
+                pendingIntent.getIntentSender(),
+                presentation(this, "点击解锁 My Password")
+            );
+        }
         return builder.build();
     }
 
@@ -215,39 +224,58 @@ public class PwdAutofillService extends AutofillService {
         return builder.build();
     }
 
-    private Dataset buildPickerDataset(LoginFields fields, String target, boolean includeAll) {
+    static Dataset buildPickerDataset(
+        Context context,
+        LoginFields fields,
+        String target,
+        boolean includeAll,
+        InlinePresentationSpec inlineSpec
+    ) {
         if (!fields.hasFillableFields()) return null;
-        Intent intent = new Intent(this, MainActivity.class);
-        intent.addFlags(
-            Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                | Intent.FLAG_ACTIVITY_SINGLE_TOP
-        );
+        Intent intent = new Intent(context, MainActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         intent.putExtra(MainActivity.EXTRA_AUTOFILL_PICKER, true);
         fields.writeToIntent(intent);
         intent.putExtra(AutofillPickerActivity.EXTRA_TARGET, target);
         intent.putExtra(AutofillPickerActivity.EXTRA_INCLUDE_ALL, includeAll);
 
         PendingIntent pendingIntent = PendingIntent.getActivity(
-            this,
+            context,
             2001,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE
         );
 
-        Dataset.Builder builder = new Dataset.Builder(presentation(this, "选择 My Password 账号"));
-        fields.setNullValues(builder);
+        RemoteViews menuPresentation = presentation(context, "选择 My Password 账号");
+        Dataset.Builder builder = new Dataset.Builder(menuPresentation);
+        InlinePresentation inlinePresentation = buildInlinePresentation(
+            context,
+            inlineSpec,
+            "选择账号",
+            "My Password",
+            pendingIntent
+        );
+        fields.setNullValues(builder, menuPresentation, inlinePresentation);
         builder.setAuthentication(pendingIntent.getIntentSender());
         return builder.build();
     }
 
-    private void configureSaveInfo(FillResponse.Builder response, LoginFields fields) {
+    static void configureSaveInfo(FillResponse.Builder response, LoginFields fields) {
         AutofillId[] ids = fields.saveIds();
         if (ids.length == 0) return;
         response.setSaveInfo(new SaveInfo.Builder(SaveInfo.SAVE_DATA_TYPE_PASSWORD, ids).build());
     }
 
-    private int addDirectDatasets(FillResponse.Builder response, AndroidVaultStore store, JSONObject payload, LoginFields fields, JSONArray matches) {
+    static int addDirectDatasets(
+        Context context,
+        FillResponse.Builder response,
+        AndroidVaultStore store,
+        JSONObject payload,
+        LoginFields fields,
+        JSONArray matches,
+        InlineSpecAllocator inlineAllocator,
+        int maxDirectInline
+    ) {
         int added = 0;
         for (int index = 0; index < matches.length(); index += 1) {
             try {
@@ -261,7 +289,10 @@ public class PwdAutofillService extends AutofillService {
                 }
 
                 JSONObject fill = store.getFillPayloadFromPayload(payload, entryId);
-                Dataset dataset = buildDataset(this, fields, match, fill, labelFor(match));
+                InlinePresentationSpec inlineSpec = (inlineAllocator != null && added < maxDirectInline)
+                    ? inlineAllocator.nextSpec()
+                    : null;
+                Dataset dataset = buildDataset(context, fields, match, fill, labelFor(match), inlineSpec);
                 if (dataset == null) {
                     if (BuildConfig.DEBUG) {
                         Log.d(TAG, "Skipping empty dataset. usernameId=" + (fields.usernameId != null)
@@ -286,13 +317,80 @@ public class PwdAutofillService extends AutofillService {
         return added;
     }
 
-    private void configureFillDialog(FillResponse.Builder response, LoginFields fields, FillRequest request) {
+    static void configureFillDialog(Context context, FillResponse.Builder response, LoginFields fields, FillRequest request) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return;
-        if ((request.getFlags() & FillRequest.FLAG_SUPPORTS_FILL_DIALOG) == 0) return;
+        if (request != null && (request.getFlags() & FillRequest.FLAG_SUPPORTS_FILL_DIALOG) == 0) return;
         AutofillId[] ids = fields.autofillIds();
         if (ids.length == 0) return;
-        response.setDialogHeader(presentation(this, "选择 My Password 账号"));
+        response.setDialogHeader(presentation(context, "选择 My Password 账号"));
         response.setFillDialogTriggerIds(ids);
+    }
+
+    static InlinePresentation buildInlinePresentation(
+        Context context,
+        InlinePresentationSpec spec,
+        String title,
+        String subtitle,
+        PendingIntent attributionIntent
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || spec == null || context == null) return null;
+        try {
+            PendingIntent attribution = attributionIntent;
+            if (attribution == null) {
+                Intent intent = new Intent(context, MainActivity.class);
+                intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                attribution = PendingIntent.getActivity(
+                    context,
+                    3001,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                );
+            }
+            InlineSuggestionUi.Content.Builder contentBuilder = InlineSuggestionUi.newContentBuilder(attribution)
+                .setTitle(title == null || title.trim().isEmpty() ? "My Password" : title.trim())
+                .setStartIcon(Icon.createWithResource(context, R.mipmap.ic_launcher));
+            if (subtitle != null && !subtitle.trim().isEmpty()) {
+                contentBuilder.setSubtitle(subtitle.trim());
+            }
+            return new InlinePresentation(contentBuilder.build().getSlice(), spec, false);
+        } catch (Throwable error) {
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "Could not build inline presentation", error);
+            }
+            return null;
+        }
+    }
+
+    static final class InlineSpecAllocator {
+        private final List<InlinePresentationSpec> specs;
+        private final int maxCount;
+        private int cursor;
+
+        InlineSpecAllocator(InlineSuggestionsRequest request) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && request != null) {
+                List<InlinePresentationSpec> list = request.getInlinePresentationSpecs();
+                this.specs = list == null ? new ArrayList<>() : list;
+                int max = request.getMaxSuggestionCount();
+                this.maxCount = max == InlineSuggestionsRequest.SUGGESTION_COUNT_UNLIMITED
+                    ? Integer.MAX_VALUE
+                    : Math.max(0, max);
+            } else {
+                this.specs = new ArrayList<>();
+                this.maxCount = 0;
+            }
+        }
+
+        int maxDirectSuggestions() {
+            if (specs.isEmpty() || maxCount <= 1) return 0;
+            return maxCount == Integer.MAX_VALUE ? Integer.MAX_VALUE : maxCount - 1;
+        }
+
+        InlinePresentationSpec nextSpec() {
+            if (specs.isEmpty() || cursor >= maxCount) return null;
+            InlinePresentationSpec spec = specs.get(Math.min(cursor, specs.size() - 1));
+            cursor += 1;
+            return spec;
+        }
     }
 
     private static JSONObject captureLogin(AssistStructure structure, LoginFields fields) throws Exception {
@@ -449,10 +547,29 @@ public class PwdAutofillService extends AutofillService {
     }
 
     static Dataset buildDataset(Context context, LoginFields fields, JSONObject match, JSONObject fill, String label) {
-        Dataset.Builder builder = new Dataset.Builder(presentation(context, label));
-        boolean hasValue = false;
+        return buildDataset(context, fields, match, fill, label, null);
+    }
+
+    static Dataset buildDataset(
+        Context context,
+        LoginFields fields,
+        JSONObject match,
+        JSONObject fill,
+        String label,
+        InlinePresentationSpec inlineSpec
+    ) {
+        RemoteViews menuPresentation = presentation(context, label);
         String username = resolveAccountValue(fill, fields.usernameKind);
         String pwd = fill.optString("password");
+        InlinePresentation inlinePresentation = buildInlinePresentation(
+            context,
+            inlineSpec,
+            match.optString("title", "My Password"),
+            username,
+            null
+        );
+        Dataset.Builder builder = new Dataset.Builder(menuPresentation);
+        boolean hasValue = false;
 
         if (BuildConfig.DEBUG) {
             Log.d(TAG, "Build dataset: usernameId=" + (fields.usernameId != null)
@@ -460,27 +577,40 @@ public class PwdAutofillService extends AutofillService {
                 + ", otpId=" + (fields.otpId != null)
                 + ", usernameKind=" + fields.usernameKind
                 + ", usernameLen=" + username.length()
-                + ", passwordLen=" + pwd.length());
+                + ", passwordLen=" + pwd.length()
+                + ", inline=" + (inlinePresentation != null));
         }
 
-        if (fields.usernameId != null) {
-            if (!username.isEmpty()) {
-                builder.setValue(fields.usernameId, AutofillValue.forText(username));
-                hasValue = true;
-            }
+        if (fields.usernameId != null && !username.isEmpty()) {
+            setDatasetFieldValue(builder, fields.usernameId, AutofillValue.forText(username), menuPresentation, inlinePresentation);
+            hasValue = true;
         }
         if (!pwd.isEmpty()) {
             for (AutofillId passwordId : fields.passwordIds()) {
-                builder.setValue(passwordId, AutofillValue.forText(pwd));
+                setDatasetFieldValue(builder, passwordId, AutofillValue.forText(pwd), menuPresentation, inlinePresentation);
                 hasValue = true;
             }
         }
         if (fields.otpId != null && !fill.optString("totp").isEmpty()) {
-            builder.setValue(fields.otpId, AutofillValue.forText(fill.optString("totp")));
+            setDatasetFieldValue(builder, fields.otpId, AutofillValue.forText(fill.optString("totp")), menuPresentation, inlinePresentation);
             hasValue = true;
         }
 
         return hasValue ? builder.build() : null;
+    }
+
+    private static void setDatasetFieldValue(
+        Dataset.Builder builder,
+        AutofillId id,
+        AutofillValue value,
+        RemoteViews presentation,
+        InlinePresentation inlinePresentation
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && inlinePresentation != null) {
+            builder.setValue(id, value, presentation, inlinePresentation);
+        } else {
+            builder.setValue(id, value);
+        }
     }
 
     static LoginFields inspectStructure(AssistStructure structure) {
@@ -653,62 +783,6 @@ public class PwdAutofillService extends AutofillService {
         return false;
     }
 
-    private static String accountFieldKind(String text, String[] hints, int inputType) {
-        if (isEmailHint(hints) || isEmailInputType(inputType)) return ACCOUNT_KIND_EMAIL;
-        if (isPhoneHint(hints) || isPhoneInputType(inputType)) return ACCOUNT_KIND_PHONE;
-        if (isSpecificUsernameHint(hints)) return ACCOUNT_KIND_USERNAME;
-
-        boolean hasEmail = containsEmail(text);
-        boolean hasPhone = containsPhone(text);
-        boolean hasUsername = containsSpecificUsername(text);
-        boolean hasChoiceText = text.contains(" or ")
-            || text.contains(" and ")
-            || text.contains("/")
-            || text.contains("|")
-            || text.contains(",")
-            || text.contains("，")
-            || text.contains("、")
-            || text.contains("或")
-            || text.contains("或者");
-
-        if (hasEmail && !hasPhone && !(hasUsername && hasChoiceText)) return ACCOUNT_KIND_EMAIL;
-        if (hasPhone && !hasEmail && !(hasUsername && hasChoiceText)) return ACCOUNT_KIND_PHONE;
-        if (hasUsername && !hasEmail && !hasPhone) return ACCOUNT_KIND_USERNAME;
-        return ACCOUNT_KIND_GENERIC;
-    }
-
-    private static boolean isEmailHint(String[] hints) {
-        if (hints == null) return false;
-        for (String h : hints) {
-            String low = h.toLowerCase(Locale.ROOT);
-            if (low.contains("email") || low.contains("mail") || low.contains("loginfmt")) return true;
-        }
-        return false;
-    }
-
-    private static boolean isPhoneHint(String[] hints) {
-        if (hints == null) return false;
-        for (String h : hints) {
-            String low = h.toLowerCase(Locale.ROOT);
-            if (low.contains("phone") || low.contains("mobile") || low.contains("tel")) return true;
-        }
-        return false;
-    }
-
-    private static boolean isSpecificUsernameHint(String[] hints) {
-        if (hints == null) return false;
-        for (String h : hints) {
-            String low = h.toLowerCase(Locale.ROOT);
-            if (low.contains("username")
-                || low.contains("userid")
-                || low.contains("user_id")
-                || low.contains("identifier")
-                || low.contains("loginid")
-                || low.contains("login_id")) return true;
-        }
-        return false;
-    }
-
     private static boolean containsUsername(String text) {
         return text.contains("user")
             || text.contains("login")
@@ -796,27 +870,6 @@ public class PwdAutofillService extends AutofillService {
             || text.contains("手机号")
             || text.contains("手机号码")
             || text.contains("手機");
-    }
-
-    private static boolean containsSpecificUsername(String text) {
-        return text.contains("username")
-            || text.contains("userid")
-            || text.contains("user-id")
-            || text.contains("user_id")
-            || text.contains("user")
-            || text.contains("identifier")
-            || text.contains("loginid")
-            || text.contains("login_id")
-            || text.contains("accountid")
-            || text.contains("account_id")
-            || text.contains("membername")
-            || text.contains("screenname")
-            || text.contains("nickname")
-            || text.contains("handle")
-            || text.contains("uid")
-            || text.contains("用户名")
-            || text.contains("用户")
-            || text.contains("使用者名稱");
     }
 
     private static boolean containsOtp(String text) {
@@ -1093,7 +1146,13 @@ public class PwdAutofillService extends AutofillService {
             return ids.toArray(new AutofillId[0]);
         }
 
-        void setNullValues(Dataset.Builder builder) {
+        void setNullValues(Dataset.Builder builder, RemoteViews presentation, InlinePresentation inlinePresentation) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && inlinePresentation != null) {
+                if (usernameId != null) builder.setValue(usernameId, null, presentation, inlinePresentation);
+                for (AutofillId id : passwordIds()) builder.setValue(id, null, presentation, inlinePresentation);
+                if (otpId != null) builder.setValue(otpId, null, presentation, inlinePresentation);
+                return;
+            }
             if (usernameId != null) builder.setValue(usernameId, (AutofillValue) null);
             for (AutofillId id : passwordIds()) builder.setValue(id, (AutofillValue) null);
             if (otpId != null) builder.setValue(otpId, (AutofillValue) null);

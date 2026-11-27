@@ -137,6 +137,31 @@ public class AutofillFieldPolicyTest {
         assertFalse(hiddenPassword.textCandidate);
     }
 
+    @Test
+    public void chineseAccountPasswordOtpAndSearchFieldsAreClassifiedProperly() {
+        AutofillFieldPolicy.Decision phone = classify("请输入手机号", null, false, false, false, true);
+        assertEquals(AutofillFieldPolicy.Role.ACCOUNT, phone.role);
+        assertEquals(AutofillFieldPolicy.ACCOUNT_KIND_PHONE, phone.accountKind);
+
+        AutofillFieldPolicy.Decision account = classify("请输入登录账号", null, false, false, false, true);
+        assertEquals(AutofillFieldPolicy.Role.ACCOUNT, account.role);
+
+        AutofillFieldPolicy.Decision pwd = classify("请输入密码", null, false, false, false, true);
+        assertEquals(AutofillFieldPolicy.Role.PASSWORD, pwd.role);
+
+        AutofillFieldPolicy.Decision confirmPwd = classify("请再次输入密码", null, true, false, false, true);
+        assertEquals(AutofillFieldPolicy.Role.CONFIRM_PASSWORD, confirmPwd.role);
+
+        AutofillFieldPolicy.Decision otp = classify("请输入短信验证码", null, false, false, false, true);
+        assertEquals(AutofillFieldPolicy.Role.OTP, otp.role);
+
+        AutofillFieldPolicy.Decision captcha = classify("请输入图形验证码", null, false, false, false, true);
+        assertEquals(AutofillFieldPolicy.Role.NONE, captcha.role);
+
+        AutofillFieldPolicy.Decision search = classify("搜索账号或内容", null, false, false, false, true);
+        assertEquals(AutofillFieldPolicy.Role.NONE, search.role);
+    }
+
     private static AutofillFieldPolicy.Decision classify(
         String text,
         String[] hints,

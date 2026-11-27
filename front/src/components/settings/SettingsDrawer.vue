@@ -594,6 +594,21 @@
                 </UiButton>
               </div>
             </div>
+
+            <div v-if="androidAutofillInlineSupported" class="setting-row">
+              <div class="setting-row__copy">
+                <strong>键盘内联填充</strong>
+                <small>在输入法顶部候选条直接显示匹配账号（Android 11+）</small>
+              </div>
+              <div class="setting-row__actions">
+                <UiSwitch
+                  :model-value="androidAutofillInlineEnabled"
+                  :loading="androidAutofillBusy"
+                  aria-label="键盘内联填充"
+                  @update:model-value="toggleAndroidAutofillInline($event)"
+                />
+              </div>
+            </div>
           </div>
 
           <div v-if="showAndroidPasskeyProviderSettings" class="settings-card">
@@ -1361,6 +1376,9 @@ const desktopTrayLabel = computed(() => {
 
 const showAndroidAutofillSettings = computed(() => Boolean(platform?.androidAutofill.showSettings.value))
 const androidAutofillEnabled = computed(() => platform?.androidAutofill.state.value?.enabled === true)
+const androidAutofillInlineSupported = computed(() => Boolean(platform?.androidAutofill.inlineSupported.value))
+const androidAutofillInlineEnabled = computed(() => Boolean(platform?.androidAutofill.inlineEnabled.value))
+const androidAutofillBusy = computed(() => Boolean(platform?.androidAutofill.busy.value))
 const androidAutofillStatus = computed(() => platform?.androidAutofill.status.value || '')
 
 const showAndroidPasskeyProviderSettings = computed(() => Boolean(platform?.androidPasskeyProvider.showSettings.value))
@@ -1579,6 +1597,10 @@ function setDesktopCloseBehavior(behavior: DesktopCloseBehavior): void {
 
 function openAndroidAutofillSettings(): void {
   void platform?.androidAutofill.openSettings()
+}
+
+function toggleAndroidAutofillInline(enabled: boolean): void {
+  void platform?.androidAutofill.setInlineEnabled(enabled)
 }
 
 function toggleAndroidPasskeyProvider(enabled: boolean): void {

@@ -32,6 +32,7 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> filePathCallback;
     private long lastBackPressedAt;
     private String systemBarsTheme = "light";
+    private boolean keepSessionOnFinish;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -138,6 +139,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        keepSessionOnFinish = false;
         setIntent(intent);
         autofillStructure = AndroidIntentCompat.getParcelableExtra(
             intent,
@@ -185,6 +187,13 @@ public class MainActivity extends Activity {
 
     public AssistStructure getAutofillStructure() {
         return autofillStructure;
+    }
+
+    public void finishForAutofillResult(Intent result) {
+        keepSessionOnFinish = true;
+        autofillStructure = null;
+        setResult(Activity.RESULT_OK, result);
+        finish();
     }
 
     public void applySystemBarsTheme(String theme) {
@@ -252,7 +261,7 @@ public class MainActivity extends Activity {
         super.onStop();
         // Stopping is also used for ordinary app switching and system Autofill flows.
         // Only clear the native session when this Activity is actually finishing.
-        if (isChangingConfigurations() || !isFinishing()) return;
+        if (isChangingConfigurations() || !isFinishing() || keepSessionOnFinish) return;
         new AndroidVaultStore(this).lock();
         if (webView != null) {
             webView.evaluateJavascript(

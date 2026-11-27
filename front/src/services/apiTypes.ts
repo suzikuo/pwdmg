@@ -80,6 +80,7 @@ export interface PasswordManagerApiAdapter {
   setDesktopTraySettings: (trayEnabled: boolean, closeBehavior: DesktopCloseBehavior) => Promise<ApiResult<DesktopTraySettings>>
   setDesktopGpuAcceleration: (enabled: boolean) => Promise<ApiResult<DesktopTraySettings>>
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
+  setAndroidAutofillInlineEnabled: (enabled: boolean) => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
   getAndroidPasskeyProviderState: () => Promise<ApiResult<AndroidPasskeyProviderState>>
   setAndroidPasskeyProviderEnabled: (enabled: boolean) => Promise<ApiResult<AndroidPasskeyProviderState>>

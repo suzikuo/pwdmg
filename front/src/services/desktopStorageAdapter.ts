@@ -28,8 +28,11 @@ export const desktopStorageAdapter: VaultStorageAdapter = {
     supported: false,
     enabled: false,
     serviceName: '',
-    settingsAvailable: false
+    settingsAvailable: false,
+    inlineSupported: false,
+    inlineEnabled: false
   }),
+  setAndroidAutofillInlineEnabled: async () => fail('ANDROID_ONLY', '键盘内联填充只能在 Android 端配置。'),
   openAndroidAutofillSettings: async () => fail('ANDROID_ONLY', '自动填充服务只能在 Android 端配置。'),
   checkAppUpdate: (manifestUrl) => call<AppUpdateCheck>('checkDesktopUpdate', manifestUrl),
   downloadAppUpdate: (manifestUrl) => call<AppUpdateDownload>('downloadDesktopUpdate', manifestUrl),

@@ -197,6 +197,8 @@ export interface AndroidAutofillState {
   enabled: boolean
   serviceName: string
   settingsAvailable: boolean
+  inlineSupported?: boolean
+  inlineEnabled?: boolean
 }
 
 export interface AndroidPasskeyProviderState {

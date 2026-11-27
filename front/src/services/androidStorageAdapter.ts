@@ -33,6 +33,7 @@ export const androidStorageAdapter: VaultStorageAdapter = {
   enablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
   disablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
   getAndroidAutofillState: () => call('getAutofillState'),
+  setAndroidAutofillInlineEnabled: (enabled) => call('setAutofillInlineEnabled', enabled),
   openAndroidAutofillSettings: () => call('openAutofillSettings'),
   getAndroidPasskeyProviderState: () => call('getPasskeyProviderState'),
   setAndroidPasskeyProviderEnabled: (enabled) => call('setPasskeyProviderEnabled', enabled),

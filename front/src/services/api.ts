@@ -100,6 +100,7 @@ export const api: PasswordManagerApiAdapter = {
     ? callDesktopApi<DesktopTraySettings>('setDesktopGpuAcceleration', enabled)
     : fail('DESKTOP_ONLY', 'GPU 硬件加速设置仅在 Windows 桌面端可用。'),
   getAndroidAutofillState: () => selectedStorage().getAndroidAutofillState(),
+  setAndroidAutofillInlineEnabled: (enabled) => selectedStorage().setAndroidAutofillInlineEnabled(enabled),
   openAndroidAutofillSettings: () => selectedStorage().openAndroidAutofillSettings(),
   getAndroidPasskeyProviderState: () => selectedStorage().getAndroidPasskeyProviderState(),
   setAndroidPasskeyProviderEnabled: (enabled) => selectedStorage().setAndroidPasskeyProviderEnabled(enabled),

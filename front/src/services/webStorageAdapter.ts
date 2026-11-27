@@ -202,6 +202,7 @@ export const webStorageAdapter: VaultStorageAdapter = {
   enablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
   disablePluginListener: async () => fail('DESKTOP_ONLY', '插件监听只能在 Windows 桌面端配置。'),
   getAndroidAutofillState: async () => ok(emptyAndroidAutofillState()),
+  setAndroidAutofillInlineEnabled: async () => fail('ANDROID_ONLY', '键盘内联填充只能在 Android 端配置。'),
   openAndroidAutofillSettings: async () => fail('ANDROID_ONLY', '自动填充服务只能在 Android 端配置。'),
   checkAppUpdate: async () => fail('NATIVE_ONLY', '应用更新只能在桌面端或 Android 端使用。'),
   downloadAppUpdate: async () => fail('NATIVE_ONLY', '应用更新只能在桌面端或 Android 端使用。'),
@@ -217,7 +218,9 @@ function emptyAndroidAutofillState() {
     supported: false,
     enabled: false,
     serviceName: '',
-    settingsAvailable: false
+    settingsAvailable: false,
+    inlineSupported: false,
+    inlineEnabled: false
   }
 }
 

@@ -195,73 +195,28 @@ public final class AndroidPasswordBridge {
             }
 
             JSONObject payload = store.getVault();
+            String target = fields.hostnameOrPackage();
             boolean includeAll = fields.shouldFallbackToAllMatches();
-            JSONArray matches = store.queryMatchesFromPayload(payload, fields.hostnameOrPackage(), includeAll);
+            JSONArray matches = store.queryMatchesFromPayload(payload, target, includeAll);
 
-            if (matches.length() > 0) {
-                FillResponse.Builder responseBuilder = new FillResponse.Builder();
-                int datasetCount = addDirectDatasets(responseBuilder, payload, fields, matches);
-                if (datasetCount == 0) {
-                    Log.d(TAG, "No direct datasets during Autofill Auth completion");
-                    return;
-                }
-                configureFillDialog(responseBuilder, fields);
-
-                Intent result = new Intent();
-                result.putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, responseBuilder.build());
-                activity.setResult(Activity.RESULT_OK, result);
-                Log.d(TAG, "Autofill result set, finishing activity");
-                activity.finish();
-            } else {
-                Log.d(TAG, "No matches found during Autofill Auth completion");
+            FillResponse.Builder responseBuilder = new FillResponse.Builder();
+            int datasetCount = PwdAutofillService.addDirectDatasets(activity, responseBuilder, store, payload, fields, matches, null, 0);
+            Dataset pickerDataset = PwdAutofillService.buildPickerDataset(activity, fields, target, includeAll, null);
+            if (pickerDataset != null) responseBuilder.addDataset(pickerDataset);
+            if (datasetCount == 0 && pickerDataset == null) {
+                Log.d(TAG, "No fillable datasets during Autofill Auth completion");
+                return;
             }
+            PwdAutofillService.configureFillDialog(activity, responseBuilder, fields, null);
+            PwdAutofillService.configureSaveInfo(responseBuilder, fields);
+
+            Intent result = new Intent();
+            result.putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, responseBuilder.build());
+            Log.d(TAG, "Autofill result set, finishing activity");
+            activity.runOnUiThread(() -> ((MainActivity) activity).finishForAutofillResult(result));
         } catch (Exception e) {
             Log.e(TAG, "Error handling Autofill Auth", e);
         }
-    }
-
-    private Dataset buildDataset(PwdAutofillService.LoginFields fields, JSONObject match, JSONObject fill) {
-        return PwdAutofillService.buildDataset(activity, fields, match, fill, PwdAutofillService.labelFor(match));
-    }
-
-    private int addDirectDatasets(FillResponse.Builder response, JSONObject payload, PwdAutofillService.LoginFields fields, JSONArray matches) {
-        int added = 0;
-        for (int index = 0; index < matches.length(); index += 1) {
-            try {
-                JSONObject match = matches.getJSONObject(index);
-                String entryId = match.optString("id");
-                if (entryId.isEmpty()) {
-                    Log.d(TAG, "Skipping auth match without id");
-                    continue;
-                }
-
-                JSONObject fill = store.getFillPayloadFromPayload(payload, entryId);
-                Dataset dataset = buildDataset(fields, match, fill);
-                if (dataset == null) {
-                    Log.d(TAG, "Skipping auth empty dataset. usernameId=" + (fields.usernameId != null)
-                        + ", passwordId=" + (fields.passwordId != null)
-                        + ", hasUsername=" + !fill.optString("username").isEmpty()
-                        + ", hasPhone=" + !fill.optString("phone").isEmpty()
-                        + ", hasPassword=" + !fill.optString("password").isEmpty());
-                    continue;
-                }
-
-                response.addDataset(dataset);
-                added += 1;
-            } catch (Exception error) {
-                Log.w(TAG, "Could not build auth dataset for match " + index, error);
-            }
-        }
-        Log.d(TAG, "Added " + added + " direct auth datasets");
-        return added;
-    }
-
-    private void configureFillDialog(FillResponse.Builder response, PwdAutofillService.LoginFields fields) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return;
-        AutofillId[] ids = fields.autofillIds();
-        if (ids.length == 0) return;
-        response.setDialogHeader(PwdAutofillService.presentation(activity, "选择 My Password 账号"));
-        response.setFillDialogTriggerIds(ids);
     }
 
     @JavascriptInterface
@@ -383,8 +338,14 @@ public final class AndroidPasswordBridge {
 
             Intent result = new Intent();
             result.putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, dataset);
-            activity.setResult(Activity.RESULT_OK, result);
-            activity.runOnUiThread(activity::finish);
+            activity.runOnUiThread(() -> {
+                if (activity instanceof MainActivity) {
+                    ((MainActivity) activity).finishForAutofillResult(result);
+                } else {
+                    activity.setResult(Activity.RESULT_OK, result);
+                    activity.finish();
+                }
+            });
             return new JSONObject().put("filled", true);
         });
     }
@@ -397,6 +358,14 @@ public final class AndroidPasswordBridge {
     @JavascriptInterface
     public String getAutofillState() {
         return result(this::autofillState);
+    }
+
+    @JavascriptInterface
+    public String setAutofillInlineEnabled(boolean enabled) {
+        return result(() -> {
+            AutofillSettings.setInlineEnabled(activity, enabled);
+            return autofillState();
+        });
     }
 
     @JavascriptInterface
@@ -537,17 +506,7 @@ public final class AndroidPasswordBridge {
     }
 
     private JSONObject autofillState() throws Exception {
-        boolean supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O;
-        boolean enabled = false;
-        if (supported) {
-            AutofillManager manager = activity.getSystemService(AutofillManager.class);
-            enabled = manager != null && manager.hasEnabledAutofillServices();
-        }
-        return new JSONObject()
-            .put("supported", supported)
-            .put("enabled", enabled)
-            .put("serviceName", new ComponentName(activity, PwdAutofillService.class).flattenToString())
-            .put("settingsAvailable", supported);
+        return AutofillSettings.state(activity);
     }
 
     private JSONObject startDocumentExportTask(

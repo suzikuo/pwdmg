@@ -212,6 +212,10 @@ final class AutofillFieldPolicy {
             || compact.contains("repeatpassword")
             || compact.contains("retypepassword")
             || compact.contains("verifypassword")
+            || compact.contains("确认密码")
+            || compact.contains("確認密碼")
+            || compact.contains("再次输入密码")
+            || compact.contains("重复密码")
             || ((containsWord(evidence, "confirm")
                 || containsWord(evidence, "repeat")
                 || containsWord(evidence, "retype"))
@@ -224,14 +228,23 @@ final class AutofillFieldPolicy {
             || compact.contains("createpassword")
             || compact.contains("choosepassword")
             || compact.contains("setpassword")
-            || compact.contains("resetpassword");
+            || compact.contains("resetpassword")
+            || compact.contains("新密码")
+            || compact.contains("新密碼")
+            || compact.contains("设置密码")
+            || compact.contains("创建密码")
+            || compact.contains("重置密码");
     }
 
     private static boolean isCurrentPassword(String evidence, String compact, String[] hints) {
         if (hasCompactHint(hints, "currentpassword")) return true;
         return compact.contains("currentpassword")
             || compact.contains("oldpassword")
-            || compact.contains("existingpassword");
+            || compact.contains("existingpassword")
+            || compact.contains("当前密码")
+            || compact.contains("原密码")
+            || compact.contains("旧密码")
+            || compact.contains("舊密碼");
     }
 
     private static boolean isAccountHint(String[] hints) {
@@ -330,6 +343,10 @@ final class AutofillFieldPolicy {
             || compact.contains("identifier")
             || compact.contains("membername")
             || compact.contains("screenname")
+            || compact.contains("账号")
+            || compact.contains("账户")
+            || compact.contains("帳號")
+            || compact.contains("登录名")
             || containsWord(evidence, "uid");
     }
 
@@ -338,12 +355,19 @@ final class AutofillFieldPolicy {
             || compact.contains("userid")
             || compact.contains("loginid")
             || compact.contains("userhandle")
+            || compact.contains("用户名")
+            || compact.contains("使用者名称")
+            || compact.contains("使用者名稱")
             || containsWord(evidence, "user");
     }
 
     private static boolean containsEmail(String evidence, String compact) {
         return compact.contains("email")
             || compact.contains("mailaddress")
+            || compact.contains("邮箱")
+            || compact.contains("郵箱")
+            || compact.contains("电子邮件")
+            || compact.contains("電子郵件")
             || containsWord(evidence, "mail");
     }
 
@@ -352,6 +376,10 @@ final class AutofillFieldPolicy {
             || compact.contains("mobile")
             || compact.contains("telephone")
             || compact.contains("msisdn")
+            || compact.contains("手机")
+            || compact.contains("手机号")
+            || compact.contains("手机号码")
+            || compact.contains("手機")
             || containsWord(evidence, "tel");
     }
 
@@ -360,6 +388,9 @@ final class AutofillFieldPolicy {
             || compact.contains("passwd")
             || compact.contains("passphrase")
             || compact.contains("passcode")
+            || compact.contains("密码")
+            || compact.contains("密碼")
+            || compact.contains("口令")
             || containsWord(evidence, "pwd")
             || containsWord(evidence, "psw")
             || containsWord(evidence, "pass");
@@ -374,6 +405,11 @@ final class AutofillFieldPolicy {
             || compact.contains("smscode")
             || compact.contains("2facode")
             || compact.contains("mfacode")
+            || compact.contains("验证码")
+            || compact.contains("驗證碼")
+            || compact.contains("校验码")
+            || compact.contains("动态码")
+            || compact.contains("安全码")
             || (containsWord(evidence, "code")
                 && (containsWord(evidence, "verification")
                     || containsWord(evidence, "security")
@@ -387,7 +423,12 @@ final class AutofillFieldPolicy {
             || compact.contains("verificationcode")
             || compact.contains("smscode")
             || compact.contains("2facode")
-            || compact.contains("mfacode");
+            || compact.contains("mfacode")
+            || compact.contains("验证码")
+            || compact.contains("驗證碼")
+            || compact.contains("校验码")
+            || compact.contains("动态码")
+            || compact.contains("安全码");
     }
 
     private static boolean containsLoginIdentifier(String evidence, String compact) {
@@ -395,11 +436,15 @@ final class AutofillFieldPolicy {
             || compact.contains("loginname")
             || compact.contains("accountid")
             || compact.contains("membername")
-            || compact.contains("identifier");
+            || compact.contains("identifier")
+            || compact.contains("账号")
+            || compact.contains("账户")
+            || compact.contains("帳號")
+            || compact.contains("登录名");
     }
 
     private static boolean containsSecret(String evidence, String compact) {
-        return compact.contains("secret") || containsWord(evidence, "key");
+        return compact.contains("secret") || compact.contains("口令") || containsWord(evidence, "key");
     }
 
     private static boolean containsPin(String evidence, String compact) {
@@ -407,12 +452,18 @@ final class AutofillFieldPolicy {
     }
 
     private static boolean containsCaptcha(String evidence, String compact) {
-        return compact.contains("captcha") || compact.contains("recaptcha");
+        return compact.contains("captcha")
+            || compact.contains("recaptcha")
+            || compact.contains("图形验证码")
+            || compact.contains("图片验证码");
     }
 
     private static boolean containsSearch(String evidence, String compact) {
         return compact.contains("search")
             || compact.contains("query")
+            || compact.contains("搜索")
+            || compact.contains("查询")
+            || compact.contains("查找")
             || containsWord(evidence, "find");
     }
 
@@ -426,7 +477,7 @@ final class AutofillFieldPolicy {
 
     private static String normalize(String value) {
         if (value == null) return "";
-        return value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", " ").trim();
+        return value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\u4e00-\\u9fff]+", " ").trim();
     }
 
     private static String compact(String value) {

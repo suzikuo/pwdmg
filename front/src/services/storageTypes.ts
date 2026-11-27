@@ -56,6 +56,7 @@ export interface PluginListenerBridge {
 
 export interface AndroidPlatformBridge {
   getAndroidAutofillState: () => Promise<ApiResult<AndroidAutofillState>>
+  setAndroidAutofillInlineEnabled: (enabled: boolean) => Promise<ApiResult<AndroidAutofillState>>
   openAndroidAutofillSettings: () => Promise<ApiResult<AndroidAutofillState>>
   getAndroidPasskeyProviderState: () => Promise<ApiResult<AndroidPasskeyProviderState>>
   setAndroidPasskeyProviderEnabled: (enabled: boolean) => Promise<ApiResult<AndroidPasskeyProviderState>>
